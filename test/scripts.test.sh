@@ -74,7 +74,14 @@ R=$(mktemp -d); for i in $(seq 1 12); do state ensure "$R/a/b/c" & done; wait; [
 # The install marker is JSON, so a path with a space survives.
 M=$(mktemp -d); mkdir -p "$M/my bin"; printf 'x' > "$M/my bin/cloudflared"; d=$(sha256sum "$M/my bin/cloudflared" | cut -d' ' -f1)
 jq -nc --arg p "$M/my bin/cloudflared" --arg s "$d" '{path:$p, sha256:$s}' | state write "$M/installed-cloudflared"
-PORTAL_METRICS_DIR=$M PORTAL_STATE_DIR=$M/rt "$S/uninstall.sh" --dry 2>/dev/null | grep -qF "would: state_remove $M/my bin cloudflared" && ok "uninstall finds a marked binary in a path with a space" || bad "uninstall lost the marked binary"
+plan=$(PORTAL_METRICS_DIR=$M PORTAL_STATE_DIR=$M/rt "$S/uninstall.sh" --dry 2>&1)
+grep -qF "would: state_remove $M/my bin cloudflared" <<<"$plan" && ok "uninstall finds a marked binary in a path with a space" || bad "uninstall lost the marked binary: $plan"
+# State roots pointed at a shared directory lose only Portal's own entries.
+mkdir -p "$M/shared/metrics" "$M/rt2"; : > "$M/shared/thesis.txt"; : > "$M/shared/trusted-stores"; : > "$M/shared/metrics/3000.jsonl"; : > "$M/rt2/cloudflared-1.url"; : > "$M/rt2/notes.txt"
+plan=$(PORTAL_METRICS_DIR=$M/shared PORTAL_STATE_DIR=$M/rt2 "$S/uninstall.sh" --dry 2>/dev/null)
+grep -q 'rm -rf' <<<"$plan" && bad "uninstall would remove a state root wholesale" || ok "uninstall never removes a state root wholesale"
+is "uninstall removes Portal's entries by name" "$(grep -c -E "would: state_remove $M/(shared trusted-stores|shared/metrics 3000.jsonl|rt2 cloudflared-1.url)$" <<<"$plan")" "3"
+grep -qE 'thesis|notes' <<<"$plan" && bad "uninstall would touch files that are not Portal's" || ok "and leaves other files alone"
 rm -rf "$M"
 
 # stop-own ends only shares with a state file of their own, including one
@@ -123,6 +130,13 @@ mkdir -p "$T/bin"; printf '#!/bin/sh\n' > "$T/bin/fakeprov"; chmod 777 "$T/bin/f
 PATH="$T/bin:$PATH" resolve_bin fakeprov >/dev/null && bad "resolve_bin accepted a world-writable executable" || ok "resolve_bin rejects a world-writable executable"
 chmod 755 "$T/bin/fakeprov"; is "resolve_bin returns the absolute path of a safe one" "$(PATH="$T/bin:$PATH" resolve_bin fakeprov)" "$T/bin/fakeprov"
 resolve_bin definitely-not-a-command-xyz >/dev/null && bad "resolve_bin found a ghost" || ok "resolve_bin fails for a missing command"
+# Every directory on the way must be root's or ours and swappable by nobody
+# else: a world-writable ancestor fails, a sticky one (like /tmp) does not.
+mkdir -p "$T/open/bin" "$T/stuck/bin"; cp "$T/bin/fakeprov" "$T/open/bin/"; cp "$T/bin/fakeprov" "$T/stuck/bin/"
+chmod 777 "$T/open"; chmod 1777 "$T/stuck"
+PATH="$T/open/bin:$PATH" resolve_bin fakeprov >/dev/null && bad "resolve_bin accepted a world-writable ancestor" || ok "resolve_bin rejects a world-writable ancestor"
+is "resolve_bin accepts a sticky ancestor" "$(PATH="$T/stuck/bin:$PATH" resolve_bin fakeprov)" "$T/stuck/bin/fakeprov"
+state launch "$STATE_DIR" open.log -- "$T/open/bin/fakeprov" >/dev/null 2>&1 && bad "launch ran a binary under a world-writable ancestor" || ok "launch refuses a binary under a world-writable ancestor"
 
 # launch: a session of its own, a private log, pid bound to start time.
 out=$(state launch "$STATE_DIR" launch-test.log -- /usr/bin/sleep 20); lpid=${out%% *}; lstart=${out#* }
@@ -131,14 +145,52 @@ owned_pid "$lpid" sleep "$lstart" && ok "launch reports a pid whose start time m
 is "the launch log is private" "$(stat -c %a "$STATE_DIR/launch-test.log")" "600"
 kill "$lpid" 2>/dev/null
 is "cmd_stop rejects an unknown provider" "$(cmd_stop nope 1 | jq -r .error)" "unknown provider"
+# A stub provider: an ELF copy (so the process carries the provider's name)
+# whose URL and argv the sourced functions supply. Nothing touches the network.
+mkdir -p "$T/prov"; cp /usr/bin/sleep "$T/prov/cloudflared"
+stub_env() {   # run a snippet with the stub as cloudflared and no DNS gate
+  PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$1" bash -c 'source "'"$S"'/tunnels.sh"
+    cloudflared_argv() { echo 300; }; cloudflared_url_from_log() { echo https://stub-one-two.trycloudflare.com; }
+    dns_gate() { return 0; }; portless_state_load; '"$2"
+}
+# A tunnel whose pidfile cannot be written is stopped again, not left public with no record.
+R1="$T/rt1"; mkdir -p "$R1/cloudflared-4449.pid"
+is "start reports a pidfile it could not write" "$(stub_env "$R1" 'cmd_start cloudflared 4449' | jq -r .error)" "could not record the cloudflared process; it was stopped again"
+sleep 0.3; ps -eo comm,args | grep -q '^cloudflared *.*300$' && bad "the unrecorded tunnel is still running" || ok "and the unrecorded tunnel was stopped"
+rmdir "$R1/cloudflared-4449.pid"
+is "the same start succeeds once the pidfile can be written" "$(stub_env "$R1" 'cmd_start cloudflared 4449' | jq -r .url)" "https://stub-one-two.trycloudflare.com"
+# A status snapshot taken before a replacement started does not clear the replacement.
+snap=$(state dump "$R1" 8192 4096); old=$(cat "$R1/cloudflared-4449.pid")
+stub_env "$R1" 'cmd_stop cloudflared 4449 >/dev/null'
+stub_env "$R1" 'cmd_start cloudflared 4449 >/dev/null'
+[[ $(cat "$R1/cloudflared-4449.pid") != "$old" ]] && ok "a replacement wrote its own pidfile" || bad "no replacement pidfile"
+SNAP="$snap" stub_env "$R1" 'state() { if [[ $1 == dump && $2 == "$STATE_DIR" ]]; then printf "%s" "$SNAP"; else /usr/bin/python3 -I -S "$STATEDIR_PY" "$@"; fi; }; cmd_status >/dev/null'
+is "status with a stale snapshot leaves the replacement's records" "$(ls "$R1" | grep -c '^cloudflared-4449\.')" "4"
+# A share whose reach record is missing still carries its pid to the check.
+rm -f "$R1/cloudflared-4449.reach"
+stub_env "$R1" 'cmd_status >/dev/null'
+is "status keeps a live share with no reach record" "$(ls "$R1" | grep -c -E '^cloudflared-4449\.(pid|url)$')" "2"
+# stop-own refuses to guess when the state cannot be listed.
+(cd "$R1" && touch $(seq -f 'crowd-%g' 1 4100))
+is "stop-own fails closed when the state cannot be listed" "$(PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -r .error)" "could not list Portal's state; nothing was stopped"
+rm -f "$R1"/crowd-*
+is "stop-own stops what it can list" "$(PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -c .ok)" "true"
+sleep 0.3; ps -eo comm,args | grep -q '^cloudflared *.*300$' && bad "stop-own left the tunnel running" || ok "and the tunnel is gone"
 is "cmd_stop rejects a bad port" "$(cmd_stop cloudflared x | jq -r .error)" "invalid port"
 
 # ---- portless-setup.sh untrust: a store that keeps the CA stays on record ----
 if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then
   U=$(mktemp -d); mkdir -p "$U/nss"
   certutil -d "sql:$U/nss" -N --empty-password >/dev/null 2>&1
-  certutil -d "sql:$U/nss" -A -t "C,," -n "portless Local CA" -i "$HOME/.portless/ca.pem" >/dev/null 2>&1
-  printf '%s\n' "$U/nss" | state append "$U/trusted-stores" 64
+  # The import itself, through the setup script's own function, and its record.
+  PORTAL_METRICS_DIR=$U PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$U"'/nss"' && ok "trust_store imports the CA" || bad "trust_store failed"
+  certutil -d "sql:$U/nss" -L -n "portless Local CA" >/dev/null 2>&1 && ok "and the CA is in the store" || bad "the CA is not in the store"
+  is "and the store is on record" "$(cat "$U/trusted-stores")" "$U/nss"
+  # A record that exists but cannot be read is not treated as empty.
+  cp "$U/trusted-stores" "$U/keep"; head -c 70000 /dev/zero | tr '\0' x > "$U/trusted-stores"
+  is "untrust refuses an unreadable record" "$(PORTAL_METRICS_DIR=$U "$S/portless-setup.sh" untrust | jq -c .ok)" "false"
+  [[ -e $U/trusted-stores ]] && ok "and keeps it" || bad "and deleted it"
+  mv "$U/keep" "$U/trusted-stores"
   chmod 500 "$U/nss"
   is "untrust reports a store it could not clear" "$(PORTAL_METRICS_DIR=$U "$S/portless-setup.sh" untrust | jq -c '[.ok, (.remaining|length)]')" "[false,1]"
   chmod 700 "$U/nss"

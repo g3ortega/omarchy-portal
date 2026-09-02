@@ -52,9 +52,19 @@ if [[ -n $path && -f $path && $(sha256sum -- "$path" | cut -d' ' -f1) == "$sum" 
 fi
 
 echo "Portal state"
-for d in "$PORTAL_RUNTIME_DIR" "$PORTAL_STATE_HOME"; do
-  [[ -d $d && ! -L $d && -O $d ]] && run rm -rf -- "$d"   # verify without creating
-done
+# Only entries Portal writes, by name, then the directory if that emptied it:
+# a state root pointed at a directory holding other things keeps them.
+remove_known() {  # <dir> <name regex>
+  [[ -d $1 && ! -L $1 && -O $1 ]] || return 0
+  local names=()
+  mapfile -t names < <(find "$1" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | grep -E -- "$2")
+  (( ${#names[@]} )) && run state_remove "$1" "${names[@]}"
+  run rmdir --ignore-fail-on-non-empty -- "$1"
+  (( DRY )) || [[ ! -d $1 ]] || echo "left in place: $1 holds files that are not Portal's"
+}
+remove_known "$PORTAL_RUNTIME_DIR" '^[a-z]+-[0-9]+\.(pid|url|reach|dns|idle|log|name)$|^\..*\.tmp$'
+remove_known "$PORTAL_STATE_HOME/metrics" '^[0-9]+\.jsonl$|^\..*\.tmp$'
+remove_known "$PORTAL_STATE_HOME" '^(installed-cloudflared|trusted-stores|watched\.json)$|^\..*\.tmp$'
 
 echo
 echo "left in place: the portless package (npm uninstall -g portless), ~/.portless,"

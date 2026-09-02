@@ -20,7 +20,10 @@ and truncation go through the validated descriptor, never the path again.
   remove   <dir> <name>...                unlink leaves (never directories)
   truncate <path> <maxbytes>              empty the file once it is past the cap
   launch   <dir> <logname> -- <argv...>   daemonize argv with the log as stdio;
-                                          prints "pid starttime"
+                                          prints "pid starttime". The executable
+                                          is walked to by descriptor (every
+                                          directory root's or ours, swappable by
+                                          nobody else) and executed by descriptor.
 
 Exit status 0 on success, 1 when a path is refused, 2 on usage; every refusal
 fails closed with nothing read or written. Runs under the caller's timeout.
@@ -144,6 +147,45 @@ def atomic_write(dirfd, name, data, mode=0o600):
         except OSError:
             pass
         raise
+
+
+def open_exe(path):
+    """Walk to an executable and bind it: every directory on the way is root's
+    or ours and nobody else can rename its entries (not group/other writable,
+    or sticky); the file is regular, root's or ours, not writable by others,
+    executable. The descriptor is what gets executed."""
+    path = os.path.abspath(path)
+    parts = [c for c in path.split("/") if c]
+    if not parts:
+        raise Refused("not an executable path")
+
+    def swappable(st):
+        return st.st_uid not in (0, UID) or ((st.st_mode & 0o022) and not (st.st_mode & stat.S_ISVTX))
+
+    fd = os.open("/", DIR_FLAGS)
+    try:
+        for comp in parts[:-1]:
+            if swappable(os.fstat(fd)):
+                raise Refused(f"refused {path}: a directory on the way is not root's or yours alone")
+            try:
+                nfd = os.open(comp, DIR_FLAGS, dir_fd=fd)
+            except OSError as e:
+                raise Refused(f"refused {path}: {e.strerror} at {comp}")
+            os.close(fd)
+            fd = nfd
+        if swappable(os.fstat(fd)):
+            raise Refused(f"refused {path}: its directory is not root's or yours alone")
+        try:
+            efd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        except OSError as e:
+            raise Refused(f"refused {path}: {e.strerror}")
+    finally:
+        os.close(fd)
+    st = os.fstat(efd)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid not in (0, UID) or (st.st_mode & 0o022) or not (st.st_mode & 0o111):
+        os.close(efd)
+        raise Refused(f"refused {path}: not a plain executable of root's or yours")
+    return efd
 
 
 def cmd_ensure(a):
@@ -314,6 +356,7 @@ def cmd_launch(a):
     d, logname, argv = a[0], a[1], a[3:]
     if not argv or not os.path.isabs(argv[0]):
         raise Refused("launch needs an absolute executable path")
+    exefd = open_exe(argv[0])
     dirfd = open_dir(d, create=True)
     try:
         # A fresh, exclusive, private log; then a session of its own with that log as stdio.
@@ -335,13 +378,15 @@ def cmd_launch(a):
                 os.dup2(logfd, 2)
                 os.write(w, b"1")
                 os.close(w)
-                os.execv(argv[0], argv)
+                os.set_inheritable(exefd, True)   # a #! script is handed to its interpreter as /dev/fd/N
+                os.execve(exefd, argv, os.environ)      # the descriptor, not the path
             finally:
                 os._exit(127)
         os.close(w)
         os.read(r, 1)     # the child has its session before we report it
         os.close(r)
         os.close(logfd)
+        os.close(exefd)
         with open(f"/proc/{pid}/stat", "rb") as f:
             fields = f.read().rsplit(b")", 1)[1].split()
         sys.stdout.write(f"{pid} {fields[19].decode()}")

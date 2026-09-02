@@ -77,9 +77,12 @@ proc_start() {  # <pid>: the start-time field of /proc/<pid>/stat
   local s; { s=$(< "/proc/$1/stat"); } 2>/dev/null || return 1
   s=${s##*) }; set -- $s; printf '%s' "${20}"
 }
-owned_pid() {  # <pid> <comm> [start]
-  local c
-  [[ $1 =~ ^[1-9][0-9]*$ ]] && { read -r c < "/proc/$1/comm"; } 2>/dev/null && [[ $c == "$2" ]] || return 1
+owned_pid() {  # <pid> <name> [start]: the process is that program, and the same incarnation
+  # The launcher executes by descriptor; kernels before 6.14 then name the
+  # process after the descriptor number, so the executable itself also counts.
+  local c e
+  [[ $1 =~ ^[1-9][0-9]*$ ]] && { read -r c < "/proc/$1/comm"; } 2>/dev/null || return 1
+  [[ $c == "$2" ]] || { e=$(readlink "/proc/$1/exe" 2>/dev/null); [[ ${e##*/} == "$2" ]]; } || return 1
   [[ -z ${3:-} || $(proc_start "$1") == "$3" ]]
 }
 
@@ -283,6 +286,10 @@ reachfile() { printf '%s/%s-%s.reach' "$STATE_DIR" "$1" "$2"; }
 dnsfile()   { printf '%s/%s-%s.dns'   "$STATE_DIR" "$1" "$2"; }   # exists while DNS is pending
 idlefile()  { printf '%s/%s-%s.idle'  "$STATE_DIR" "$1" "$2"; }   # since when the target has been gone
 clear_share() { local n=(); for s in "${SHARE_FILES[@]}"; do n+=("$1-$2.$s"); done; state_remove "$STATE_DIR" "${n[@]}"; }
+stop_line() {   # <"pid start"> <comm>: end the whole session the launcher created, not just its leader
+  local pid; read -r pid _ <<<"$1"
+  alive_line "$1" "$2" && { kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; }
+}
 
 alive_line() {  # <"pid start"> <comm>
   local pid start; read -r pid start <<<"$1"
@@ -384,7 +391,8 @@ cmd_start() {
   clear_share "$provider" "$port"
   local argv=(); mapfile -t argv < <("${provider}_argv" "$port")
   local pidline; pidline=$(state launch "$STATE_DIR" "${lf##*/}" -- "$bin" "${argv[@]}") || die "could not start $provider"
-  write_own "$pf" "$pidline"
+  # A tunnel nobody has a record of would stay public through a removal.
+  write_own "$pf" "$pidline" || { stop_line "$pidline" "$provider"; die "could not record the $provider process; it was stopped again"; }
 
   # Poll the log for the public URL rather than blocking on the process.
   local url="" i
@@ -413,7 +421,7 @@ cmd_start() {
 }
 
 cmd_stop() {
-  local provider="$1" port="$2" pid
+  local provider="$1" port="$2"
   known_provider "$provider" || die "unknown provider"
   valid_port "$port" || die "invalid port"
   local pidline bin
@@ -427,9 +435,7 @@ cmd_stop() {
     fi
     state_remove "$STATE_DIR" "portless-$port.name"
   elif pidline=$(read_own "$(pidfile "$provider" "$port")" 64) && [[ -n $pidline ]]; then
-    read -r pid _ <<<"$pidline"
-    # Kill the whole session the launcher created, not just the leader.
-    alive_line "$pidline" "$provider" && { kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; }
+    stop_line "$pidline" "$provider"
   elif declare -f "${provider}_stop_adopted" >/dev/null; then
     # Not ours to begin with: the provider knows how to end its own.
     "${provider}_stop_adopted" "$port"
@@ -529,8 +535,10 @@ cmd_status() {
   portless_state_load
   local dump tsv="" listed=" " now; printf -v now '%(%s)T' -1
   dump=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null || echo '{"files":{}}')
+  # Fields are joined with a unit separator: a tab is IFS whitespace, so an
+  # empty field between tabs would vanish and shift the ones after it.
   local provider port url reach pidline dns idle base pid
-  while IFS=$'\t' read -r provider port url reach pidline dns idle; do
+  while IFS=$'\x1f' read -r provider port url reach pidline dns idle; do
     valid_port "$port" && valid_url "$url" && known_provider "$provider" || continue
     base="$provider-$port"
     # portless routes have no process of their own, but a route removed with
@@ -538,7 +546,11 @@ cmd_status() {
     if [[ $provider == portless ]]; then
       [[ -n $(portless_route_name "$port") ]] || { state_remove "$STATE_DIR" "$base".{url,name,reach}; continue; }
     else
-      alive_line "$pidline" "$provider" || { clear_share "$provider" "$port"; continue; }
+      alive_line "$pidline" "$provider" || {
+        # Only this snapshot's records go: a start since then has written new ones.
+        [[ $(read_own "$(pidfile "$provider" "$port")" 64) == "$pidline" ]] && clear_share "$provider" "$port"
+        continue
+      }
       # A log is read only while the URL is being minted; afterwards it only
       # grows. stat first: truncate is a helper process.
       (( $(stat -c %s -- "$(logfile "$provider" "$port")" 2>/dev/null || echo 0) > LOG_CAP )) && state_truncate "$(logfile "$provider" "$port")" "$LOG_CAP"
@@ -572,7 +584,7 @@ cmd_status() {
        (($f[$b + ".pid"] // "") | line1),
        (if $f[$b + ".dns"] != null then "pending" else "" end),
        (($f[$b + ".idle"] // "") | line1)]
-    | @tsv' <<<"$dump")
+    | join("\u001f")' <<<"$dump")
 
   local row name aport aurl areach
   for row in "${PROVIDERS[@]}"; do
@@ -607,12 +619,13 @@ cmd_stop_own() {
   # still minting its URL). Adopted names and tunnels belong to whoever
   # started them and have neither. A stop that fails keeps its records and
   # is reported, so a caller can retry.
-  local provider port out failed=()
+  local provider port out rows failed=()
+  rows=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null) || die "could not list Portal's state; nothing was stopped"
   while IFS=$'\t' read -r provider port; do
     out=$(cmd_stop "$provider" "$port")
     jq -e .ok <<<"$out" >/dev/null 2>&1 || failed+=("$provider:$port $(jq -r .error <<<"$out")")
-  done < <(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null | jq -r '.files | keys[]
-    | select(test("^[a-z]+-[0-9]+\\.(url|pid)$")) | sub("\\.(url|pid)$"; "")' | sort -u | tr '-' '\t')
+  done < <(jq -r '.files | keys[]
+    | select(test("^[a-z]+-[0-9]+\\.(url|pid)$")) | sub("\\.(url|pid)$"; "")' <<<"$rows" | sort -u | tr '-' '\t')
   if (( ${#failed[@]} )); then jq -nc --args '{ok:false, error:("could not stop: " + ($ARGS.positional | join("; ")))}' "${failed[@]}"
   else echo '{"ok":true}'; fi
 }

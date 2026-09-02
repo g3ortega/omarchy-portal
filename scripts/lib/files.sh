@@ -24,19 +24,29 @@ PORTAL_STATE_HOME="${PORTAL_METRICS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/p
 valid_port() { [[ ${1:-} =~ ^[0-9]+$ ]] && (( $1 > 0 && $1 < 65536 )); }
 
 # The executable a provider action runs: resolved to an absolute path that is
-# a regular file owned by root or the user, in a directory owned by root or
-# the user, neither writable by group or others. Never a bare name through
-# PATH, and never from a directory someone else could swap entries in.
+# a regular file owned by root or the user and not writable by anyone else,
+# with every directory from / down owned by root or the user and such that
+# nobody else can swap an entry in it (not group/other writable, or sticky).
+# Never a bare name through PATH. The launcher walks the same chain again by
+# descriptor and executes the file it validated, so nothing can be swapped in
+# between.
 resolve_bin() {  # <name>
-  local p
+  local p d
   p=$(command -v -- "$1" 2>/dev/null) || return 1
   p=$(readlink -f -- "$p" 2>/dev/null) || return 1
   [[ -f $p && -x $p ]] || return 1
-  _trusted_owner "$p" && _trusted_owner "${p%/*}" || return 1
+  _trusted_owner "$p" || return 1
+  d=${p%/*}
+  while :; do _trusted_dir "${d:-/}" || return 1; [[ -n $d ]] || break; d=${d%/*}; done
   printf '%s' "$p"
 }
 _trusted_owner() {  # <path>: owned by root or us, not group/other writable
   local o m
   read -r o m < <(stat -c '%u %a' -- "$1" 2>/dev/null) || return 1
-  [[ $o == 0 || $o == "$(id -u)" ]] && (( (8#$m & 8#022) == 0 ))
+  [[ $o == 0 || $o == "$UID" ]] && (( (8#$m & 8#022) == 0 ))
+}
+_trusted_dir() {  # <dir>: owned by root or us; entries swappable by nobody else
+  local o m
+  read -r o m < <(stat -c '%u %a' -- "$1" 2>/dev/null) || return 1
+  [[ $o == 0 || $o == "$UID" ]] && { (( (8#$m & 8#022) == 0 )) || (( (8#$m & 8#1000) != 0 )); }
 }

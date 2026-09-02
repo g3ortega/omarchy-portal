@@ -40,12 +40,21 @@ CA_PEM=""
 ca_load() { CA_PEM=$(cat_own "$CA" 16384); }
 ca_load
 # Stores Portal imported into, so removal touches nothing it did not add.
+# Written and read under the same cap, so a record that could be made can be
+# read back.
 TRUSTED="$PORTAL_STATE_HOME/trusted-stores"
+TRUSTED_CAP=65536
 # Import into one store and record it; a trust that could not be recorded is
-# undone at once, since removal would never find it.
+# undone at once, since removal would never find it. certutil sizes its input
+# with stat, so the verified bytes go through a private file, not a pipe.
 trust_store() {  # <nss dir>
-  certutil -d "sql:$1" -A -t "C,," -n "$NICK" -i <(printf '%s' "$CA_PEM") >/dev/null 2>&1 || return 1
-  printf '%s\n' "$1" | state_append "$TRUSTED" 64 && return 0
+  local pem rc
+  pem=$(mktemp) || return 1
+  printf '%s' "$CA_PEM" > "$pem"
+  certutil -d "sql:$1" -A -t "C,," -n "$NICK" -i "$pem" >/dev/null 2>&1; rc=$?
+  rm -f -- "$pem"
+  (( rc == 0 )) || return 1
+  printf '%s\n' "$1" | state_append "$TRUSTED" 64 "$TRUSTED_CAP" && return 0
   certutil -d "sql:$1" -D -n "$NICK" >/dev/null 2>&1
   return 1
 }
@@ -153,13 +162,19 @@ case "${1:-status}" in
     # gone from it; what could not be removed stays on record and is reported.
     # certutil -D can report success without deleting (a store whose directory
     # is not writable), so the listing afterwards is what decides.
+    # A record that exists but cannot be read is not an empty one.
+    record=""
+    if [[ -e $TRUSTED || -L $TRUSTED ]]; then
+      record=$(cat_own "$TRUSTED" "$TRUSTED_CAP") \
+        || { echo '{"ok":false,"error":"the record of the stores the CA was imported into could not be read"}'; exit 0; }
+    fi
     left=()
     while read -r d; do
       [[ -n $d && -d $d ]] || continue          # a store that is gone holds nothing
       have certutil || { left+=("$d"); continue; }
       certutil -d "sql:$d" -D -n "$NICK" >/dev/null 2>&1
       certutil -d "sql:$d" -L -n "$NICK" >/dev/null 2>&1 && left+=("$d")
-    done < <(cat_own "$TRUSTED" 4096)
+    done <<<"$record"
     if (( ${#left[@]} )); then
       printf '%s\n' "${left[@]}" | state write "$TRUSTED"
       jq -nc --args '{ok:false, error:"the CA is still trusted in some stores", remaining:$ARGS.positional}' "${left[@]}"
