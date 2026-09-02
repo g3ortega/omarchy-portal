@@ -25,6 +25,7 @@ and truncation go through the validated descriptor, never the path again.
 Exit status 0 on success, 1 when a path is refused, 2 on usage; every refusal
 fails closed with nothing read or written. Runs under the caller's timeout.
 """
+import fcntl
 import os
 import stat
 import sys
@@ -247,6 +248,7 @@ def cmd_append(a):
         raise Refused("refused: content past the cap")
     dirfd = open_dir(d, create=True)
     try:
+        fcntl.flock(dirfd, fcntl.LOCK_EX)   # appends in one directory take turns; a trim replaces the file
         append_one(dirfd, name, data, maxlines, cap)
     finally:
         os.close(dirfd)
@@ -259,6 +261,7 @@ def cmd_append_many(a):
         raise Refused("refused: batch past the cap")
     dirfd = open_dir(a[0], create=True)
     try:
+        fcntl.flock(dirfd, fcntl.LOCK_EX)   # see cmd_append
         for row in batch.splitlines():
             name, _, line = row.partition(b"\t")
             if not name or b"/" in name or name in (b".", b"..") or not line:

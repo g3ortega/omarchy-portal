@@ -145,14 +145,24 @@ case "${1:-status}" in
     ;;
   untrust)
     # Only the stores Portal itself imported into; trust the user set up
-    # before Portal stays.
-    if have certutil; then
-      cat_own "$TRUSTED" 4096 | while read -r d; do
-        [[ -d $d ]] && certutil -d "sql:$d" -D -n "$NICK" >/dev/null 2>&1
-      done
+    # before Portal stays. A store is forgotten only once the certificate is
+    # gone from it; what could not be removed stays on record and is reported.
+    # certutil -D can report success without deleting (a store whose directory
+    # is not writable), so the listing afterwards is what decides.
+    left=()
+    while read -r d; do
+      [[ -n $d && -d $d ]] || continue          # a store that is gone holds nothing
+      have certutil || { left+=("$d"); continue; }
+      certutil -d "sql:$d" -D -n "$NICK" >/dev/null 2>&1
+      certutil -d "sql:$d" -L -n "$NICK" >/dev/null 2>&1 && left+=("$d")
+    done < <(cat_own "$TRUSTED" 4096)
+    if (( ${#left[@]} )); then
+      printf '%s\n' "${left[@]}" | state write "$TRUSTED"
+      jq -nc --args '{ok:false, error:"the CA is still trusted in some stores", remaining:$ARGS.positional}' "${left[@]}"
+    else
+      state_remove "${TRUSTED%/*}" "${TRUSTED##*/}"
+      echo '{"ok":true}'
     fi
-    state_remove "${TRUSTED%/*}" "${TRUSTED##*/}"
-    echo '{"ok":true}'
     ;;
   *) echo '{"ok":false,"error":"usage: portless-setup.sh status|run|untrust"}' ;;
 esac

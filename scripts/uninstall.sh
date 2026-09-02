@@ -30,7 +30,11 @@ echo "shares and names created by Portal"
 run "$HERE/tunnels.sh" stop-own
 
 echo "browser trust Portal added for the Portless CA"
-run "$HERE/portless-setup.sh" untrust
+if (( DRY )); then run "$HERE/portless-setup.sh" untrust
+else
+  out=$("$HERE/portless-setup.sh" untrust)
+  jq -e .ok <<<"$out" >/dev/null || { echo "$(jq -r '.error + ": " + (.remaining | join(", "))' <<<"$out"); the record is kept; nothing else was removed" >&2; exit 1; }
+fi
 
 echo "cloudflared, if it is still the copy Portal installed"
 read -r path sum <<<"$(read_own "$PORTAL_STATE_HOME/installed-cloudflared" 4096)"

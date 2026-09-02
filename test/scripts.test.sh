@@ -124,6 +124,22 @@ kill "$lpid" 2>/dev/null
 is "cmd_stop rejects an unknown provider" "$(cmd_stop nope 1 | jq -r .error)" "unknown provider"
 is "cmd_stop rejects a bad port" "$(cmd_stop cloudflared x | jq -r .error)" "invalid port"
 
+# ---- portless-setup.sh untrust: a store that keeps the CA stays on record ----
+if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then
+  U=$(mktemp -d); mkdir -p "$U/nss"
+  certutil -d "sql:$U/nss" -N --empty-password >/dev/null 2>&1
+  certutil -d "sql:$U/nss" -A -t "C,," -n "portless Local CA" -i "$HOME/.portless/ca.pem" >/dev/null 2>&1
+  printf '%s\n' "$U/nss" | state append "$U/trusted-stores" 64
+  chmod 500 "$U/nss"
+  is "untrust reports a store it could not clear" "$(PORTAL_METRICS_DIR=$U "$S/portless-setup.sh" untrust | jq -c '[.ok, (.remaining|length)]')" "[false,1]"
+  chmod 700 "$U/nss"
+  is "untrust succeeds once the store is writable" "$(PORTAL_METRICS_DIR=$U "$S/portless-setup.sh" untrust | jq -c .ok)" "true"
+  certutil -d "sql:$U/nss" -L -n "portless Local CA" >/dev/null 2>&1 && bad "the CA is still in the store" || ok "and the CA is gone from the store"
+  rm -rf "$U"
+else
+  ok "untrust checks skipped (no certutil or no local Portless CA)"
+fi
+
 # ---- metrics.sh --------------------------------------------------------------
 export PORTAL_METRICS_DIR="$T/metrics"
 M="$S/metrics.sh"

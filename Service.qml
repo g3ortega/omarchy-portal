@@ -370,10 +370,12 @@ Item {
 
   // Both doors (panel and IPC) land here; the shape is checked once, and
   // tunnels.sh refuses anything not on its roster.
+  // Until the roster has loaded there is nothing to check a provider against,
+  // and a guess is not an answer; the roster arrives within seconds of start.
   function shareTarget(port, provider) {
     var n = /^[0-9]{1,5}$/.test(String(port)) ? parseInt(port, 10) : 0
     if (!/^[a-z]{1,32}$/.test(String(provider)) || n <= 0 || n >= 65536) return false
-    return providers.length === 0 || providerFor(String(provider)) !== null   // roster known: it decides
+    return providerFor(String(provider)) !== null
   }
 
   // Both return whether the action was actually launched, so a caller (the
@@ -608,10 +610,12 @@ Item {
     function ports(): string { return JSON.stringify(root.ports) }
     function tunnels(): string { return JSON.stringify(root.tunnels) }
     function expose(provider: string, port: string): string {
+      if (root.providers.length === 0) return "error: providers not loaded yet, try again"
       if (!root.shareTarget(port, provider)) return "error: bad provider or port"
       return root.expose(port, provider, "") ? "ok" : "error: busy, try again"
     }
     function unexpose(provider: string, port: string): string {
+      if (root.providers.length === 0) return "error: providers not loaded yet, try again"
       if (!root.shareTarget(port, provider)) return "error: bad provider or port"
       return root.unexpose(port, provider) ? "ok" : "error: busy, try again"
     }
