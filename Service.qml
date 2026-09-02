@@ -457,7 +457,7 @@ Item {
     onExited: function (exitCode) {
       if (!root.alive) return
       if (exitCode === 0) root.applyScan(scanOut.text)
-      else root.lastError = String(scanErr.text || "scan failed").trim()
+      else root.lastError = String(scanErr.text || "scan failed").slice(0, 4096).trim()   // its own diagnostics, never data
     }
   }
 

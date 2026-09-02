@@ -17,9 +17,6 @@
 
 set -o pipefail
 set -f          # addresses contain '*'; never let the shell glob them
-# stderr is a producer too: the first 4 KiB reach the reader, the rest is
-# drained so no writer ever sees a closed pipe.
-exec 2> >(head -c 4096 >&2; cat >/dev/null)
 MAX_PORTS=512   # past this the scan reports an error, not a growing document
 
 command -v ss >/dev/null 2>&1 || { echo '{"version":1,"error":"ss not found","ports":[]}'; exit 0; }
@@ -34,12 +31,14 @@ if [[ ${1:-} == --probe ]]; then
   # one slow service delays the scan by its own latency, not the sum's.
   PROBE_DIR=$(mktemp -d)
   trap 'rm -rf "$PROBE_DIR"' EXIT
+  _probes=()
   for _pp in $2; do
     [[ $_pp =~ ^[0-9]+$ ]] || continue
     curl -q -so /dev/null -w '%{http_code} %{time_total}' --max-redirs 0 --max-filesize 65536 \
       --max-time 1 "http://localhost:$_pp/" > "$PROBE_DIR/$_pp" 2>/dev/null &
+    _probes+=($!)
   done
-  wait
+  (( ${#_probes[@]} )) && wait "${_probes[@]}"
 fi
 
 # Marker files that identify a project's stack — exactly the set lib/Detect.js
