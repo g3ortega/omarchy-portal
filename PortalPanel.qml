@@ -46,9 +46,15 @@ Panel {
   property string toast: ""
   property bool toastIsHint: false
 
-  function showToast(message, hint) { toast = message; toastIsHint = hint === true; toastTimer.restart() }
+  function showToast(message, hint) {
+    toast = message; toastIsHint = hint === true
+    // A moment ("copied …") clears itself; guidance (a setup step) stays
+    // until read — Esc dismisses it, anything new replaces it.
+    if (toastIsHint) toastTimer.stop()
+    else toastTimer.restart()
+  }
 
-  // A toast is a moment, not a status line.
+  // A toast is a moment, not a status line — unless it is guidance.
   Timer { id: toastTimer; interval: 5000; onTriggered: root.toast = "" }
 
   function expand(port, kind) {
@@ -426,8 +432,10 @@ Panel {
       // inline name editor both need plain letters, including j/k/x/space.
       // A confirmation is not blocked: y/n/enter are routed below.
       blocked: search.activeFocus || root.mode === "naming"
-      // Esc steps back one level, in mode precedence order.
+      // Esc steps back one level, in mode precedence order. A persistent
+      // hint is the topmost level: it goes first, the rest is untouched.
       onCloseRequested: {
+        if (root.toast !== "" && root.toastIsHint) { root.toast = ""; return }
         switch (root.mode) {
         case "help":     root.helpOpen = false; return
         case "confirm":  root.pendingAction = null; return
@@ -717,6 +725,8 @@ Panel {
             border.width: 1
             border.color: Util.alpha(Color.accent, 0.35)
 
+            HoverHandler { id: stripHover }
+
             Row {
               id: stripRow
               anchors.left: parent.left
@@ -736,17 +746,16 @@ Panel {
                 color: Color.accent
               }
 
-              Text {
+              TickerText {
                 anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
                 text: stripLink.armed && root.portlessProvider
                   ? root.portlessProvider.setupClause
                   : (root.portlessProvider ? root.portlessProvider.detail : "")
                 color: root.panelText
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
                 width: Math.min(implicitWidth, stripRow.width - stripGlyph.width - stripRow.spacing)
-                elide: Text.ElideRight
+                hovered: stripHover.hovered
               }
             }
 

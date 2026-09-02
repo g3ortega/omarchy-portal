@@ -169,25 +169,23 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         spacing: 0
 
-        Text {
+        TickerText {
           width: parent.width
-          textFormat: Text.PlainText
           text: row.named ? row.routeHost : (row.entry ? row.entry.name : "")
           color: row.named ? Color.accent : row.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
+          fontFamily: Style.font.family
+          fontSize: Style.font.body
+          hovered: hover.hovered
         }
 
-        Text {
+        TickerText {
           width: parent.width
           visible: text.length > 0
-          textFormat: Text.PlainText
           text: row.revealed && row.statsLine ? row.statsLine : row.stackLine
           color: row.paused ? Color.urgent : Util.alpha(row.foreground, 0.55)
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          fontFamily: Style.font.family
+          fontSize: Style.font.caption
+          hovered: hover.hovered
         }
       }
 
