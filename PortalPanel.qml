@@ -188,8 +188,12 @@ Panel {
   readonly property var viewData: buildViewData()
   readonly property var rows: viewData.rows
   readonly property var visibleEntries: viewData.entries
-  // A row that vanishes under its own expansion takes the expansion with it.
-  onVisibleEntriesChanged: if (expandedKind !== "" && indexOfPort(selectedPort) < 0) collapse()
+  // A row that vanishes takes its expansion and any unanswered question with
+  // it: an answer must never land on a port that stopped listening.
+  onVisibleEntriesChanged: {
+    if (expandedKind !== "" && indexOfPort(selectedPort) < 0) collapse()
+    if (pendingAction !== null && indexOfPort(pendingAction.entry.port) < 0) pendingAction = null
+  }
 
   readonly property var groupOrder: [
     { key: "dev", label: "YOUR APPS" },
@@ -353,7 +357,7 @@ Panel {
   function confirmAccept() {
     var a = pendingAction
     pendingAction = null
-    a.run()
+    if (indexOfPort(a.entry.port) >= 0) a.run()
   }
 
   // j/k on the detail page walk sibling ports without leaving the charts.

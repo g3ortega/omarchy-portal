@@ -128,7 +128,7 @@ case "${1:-status}" in
       "$PORTLESS" proxy start -p "${PORTAL_PORTLESS_PORT:-1355}" \
         --tld "$(portless_tld_arg)" >/dev/null 2>&1
       sleep 1
-      portless_probe_reset; ca_load
+      portless_state_load; portless_probe_reset; ca_load   # the proxy just wrote its port and minted the CA
     fi
     if ca_is_portless && have certutil; then
       if [[ ! -d $NSSDB ]]; then

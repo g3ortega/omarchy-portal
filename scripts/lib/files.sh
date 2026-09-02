@@ -24,15 +24,19 @@ PORTAL_STATE_HOME="${PORTAL_METRICS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/p
 valid_port() { [[ ${1:-} =~ ^[0-9]+$ ]] && (( $1 > 0 && $1 < 65536 )); }
 
 # The executable a provider action runs: resolved to an absolute path that is
-# a regular file owned by root or the user and writable by neither group nor
-# others. Never a bare name through PATH.
+# a regular file owned by root or the user, in a directory owned by root or
+# the user, neither writable by group or others. Never a bare name through
+# PATH, and never from a directory someone else could swap entries in.
 resolve_bin() {  # <name>
-  local p o m
+  local p
   p=$(command -v -- "$1" 2>/dev/null) || return 1
   p=$(readlink -f -- "$p" 2>/dev/null) || return 1
   [[ -f $p && -x $p ]] || return 1
-  read -r o m < <(stat -c '%u %a' -- "$p" 2>/dev/null) || return 1
-  [[ $o == 0 || $o == "$(id -u)" ]] || return 1
-  (( (8#$m & 8#022) == 0 )) || return 1
+  _trusted_owner "$p" && _trusted_owner "${p%/*}" || return 1
   printf '%s' "$p"
+}
+_trusted_owner() {  # <path>: owned by root or us, not group/other writable
+  local o m
+  read -r o m < <(stat -c '%u %a' -- "$1" 2>/dev/null) || return 1
+  [[ $o == 0 || $o == "$(id -u)" ]] && (( (8#$m & 8#022) == 0 ))
 }

@@ -187,7 +187,11 @@ Item {
       return
     }
     everScanned = true
-    lastError = parsed.error ? String(parsed.error) : ""
+    // A scan that reports an error (the scanner refused to describe a host
+    // with more ports than it caps) keeps the previous snapshot: an empty
+    // list would read as every server having vanished.
+    if (parsed.error) { lastError = String(parsed.error); return }
+    lastError = ""
 
     var now = Date.now()
     var nextStats = ({})
