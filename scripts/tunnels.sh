@@ -294,19 +294,17 @@ STOP_TERM_WAIT=50
 STOP_KILL_WAIT=20
 stop_line() {   # <"pid start"> <comm>: end the whole session the launcher created, not just its leader
   local pid start i sig; read -r pid start <<<"$1"
-  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 0
+  [[ $pid =~ ^[1-9][0-9]*$ && $start =~ ^[0-9]+$ ]] || return 0
   # If the leader is not ours to begin with (reused pid, mock test pid, already dead),
   # there is nothing to signal.
   alive_line "$1" "$2" || return 0
-  # Done only when both are true: the leader we launched is gone (by identity)
-  # and its process group holds no members. A descendant that inherited the
-  # session and ignores TERM keeps the group alive, so the leader's exit alone
-  # is not proof the tunnel stopped. Process group signalling requires pid > 1;
+  # Gone only when both hold: the leader we launched is gone (by identity) and
+  # its process group holds no members. A descendant that inherited the session
+  # and ignores TERM keeps the group alive, so the leader's exit alone is not
+  # proof the tunnel stopped. Process group signalling requires pid > 1;
   # pid 1 is init, and -1 signals all user processes.
-  _group_alive() { (( pid > 1 )) && kill -0 -- "-$pid" 2>/dev/null; }
-  _line_gone() { ! alive_line "$1" "$2" && ! _group_alive; }
   for sig in TERM KILL; do
-    _line_gone && return 0
+    ! alive_line "$1" "$2" && ! group_alive "$pid" && return 0
     # The leader through a pidfd bound to that very process, then the whole
     # group by id (which also reaches descendants the leader left behind).
     proc signal "$pid" "$start" "$sig" 2>/dev/null
@@ -314,7 +312,7 @@ stop_line() {   # <"pid start"> <comm>: end the whole session the launcher creat
       kill -"$sig" -- "-$pid" 2>/dev/null
     fi
     local wait; [[ $sig == TERM ]] && wait=$STOP_TERM_WAIT || wait=$STOP_KILL_WAIT
-    for ((i = 0; i < wait; i++)); do _line_gone && return 0; sleep 0.1; done
+    for ((i = 0; i < wait; i++)); do ! alive_line "$1" "$2" && ! group_alive "$pid" && return 0; sleep 0.1; done
   done
   return 1
 }
@@ -327,6 +325,7 @@ alive_line() {  # <"pid start"> <comm>
   owned_pid "$pid" "$2" "$start"
 }
 alive() { alive_line "$(read_own "$1" 64)" "$2"; }   # <pidfile> <comm>
+group_alive() { (( ${1:-0} > 1 )) && kill -0 -- "-$1" 2>/dev/null; }   # <pid>: its process group still has members
 
 # A fresh public hostname is published a beat after it appears in the log.
 # Any resolver asked before that caches the NXDOMAIN for the zone's negative
