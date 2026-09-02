@@ -590,7 +590,10 @@ cmd_status() {
       elif [[ -z $idle ]]; then
         write_own "$(idlefile "$provider" "$port")" "$now"
       elif [[ $idle =~ ^[0-9]+$ ]] && (( now - idle > IDLE_CAP )); then
-        snapshot_current "$provider" "$port" "$pidline" && cmd_stop "$provider" "$port" >/dev/null; continue
+        # A replacement's row comes with the next poll. A stop that failed
+        # keeps its records and stays listed: still public, still ours.
+        snapshot_current "$provider" "$port" "$pidline" || continue
+        jq -e .ok <<<"$(cmd_stop "$provider" "$port")" >/dev/null 2>&1 && continue
       fi
     fi
     [[ -n $reach ]] || reach=$(provider_reach "$provider")

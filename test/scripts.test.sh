@@ -200,6 +200,10 @@ kill "${old%% *}" 2>/dev/null
 # A stop is a stop only once the process is gone: it fails, keeping the records, when nothing works.
 is "cmd_stop fails when the process will not die" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; kill() { :; }; cmd_stop cloudflared 4449' | jq -r .error)" "cloudflared on port 4449 did not stop; its records are kept"
 is "and keeps its records" "$(ls "$R1" | grep -c -E '^cloudflared-4449\.(pid|url)$')" "2"
+# An idle tunnel whose stop failed stays in the status, records and all.
+printf '%s' $(( $(printf '%(%s)T' -1) - 700 )) > "$R1/cloudflared-4449.idle"
+is "status keeps listing an idle tunnel it could not stop" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; kill() { :; }; cmd_status' | jq -c '[.tunnels[]|select(.provider=="cloudflared")|.port]')" "[4449]"
+is "and its records" "$(ls "$R1" | grep -c -E '^cloudflared-4449\.(pid|url)$')" "2"
 stub_env "$R1" 'cmd_stop cloudflared 4449 >/dev/null'   # a real stop ends the replacement
 # A process that ignores TERM is killed, and the stop reports only once it is gone.
 setsid bash -c 'trap "" TERM; exec "'"$T"'/prov/cloudflared" 300' >/dev/null 2>&1 & sleep 0.4
