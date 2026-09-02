@@ -108,8 +108,8 @@ rm -rf "$M"
 
 # stop-own ends only shares with a state file of their own, including one
 # still minting its URL (a pidfile, no url yet).
-printf 'https://own.trycloudflare.com' > "$STATE_DIR/cloudflared-4447.url"; printf '1 1' > "$STATE_DIR/cloudflared-4447.pid"
-printf '1 1' > "$STATE_DIR/ngrok-4448.pid"
+printf 'https://own.trycloudflare.com' > "$STATE_DIR/cloudflared-4447.url"; printf '999999 1' > "$STATE_DIR/cloudflared-4447.pid"
+printf '999999 1' > "$STATE_DIR/ngrok-4448.pid"
 is "stop-own returns ok" "$(cmd_stop_own)" '{"ok":true}'
 [[ -e $STATE_DIR/cloudflared-4447.url ]] && bad "stop-own left a created share" || ok "stop-own cleared the created share"
 [[ -e $STATE_DIR/ngrok-4448.pid ]] && bad "stop-own skipped a tunnel still minting its URL" || ok "stop-own covers a tunnel that has a pidfile but no url yet"

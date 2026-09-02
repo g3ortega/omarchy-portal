@@ -45,12 +45,22 @@ class Refused(Exception):
     pass
 
 
+def swappable(st):
+    """A directory whose entries another user could rename: not root's or ours,
+    or group/other-writable without the sticky bit."""
+    return st.st_uid not in (0, UID) or ((st.st_mode & 0o022) and not (st.st_mode & stat.S_ISVTX))
+
+
 def open_dir(path, create=False):
-    """Walk from / component by component; return an fd for the final directory."""
+    """Walk from / component by component; return an fd for the final directory.
+    Every ancestor must be root's or ours and not renamable by another user, so
+    no component of the path can be swapped between two helper calls; the final
+    directory must be private to us."""
     path = os.path.abspath(path)
+    comps = [c for c in path.split("/") if c]
     fd = os.open("/", DIR_FLAGS)
     try:
-        for comp in [c for c in path.split("/") if c]:
+        for i, comp in enumerate(comps):
             try:
                 nfd = os.open(comp, DIR_FLAGS, dir_fd=fd)
             except FileNotFoundError:
@@ -65,6 +75,8 @@ def open_dir(path, create=False):
                 raise Refused(f"refused {path}: {e.strerror} at {comp}")
             os.close(fd)
             fd = nfd
+            if i < len(comps) - 1 and swappable(os.fstat(fd)):
+                raise Refused(f"refused {path}: an ancestor is writable by others: /{'/'.join(comps[:i + 1])}")
         st = os.fstat(fd)
         if not stat.S_ISDIR(st.st_mode) or st.st_uid != UID or (st.st_mode & 0o022):
             raise Refused(f"not a private directory of yours: {path}")
@@ -163,9 +175,6 @@ def open_exe(path):
     if not parts:
         raise Refused("not an executable path")
 
-    def swappable(st):
-        return st.st_uid not in (0, UID) or ((st.st_mode & 0o022) and not (st.st_mode & stat.S_ISVTX))
-
     fd = os.open("/", DIR_FLAGS)
     try:
         for comp in parts[:-1]:
@@ -209,14 +218,16 @@ def cmd_dump(a):
         if len(a) > 3:
             names = [n for n in names if n in a[3:]]
         files = {}
+        refused = []
         for name in names:
             try:
                 data = read_leaf(dirfd, name, cap)
             except Refused:
+                refused.append(name)
                 continue          # a directory, link, FIFO or oversized file is simply not state
             if data is not None:
                 files[name] = data.decode("utf-8", "replace")
-        sys.stdout.write(json.dumps({"files": files}))
+        sys.stdout.write(json.dumps({"files": files, "refused": refused}))
     finally:
         os.close(dirfd)
 

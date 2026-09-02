@@ -44,6 +44,7 @@ ca_load
 # read back.
 TRUSTED="$PORTAL_STATE_HOME/trusted-stores"
 TRUSTED_CAP=65536
+MAX_TRUSTED_STORES=512
 # Import into one store and record it; a trust that could not be recorded is
 # undone at once, since removal would never find it. certutil sizes its input
 # with stat, so the verified bytes go through a file: one written by the state
@@ -51,16 +52,20 @@ TRUSTED_CAP=65536
 # The SHA-256 fingerprint of a PEM certificate, uppercase hex, no colons.
 ca_fingerprint() { openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g'; }
 trust_store() {  # <nss dir>
-  local pem="$PORTAL_STATE_HOME/ca-import.pem" rc fp
+  local pem="$PORTAL_STATE_HOME/ca-import.pem" rc fp count
   fp=$(printf '%s' "$CA_PEM" | ca_fingerprint)
   [[ -n $fp ]] || return 1
+  # Refuse further imports if the record is at capacity, so we never trim and
+  # lose track of earlier imports that uninstall must revert.
+  count=$(cat_own "$TRUSTED" "$TRUSTED_CAP" 2>/dev/null | grep -c $'[^\t]')
+  (( count < MAX_TRUSTED_STORES )) || return 1
   { own_dir "$PORTAL_STATE_HOME" && printf '%s' "$CA_PEM" | state write "$pem"; } 2>/dev/null || return 1
   certutil -d "sql:$1" -A -t "C,," -n "$NICK" -i "$pem" >/dev/null 2>&1; rc=$?
   state_remove "$PORTAL_STATE_HOME" ca-import.pem
   (( rc == 0 )) || return 1
   # Record the store with the fingerprint of what was imported, so removal can
   # tell Portal's certificate from one the user imported under the same name.
-  printf '%s\t%s\n' "$1" "$fp" | state_append "$TRUSTED" 64 "$TRUSTED_CAP" && return 0
+  printf '%s\t%s\n' "$1" "$fp" | state_append "$TRUSTED" "$MAX_TRUSTED_STORES" "$TRUSTED_CAP" && return 0
   certutil -d "sql:$1" -D -n "$NICK" >/dev/null 2>&1
   return 1
 }
@@ -189,7 +194,7 @@ case "${1:-status}" in
       # matches it: a CA rotated and re-imported by the user under the same
       # name is not Portal's to delete.
       if [[ -n $fp ]]; then
-        local cur; cur=$(certutil -d "sql:$d" -L -n "$NICK" -a 2>/dev/null | ca_fingerprint)
+        cur=$(certutil -d "sql:$d" -L -n "$NICK" -a 2>/dev/null | ca_fingerprint)
         [[ -n $cur && $cur != "$fp" ]] && continue   # a different certificate now holds the name: leave it, and drop our record of it
       fi
       certutil -d "sql:$d" -D -n "$NICK" >/dev/null 2>&1

@@ -294,13 +294,27 @@ STOP_TERM_WAIT=50
 STOP_KILL_WAIT=20
 stop_line() {   # <"pid start"> <comm>: end the whole session the launcher created, not just its leader
   local pid start i sig; read -r pid start <<<"$1"
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 0
+  # If the leader is not ours to begin with (reused pid, mock test pid, already dead),
+  # there is nothing to signal.
+  alive_line "$1" "$2" || return 0
+  # Done only when both are true: the leader we launched is gone (by identity)
+  # and its process group holds no members. A descendant that inherited the
+  # session and ignores TERM keeps the group alive, so the leader's exit alone
+  # is not proof the tunnel stopped. Process group signalling requires pid > 1;
+  # pid 1 is init, and -1 signals all user processes.
+  _group_alive() { (( pid > 1 )) && kill -0 -- "-$pid" 2>/dev/null; }
+  _line_gone() { ! alive_line "$1" "$2" && ! _group_alive; }
   for sig in TERM KILL; do
-    alive_line "$1" "$2" || return 0
-    # The leader through a pidfd bound to that very process, then the rest of
-    # its group by id; a leader that is gone means the group is not ours.
-    proc signal "$pid" "$start" "$sig" && kill -"$sig" -- "-$pid" 2>/dev/null
+    _line_gone && return 0
+    # The leader through a pidfd bound to that very process, then the whole
+    # group by id (which also reaches descendants the leader left behind).
+    proc signal "$pid" "$start" "$sig" 2>/dev/null
+    if (( pid > 1 )); then
+      kill -"$sig" -- "-$pid" 2>/dev/null
+    fi
     local wait; [[ $sig == TERM ]] && wait=$STOP_TERM_WAIT || wait=$STOP_KILL_WAIT
-    for ((i = 0; i < wait; i++)); do alive_line "$1" "$2" || return 0; sleep 0.1; done
+    for ((i = 0; i < wait; i++)); do _line_gone && return 0; sleep 0.1; done
   done
   return 1
 }
@@ -399,6 +413,7 @@ cmd_start() {  # <provider> <port> [name] [--owner <pid>]
   done
   valid_port "$port" || die "invalid port"
   known_provider "$provider" || die "unknown provider"
+  lifecycle_lock_shared || die "cannot start $provider: uninstall is in progress"
   # The panel names the process it showed the user; the port is shared only
   # while that process still serves it, not whatever took the port since.
   if [[ -n $owner ]]; then
@@ -576,10 +591,12 @@ cmd_status() {
   # demand, by the one adopter that cannot work without it.
   # Live means reachable through localhost, which is what every tunnel and
   # the proxy target: a listener bound only to a LAN address does not count.
+  command -v ss >/dev/null 2>&1 || die "ss not found"
+  local ss_raw; ss_raw=$(ss -tlnH 2>/dev/null) || die "could not query listening sockets"
   local LIVE_PORTS=" " SOCKS="" _l
   while read -r _ _ _ _l _; do
     case ${_l%:*} in 127.*|'*'|0.0.0.0|'[::]'|'[::1]'|'[::ffff:127.'*|::|::1) LIVE_PORTS+="${_l##*:} " ;; esac
-  done < <(ss -tlnH 2>/dev/null)
+  done <<<"$ss_raw"
 
   portless_state_load; local portless_ok=$?
   local dump tsv="" listed=" " now; printf -v now '%(%s)T' -1
@@ -680,8 +697,12 @@ cmd_stop_own() {
   # still minting its URL). Adopted names and tunnels belong to whoever
   # started them and have neither. A stop that fails keeps its records and
   # is reported, so a caller can retry.
-  local provider port out rows failed=()
+  local provider port out rows failed=() bad_markers
   rows=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null) || die "could not list Portal's state; nothing was stopped"
+  bad_markers=$(jq -r '.refused[]? | select(test("^[a-z]+-[0-9]+\\.(url|pid|name)$"))' <<<"$rows" 2>/dev/null)
+  if [[ -n $bad_markers ]]; then
+    die "cannot stop safely: ownership markers could not be read safely: $(tr '\n' ' ' <<<"$bad_markers")"
+  fi
   while IFS=$'\t' read -r provider port; do
     out=$(cmd_stop "$provider" "$port")
     jq -e .ok <<<"$out" >/dev/null 2>&1 || failed+=("$provider:$port $(jq -r .error <<<"$out")")

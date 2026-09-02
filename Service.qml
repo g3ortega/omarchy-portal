@@ -306,11 +306,21 @@ Item {
       var was = _prevDevPorts[k]
       var still = devPorts.some(function (d) { return d.port === was.port })
       if (still) continue
-      if (Date.now() - (_expectedGone[was.port] || 0) < expectedGoneMs) { delete _expectedGone[was.port]; continue }
+      // A stop or restart marks the port; the marker is honored whenever the
+      // port finally disappears, however long the graceful shutdown took, and
+      // consumed here so a later genuine crash is still announced.
+      if (_expectedGone[was.port]) { delete _expectedGone[was.port]; continue }
       var shared = publicTunnelFor(was.port) ? "; its public tunnel is still open" : ""
       notify("Port " + was.port + " went quiet", was.label + " is no longer listening" + shared)
     }
-    for (var g in _expectedGone) if (Date.now() - _expectedGone[g] > expectedGoneMs) delete _expectedGone[g]
+    // Drop a marker only once its port is gone from the list (handled above) or
+    // has lingered far past any real shutdown, never merely because the wall
+    // clock passed while the server was still closing its listener.
+    var nowT = Date.now()
+    for (var g in _expectedGone) {
+      var listed = devPorts.some(function (d) { return String(d.port) === g })
+      if (!listed || nowT - _expectedGone[g] > 600000) delete _expectedGone[g]
+    }
   }
 
   function notify(summary, body) {
@@ -384,8 +394,11 @@ Item {
   // Until the roster has loaded there is nothing to check a provider against,
   // and a guess is not an answer; the roster arrives within seconds of start.
   function shareTarget(port, provider) {
-    var n = /^[0-9]{1,5}$/.test(String(port)) ? parseInt(port, 10) : 0
-    if (!/^[a-z]{1,32}$/.test(String(provider)) || n <= 0 || n >= 65536) return false
+    var s = String(port)
+    if (!/^[1-9][0-9]{0,4}$/.test(s)) return false
+    var n = parseInt(s, 10)
+    if (n < 1 || n > 65535) return false
+    if (!/^[a-z]{1,32}$/.test(String(provider))) return false
     return providerFor(String(provider)) !== null
   }
 
@@ -395,16 +408,18 @@ Item {
   // refuse a port that another process has taken since.
   function expose(port, provider, name, ownerPid) {
     if (!shareTarget(port, provider)) return false
-    var args = ["start", String(provider), String(port)]
+    var n = parseInt(port, 10)
+    var args = ["start", String(provider), String(n)]
     if (name) args.push(String(name))
     if (ownerPid !== undefined && ownerPid !== null && /^[1-9][0-9]*$/.test(String(ownerPid))) args.push("--owner", String(ownerPid))
-    return _runAction(provider + ":" + port, args, "could not expose that port")
+    return _runAction(provider + ":" + n, args, "could not expose that port")
   }
 
   function unexpose(port, provider) {
     if (!shareTarget(port, provider)) return false
-    _stoppingShare = provider + ":" + port
-    return _runAction(provider + ":" + port, ["stop", String(provider), String(port)],
+    var n = parseInt(port, 10)
+    _stoppingShare = provider + ":" + n
+    return _runAction(provider + ":" + n, ["stop", String(provider), String(n)],
                       "could not stop sharing")
   }
 

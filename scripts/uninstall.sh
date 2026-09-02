@@ -20,6 +20,13 @@ esac
 run() { if (( DRY )); then echo "would: $*"; else "$@"; fi; }
 
 echo "the plugin, so nothing polls while state is removed"
+if (( ! DRY )) && command -v flock >/dev/null 2>&1; then
+  # Serialize uninstall against concurrent tunnel starts so no new share can
+  # write state while removal stops resources and deletes state files.
+  own_dir "$PORTAL_RUNTIME_DIR" 2>/dev/null
+  { exec 9>"$PORTAL_RUNTIME_DIR/.lifecycle.lock"; } 2>/dev/null
+  flock -x 9 2>/dev/null
+fi
 if command -v omarchy >/dev/null 2>&1; then
   # An unreadable plugin state is not "disabled": a service still polling
   # would recreate what is removed below.
@@ -79,7 +86,8 @@ remove_known() {  # <dir> <name regex>
   run rmdir --ignore-fail-on-non-empty -- "$1"
   (( DRY )) || [[ ! -d $1 ]] || echo "left in place: $1 holds files that are not Portal's"
 }
-remove_known "$PORTAL_RUNTIME_DIR" '^[a-z]+-[0-9]+\.(pid|url|reach|dns|idle|log|name)$|^\..*\.tmp$'
+exec 9>&- 2>/dev/null || true
+remove_known "$PORTAL_RUNTIME_DIR" '^[a-z]+-[0-9]+\.(pid|url|reach|dns|idle|log|name)$|^\..*\.tmp$|^\.lifecycle\.lock$'
 remove_known "$PORTAL_STATE_HOME/metrics" '^[0-9]+\.jsonl$|^\..*\.tmp$'
 remove_known "$PORTAL_STATE_HOME" '^(trusted-stores|watched\.json)$|^\..*\.tmp$'   # the install marker is removed with its binary above
 
