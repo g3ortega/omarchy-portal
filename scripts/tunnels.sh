@@ -560,7 +560,9 @@ cmd_status() {
 
   portless_state_load
   local dump tsv="" listed=" " now; printf -v now '%(%s)T' -1
-  dump=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null || echo '{"files":{}}')
+  # An unreadable state directory is not an empty one: a tunnel that cannot be
+  # listed cannot be cleaned up either, so the caller keeps its last snapshot.
+  dump=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null) || die "could not list Portal's state"
   # Fields are joined with a unit separator: a tab is IFS whitespace, so an
   # empty field between tabs would vanish and shift the ones after it.
   local provider port url reach pidline dns idle base pid

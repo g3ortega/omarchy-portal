@@ -317,6 +317,8 @@ Item {
 
   function applyTunnels(text) {
     var parsed = parseJson(text)
+    // A status that could not read its state says so; the last good snapshot stays.
+    if (parsed && parsed.error) { lastError = String(parsed.error).slice(0, 4096); return }
     if (!parsed || !Array.isArray(parsed.tunnels)) return
     var key = JSON.stringify(parsed.tunnels)
     if (key === _lastTunnelsKey) return
@@ -615,6 +617,8 @@ Item {
     function expose(provider: string, port: string): string {
       if (root.providers.length === 0) return "error: providers not loaded yet, try again"
       if (!root.shareTarget(port, provider)) return "error: bad provider or port"
+      var p = root.providerFor(String(provider))
+      if (p.status !== "ready") return "error: " + provider + " is not ready (" + p.status + ")"
       return root.expose(port, provider, "") ? "ok" : "error: busy, try again"
     }
     function unexpose(provider: string, port: string): string {

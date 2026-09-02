@@ -120,6 +120,13 @@ def read_fd(fd, cap):
     return bytes(out)
 
 
+def write_all(fd, data):
+    """Every byte, however many calls it takes: a short write is not a write."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
 def atomic_write(dirfd, name, data, mode=0o600):
     """data is bytes, or a callable that writes to the descriptor and returns the byte count."""
     tmp = f".{name}.{os.urandom(8).hex()}.tmp"
@@ -128,10 +135,7 @@ def atomic_write(dirfd, name, data, mode=0o600):
         if callable(data):
             data(fd)
         else:
-            view = memoryview(data)
-            while view:
-                n = os.write(fd, view)
-                view = view[n:]
+            write_all(fd, data)
         os.fsync(fd)
         os.fchmod(fd, mode)
         os.close(fd)
@@ -243,9 +247,7 @@ def cmd_write(a):
             total += len(chunk)
             if total > WRITE_CAP:
                 raise Refused("refused: content past the cap")
-            view = memoryview(chunk)
-            while view:
-                view = view[os.write(fd, view):]
+            write_all(fd, chunk)
 
     dirfd = open_dir(d, create=True)
     try:
@@ -264,7 +266,7 @@ def append_one(dirfd, name, data, maxlines, cap):
         size = len(data)
     else:
         try:
-            os.write(fd, data)
+            write_all(fd, data)
             size = os.fstat(fd).st_size
         finally:
             os.close(fd)

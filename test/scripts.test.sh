@@ -184,6 +184,7 @@ is "status keeps a live share with no reach record" "$(ls "$R1" | grep -c -E '^c
 # stop-own refuses to guess when the state cannot be listed.
 (cd "$R1" && touch $(seq -f 'crowd-%g' 1 4100))
 is "stop-own fails closed when the state cannot be listed" "$(PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -r .error)" "could not list Portal's state; nothing was stopped"
+is "status fails closed when the state cannot be listed" "$(PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" status | jq -r .error)" "could not list Portal's state"
 rm -f "$R1"/crowd-*
 is "stop-own stops what it can list" "$(PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -c .ok)" "true"
 sleep 0.3; ps -eo comm,args | grep -q '^cloudflared *.*300$' && bad "stop-own left the tunnel running" || ok "and the tunnel is gone"
@@ -213,6 +214,21 @@ is "start rejects a malformed owner" "$(stub_env "$R1" 'cmd_start cloudflared 44
 is "start proceeds for the pid that serves the port" "$(stub_env "$R1" "cmd_start cloudflared 4470 --owner $lp" | jq -c .ok)" "true"
 stub_env "$R1" 'cmd_stop cloudflared 4470 >/dev/null'; kill "$lp" 2>/dev/null
 is "cmd_stop rejects a bad port" "$(cmd_stop cloudflared x | jq -r .error)" "invalid port"
+
+# ---- statedir.py: a short write is completed, never reported as done --------
+SW=$(mktemp -d); /usr/bin/python3 - "$SW" "$S/lib/statedir.py" <<'PY'
+import sys, os, importlib.util
+spec = importlib.util.spec_from_file_location("sd", sys.argv[2]); sd = importlib.util.module_from_spec(spec); spec.loader.exec_module(sd)
+real = os.write
+os.write = lambda fd, data: real(fd, bytes(data)[:5])   # the kernel takes five bytes at a time
+dirfd = sd.open_dir(sys.argv[1], create=True)
+sd.append_one(dirfd, "3000.jsonl", b'{"t":1,"a":1}\n', 100, 1 << 20)
+sd.append_one(dirfd, "3000.jsonl", b'{"t":2,"a":2}\n', 100, 1 << 20)
+sd.atomic_write(dirfd, "whole", b"0123456789" * 3)
+PY
+is "append completes short writes" "$(cat "$SW/3000.jsonl" | tr '\n' ' ')" '{"t":1,"a":1} {"t":2,"a":2} '
+is "atomic writes complete short writes" "$(wc -c < "$SW/whole")" "30"
+rm -rf "$SW"
 
 # ---- portless-setup.sh status: installed means runnable ---------------------
 mkdir -p "$T/pl"; printf '#!/bin/sh\n' > "$T/pl/portless"; chmod 777 "$T/pl/portless"
