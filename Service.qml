@@ -98,6 +98,14 @@ Item {
     return t && t.url && t.dns !== "pending" ? t.url : ""
   }
 
+  function ipcTarget(provider, port) {
+    var id = String(provider)
+    if (id.length > 32 || !providerFor(id)) return null
+    if (!/^[0-9]{1,5}$/.test(String(port))) return null
+    var n = parseInt(port, 10)
+    return n > 0 && n < 65536 ? { provider: id, port: n } : null
+  }
+
   function providerFor(id) {
     for (var i = 0; i < providers.length; i++) if (providers[i].id === id) return providers[i]
     return null
@@ -295,6 +303,7 @@ Item {
       var shared = publicTunnelFor(was.port) ? "; its public tunnel is still open" : ""
       notify("Port " + was.port + " went quiet", was.label + " is no longer listening" + shared)
     }
+    for (var g in _expectedGone) if (Date.now() - _expectedGone[g] > 60000) delete _expectedGone[g]
   }
 
   function notify(summary, body) {
@@ -325,10 +334,16 @@ Item {
       }
     }
     // A public URL that disappears without Portal stopping it is a lost
-    // share the user may have handed out; say so.
+    // share the user may have handed out; say so. A public URL that appears
+    // is said too, whichever door asked for it (a click or the IPC surface):
+    // the desktop must never carry an exposure the user did not see.
     for (var k in tunnels) {
       if (tunnels[k].reach === "public" && !next[k] && _stoppingShare !== k)
         notify("Port " + tunnels[k].port + " is no longer shared", tunnels[k].host + " went away")
+    }
+    for (var n in next) {
+      if (next[n].reach === "public" && !tunnels[n])
+        notify("Port " + next[n].port + " is public", "reachable from the internet at " + next[n].host)
     }
     _stoppingShare = ""
     tunnels = next
@@ -574,12 +589,18 @@ Item {
     function toggle(): string { root.summonRequested(); return "ok" }
     function ports(): string { return JSON.stringify(root.ports) }
     function tunnels(): string { return JSON.stringify(root.tunnels) }
+    // The IPC surface takes only what the panel would: a known provider id
+    // and a port number. Anything else is refused before a helper is spawned.
     function expose(provider: string, port: string): string {
-      root.expose(parseInt(port, 10), provider, "")
+      var p = root.ipcTarget(provider, port)
+      if (!p) return "error: unknown provider or port"
+      root.expose(p.port, p.provider, "")
       return "ok"
     }
     function unexpose(provider: string, port: string): string {
-      root.unexpose(parseInt(port, 10), provider)
+      var p = root.ipcTarget(provider, port)
+      if (!p) return "error: unknown provider or port"
+      root.unexpose(p.port, p.provider)
       return "ok"
     }
   }

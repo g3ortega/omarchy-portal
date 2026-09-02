@@ -77,6 +77,16 @@ alive "$STATE_DIR/x-1.pid" "$me" && ok "alive reads pid and start from the pidfi
 printf '%s %s' "$$" "$((mystart + 1))" > "$STATE_DIR/x-1.pid"
 alive "$STATE_DIR/x-1.pid" "$me" && bad "alive accepted a reused pid" || ok "alive rejects a reused pid"
 
+# The state directory is read in one descriptor-relative pass; a planted FIFO
+# cannot block it, a link is not a file, and too many entries fail closed.
+mkfifo "$STATE_DIR/cloudflared-4446.pid"; printf 'https://f.trycloudflare.com' > "$STATE_DIR/cloudflared-4446.url"
+out=$(timeout 10 bash -c 'source "'"$S"'/tunnels.sh"; cmd_status' 2>/dev/null); rc=$?
+[[ $rc -eq 0 ]] && ok "status returns with a FIFO planted at a pidfile path" || bad "status blocked or failed (rc=$rc)"
+is "and the FIFO-backed entry is not a tunnel" "$(jq -c '[.tunnels[]|select(.port==4446)]|length' <<<"$out")" "0"
+rm -f "$STATE_DIR/cloudflared-4446".*
+crowd=$(mktemp -d); for i in $(seq 1 600); do : > "$crowd/f$i"; done
+is "a state directory with too many entries dumps nothing" "$(state_dump "$crowd" | jq -c '.files|length')" "0"
+rm -rf "$crowd"
 # State is read only from plain files we own; a planted link is not a file.
 ln -s /etc/hostname "$STATE_DIR/cloudflared-4445.url"; ln -s /proc/self/stat "$STATE_DIR/cloudflared-4445.pid"
 own_file "$STATE_DIR/cloudflared-4445.url" && bad "own_file accepted a symlink" || ok "own_file rejects a symlink"
@@ -87,6 +97,22 @@ is "and the target was never touched" "$(cat /etc/hostname | wc -c | tr -d ' ')"
 rm -f "$STATE_DIR"/cloudflared-4445.*
 mkdir -p "$T/notmine"; chmod 700 "$T/notmine"; ln -s "$T/notmine" "$T/link-dir"
 own_dir "$T/link-dir" && bad "own_dir accepted a symlinked directory" || ok "own_dir rejects a symlinked directory"
+printf 'x' > "$T/notmine/leaf"; is "a leaf under a symlinked parent is refused" "$(cat_own "$T/link-dir/leaf")" ""
+chmod 770 "$T/notmine"; is "a leaf under a group-writable directory is refused" "$(cat_own "$T/notmine/leaf")" ""; chmod 700 "$T/notmine"
+is "write_own creates 0600" "$(write_own "$T/notmine/w" v; stat -c %a "$T/notmine/w")" "600"
+
+# Provider binaries run by absolute, validated path only.
+mkdir -p "$T/bin"; printf '#!/bin/sh\n' > "$T/bin/fakeprov"; chmod 777 "$T/bin/fakeprov"
+PATH="$T/bin:$PATH" resolve_bin fakeprov >/dev/null && bad "resolve_bin accepted a world-writable executable" || ok "resolve_bin rejects a world-writable executable"
+chmod 755 "$T/bin/fakeprov"; is "resolve_bin returns the absolute path of a safe one" "$(PATH="$T/bin:$PATH" resolve_bin fakeprov)" "$T/bin/fakeprov"
+resolve_bin definitely-not-a-command-xyz >/dev/null && bad "resolve_bin found a ghost" || ok "resolve_bin fails for a missing command"
+
+# launch: a session of its own, a private log, pid bound to start time.
+out=$(state launch "$STATE_DIR" launch-test.log -- /usr/bin/sleep 20); lpid=${out%% *}; lstart=${out#* }
+owned_pid "$lpid" sleep "$lstart" && ok "launch reports a pid whose start time matches" || bad "launch pid/start mismatch: $out"
+[[ $(ps -o sid= -p "$lpid" | tr -d ' ') == "$lpid" ]] && ok "the launched process leads its own session" || bad "launched process is not a session leader"
+is "the launch log is private" "$(stat -c %a "$STATE_DIR/launch-test.log")" "600"
+kill "$lpid" 2>/dev/null
 is "cmd_stop rejects an unknown provider" "$(cmd_stop nope 1 | jq -r .error)" "unknown provider"
 is "cmd_stop rejects a bad port" "$(cmd_stop cloudflared x | jq -r .error)" "invalid port"
 
@@ -109,8 +135,13 @@ is "read survives a torn last line" "$("$M" read 3000 | jq -c '.samples|length')
 ln -s /etc/hostname "$PORTAL_METRICS_DIR/metrics/5000.jsonl"
 is "read refuses a symlinked sample file" "$("$M" read 5000 | jq -c '.samples|length')" "0"
 "$M" append-batch '{"5000":{"t":1}}' >/dev/null
-[[ -L $PORTAL_METRICS_DIR/metrics/5000.jsonl ]] && bad "append followed a symlink" || ok "append replaces a symlinked sample file"
-yes '{"t":1}' | head -n 19300 > "$PORTAL_METRICS_DIR/metrics/4000.jsonl"
+[[ ! -L $PORTAL_METRICS_DIR/metrics/5000.jsonl && -f $PORTAL_METRICS_DIR/metrics/5000.jsonl && $(wc -c < /etc/hostname) -lt 64 ]] && ok "append replaces a planted link with a fresh file and never follows it" || bad "append followed or kept a symlinked path"
+mkfifo "$PORTAL_METRICS_DIR/metrics/5001.jsonl"
+is "read of a planted FIFO returns at once, empty" "$(timeout 5 "$M" read 5001 | jq -c '.samples|length')" "0"
+"$M" append-batch '{"5001":{"t":1}}' >/dev/null; [[ -f $PORTAL_METRICS_DIR/metrics/5001.jsonl && ! -p $PORTAL_METRICS_DIR/metrics/5001.jsonl ]] && ok "append replaces a planted FIFO with a fresh file" || bad "append left or blocked on a FIFO"
+big=$(mktemp -p "$PORTAL_METRICS_DIR/metrics"); head -c 9000000 /dev/zero > "$big"; mv "$big" "$PORTAL_METRICS_DIR/metrics/5002.jsonl"
+is "read refuses a file past the cap" "$(timeout 5 "$M" read 5002 | jq -c '.samples|length')" "0"
+yes '{"t":1756700000,"conns":0,"cpuPct":0,"rssKb":73000,"latMs":12,"httpCode":200,"pad":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}' | head -n 19300 > "$PORTAL_METRICS_DIR/metrics/4000.jsonl"
 "$M" append-batch '{"4000":{"t":2}}' >/dev/null
 is "append-batch trims past the hard bound" "$(wc -l < "$PORTAL_METRICS_DIR/metrics/4000.jsonl")" "17280"
 "$M" unwatch 3000 >/dev/null

@@ -12,8 +12,12 @@
 # as an ELF, and must execute `--version` before it is installed (0755) into
 # ~/.local/bin. Nothing runs elevated.
 set -o pipefail
+# shellcheck source=lib/files.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/files.sh"
 
 BIN_DIR="${PORTAL_BIN_DIR:-$HOME/.local/bin}"
+# A marker so removal knows this binary is Portal's to delete.
+MARK_DIR="${PORTAL_METRICS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/portal}"
 
 CLOUDFLARED_VERSION="2026.8.3"
 declare -A CLOUDFLARED_SHA256=(
@@ -47,7 +51,8 @@ install_cloudflared() {
   chmod 700 "$tmp"
   trap 'rm -rf "$tmp"' EXIT
 
-  curl -fsSL --max-time 300 --max-filesize 134217728 -o "$tmp/cloudflared" "$url" \
+  curl -q -fsSL --proto =https --proto-redir =https --max-redirs 3 --max-time 300 \
+    --max-filesize 134217728 -o "$tmp/cloudflared" "$url" \
     || die "download failed from $url"
 
   local sum; sum=$(sha256sum "$tmp/cloudflared" | cut -d' ' -f1)
@@ -61,9 +66,11 @@ install_cloudflared() {
   ver=$("$tmp/cloudflared" --version 2>/dev/null | head -1)
   [[ $ver == cloudflared* ]] || die "binary failed its own --version check"
 
-  install -d -m 755 -- "$BIN_DIR"
-  install -m 755 -- "$tmp/cloudflared" "$BIN_DIR/cloudflared" \
-    || die "could not install into $BIN_DIR"
+  # Into the user's bin through the same descriptor-relative path as every
+  # other file Portal writes: exclusive temporary, verified parent, atomic.
+  own_dir "$BIN_DIR" || die "$BIN_DIR is not a private directory of yours"
+  state write "$BIN_DIR/cloudflared" 755 < "$tmp/cloudflared" || die "could not install into $BIN_DIR"
+  own_dir "$MARK_DIR" && write_own "$MARK_DIR/installed-cloudflared" "$BIN_DIR/cloudflared"
 
   jq -nc --arg v "$ver" --arg p "$BIN_DIR/cloudflared" \
     '{ok:true, version:$v, path:$p, note:"official Cloudflare release, checksum-pinned; prefer sudo pacman -S cloudflared for repo signatures"}'

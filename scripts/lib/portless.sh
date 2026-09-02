@@ -7,7 +7,11 @@ PORTLESS_DIR="${PORTLESS_STATE_DIR:-$HOME/.portless}"
 # shellcheck source=files.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/files.sh"
 # portless's own state is read with the same owner-only rules as ours.
-routes_json() { cat_own "$PORTLESS_DIR/routes.json" 1048576; }
+ROUTES_CACHE=""; ROUTES_CACHED=0
+routes_json() {   # read once per process; several rungs ask
+  if (( ! ROUTES_CACHED )); then ROUTES_CACHE=$(cat_own "$PORTLESS_DIR/routes.json" 1048576); ROUTES_CACHED=1; fi
+  printf '%s' "$ROUTES_CACHE"
+}
 
 # Probe for a live proxy instead of trusting state files: pidfiles go stale,
 # kill -0 answers EPERM (not "running") for a root-owned proxy, and the
@@ -27,8 +31,8 @@ portless_probe() {
     seen+="$p "
     local scheme
     for scheme in https http; do
-      if curl -sk --max-time 0.4 -o /dev/null -D - "$scheme://127.0.0.1:$p/" 2>/dev/null \
-           | grep -qi '^x-portless:'; then
+      if curl -q -sk --max-time 0.4 --max-redirs 0 -o /dev/null -D - "$scheme://127.0.0.1:$p/" 2>/dev/null \
+           | head -c 16384 | grep -qi '^x-portless:'; then
         PROBE_PORT="$p"; PROBE_SCHEME="$scheme"
         return 0
       fi
@@ -47,11 +51,11 @@ portless_serving_routes() {
   [[ -n $first ]] || return 0   # nothing registered: nothing to disprove
   valid_tld "$first" || return 0
   local code
-  code=$(curl -sk --max-time 0.6 -o /dev/null -w '%{http_code}' \
+  code=$(curl -q -sk --max-time 0.6 --max-redirs 0 -o /dev/null -w '%{http_code}' \
     --resolve "$first:$PROBE_PORT:127.0.0.1" \
     "$PROBE_SCHEME://$first:$PROBE_PORT/" 2>/dev/null)
   [[ $code == 404 ]] || return 0
-  curl -sk --max-time 0.6 \
+  curl -q -sk --max-time 0.6 --max-redirs 0 --max-filesize 4096 \
     --resolve "$first:$PROBE_PORT:127.0.0.1" \
     "$PROBE_SCHEME://$first:$PROBE_PORT/" 2>/dev/null | head -c 4096 \
     | grep -qi portless && return 1

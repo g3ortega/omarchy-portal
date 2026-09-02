@@ -7,7 +7,8 @@
 #   run     -> performs unprivileged fixes, then prints the same report
 #
 # The rungs:
-#   installed      portless on PATH (fix: npm install -g portless — user-level)
+#   installed      portless on PATH (the npm install is a copyable command;
+#                  the plugin never runs a package manager)
 #   ca             the user's own CA exists (minted by portless on first run)
 #   proxy          serving on 443/80 with THIS user's routes (sudo — copy only)
 #   trust_system   CA in the system store (portless trusts it during the
@@ -17,7 +18,9 @@
 #   trust_firefox  CA in each Firefox profile's cert9.db (fix: certutil)
 #
 # Security: the only certificate ever imported is ~/.portless/ca.pem — the CA
-# this user's own portless generated. Nothing is fetched, nothing elevates.
+# this user's own portless generated, read descriptor-relative and verified
+# against the live proxy. Nothing is fetched, nothing is installed, nothing
+# elevates.
 set -o pipefail
 
 SETUP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,13 +36,13 @@ have jq || { echo '{"ok":false,"error":"jq not found"}'; exit 0; }
 # The file at $CA is trusted browser-wide, so it must be what portless mints:
 # a self-signed root whose subject is its own nickname. Anything else in that
 # path (a swapped file, a different state dir) is not imported.
+ca_pem() { cat_own "$CA" 16384; }   # bound read, 16 KiB cap
 ca_is_portless() {
-  own_file "$CA" || return 1
-  (( $(stat -c %s -- "$CA") <= 16384 )) || return 1
+  local pem; pem=$(ca_pem) && [[ -n $pem ]] || return 1
   have openssl || return 1
   local subj issuer
-  subj=$(openssl x509 -in "$CA" -noout -subject 2>/dev/null)
-  issuer=$(openssl x509 -in "$CA" -noout -issuer 2>/dev/null)
+  subj=$(openssl x509 -noout -subject <<<"$pem" 2>/dev/null)
+  issuer=$(openssl x509 -noout -issuer <<<"$pem" 2>/dev/null)
   [[ $subj == *"CN=$NICK"* && $issuer == *"CN=$NICK"* ]] || return 1
   # The file is trusted browser-wide only when it is the CA behind the
   # certificate the live proxy actually presents: a replaced file that signs
@@ -48,7 +51,7 @@ ca_is_portless() {
   local leaf; leaf=$(mktemp) || return 1
   openssl s_client -connect "127.0.0.1:$PROBE_PORT" -servername "portal-probe.$(configured_tld)" </dev/null 2>/dev/null \
     | openssl x509 -outform PEM > "$leaf" 2>/dev/null
-  openssl verify -CAfile "$CA" "$leaf" >/dev/null 2>&1; local rc=$?
+  openssl verify -CAfile <(ca_pem) "$leaf" >/dev/null 2>&1; local rc=$?
   rm -f -- "$leaf"
   return $rc
 }
@@ -91,7 +94,7 @@ report() {
   ff_missing=$(firefox_untrusted | wc -l)
   tld_resolves && tldok=true || tldok=false
 
-  $installed || remaining+=("install portless: handled by 'run' (npm install -g portless)")
+  $installed || remaining+=("install portless: npm install -g portless")
   if [[ $proxy == wrong-tld ]]; then
     remaining+=("restart the proxy so it serves .$(configured_tld) too: $(portless_fix_cmd)")
   elif [[ $proxy != ok ]]; then
@@ -112,32 +115,30 @@ report() {
 case "${1:-status}" in
   status) report ;;
   run)
-    if ! have portless && have npm; then
-      npm install -g portless >/dev/null 2>&1
-    fi
     # A proxy missing the configured TLD is restarted only when that is
     # unprivileged (ours, on a high port); the 443 case stays in `remaining`
     # as a copyable command.
-    if have portless && [[ $(proxy_state) == wrong-tld ]]; then
-      portless_clean_port || portless proxy stop >/dev/null 2>&1
+    PORTLESS=$(resolve_bin portless) || PORTLESS=""
+    if [[ -n $PORTLESS ]] && [[ $(proxy_state) == wrong-tld ]]; then
+      portless_clean_port || "$PORTLESS" proxy stop >/dev/null 2>&1
       portless_probe_reset
     fi
     # Proxy-start is an unprivileged rung like any other: when portless is
     # installed and nothing answers, start a high-port proxy so names work
     # immediately; the report keeps carrying the 443 upgrade.
-    if have portless && [[ $(proxy_state) == off ]]; then
-      portless proxy start -p "${PORTAL_PORTLESS_PORT:-1355}" \
+    if [[ -n $PORTLESS ]] && [[ $(proxy_state) == off ]]; then
+      "$PORTLESS" proxy start -p "${PORTAL_PORTLESS_PORT:-1355}" \
         --tld "$(portless_tld_arg)" >/dev/null 2>&1
       sleep 1
       portless_probe_reset
     fi
     if ca_is_portless && have certutil; then
       if [[ ! -d $NSSDB ]]; then
-        mkdir -p "$NSSDB" && certutil -d "sql:$NSSDB" -N --empty-password >/dev/null 2>&1
+        own_dir "$NSSDB" && certutil -d "sql:$NSSDB" -N --empty-password >/dev/null 2>&1
       fi
-      nss_trusted || certutil -d "sql:$NSSDB" -A -t "C,," -n "$NICK" -i "$CA" >/dev/null 2>&1
+      nss_trusted || certutil -d "sql:$NSSDB" -A -t "C,," -n "$NICK" -i <(ca_pem) >/dev/null 2>&1
       firefox_untrusted | while read -r d; do
-        certutil -d "sql:$d" -A -t "C,," -n "$NICK" -i "$CA" >/dev/null 2>&1
+        certutil -d "sql:$d" -A -t "C,," -n "$NICK" -i <(ca_pem) >/dev/null 2>&1
       done
     fi
     report

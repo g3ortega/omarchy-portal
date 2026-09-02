@@ -355,6 +355,7 @@ Panel {
     var a = pendingAction
     pendingAction = null
     if (a.kind === "install") service.setupProvider(a.provider)
+    else if (a.kind === "share") service.expose(a.entry.port, a.provider, "")
     else if (a.kind === "restart") service.restartProcess(a.entry)
     else service.signalProcess(a.entry, a.kind)
   }
@@ -368,16 +369,24 @@ Panel {
   }
 
   // One activation body for the keyboard and the row's own chips.
-  // A provider's one-click fix may put a binary on the machine; that is asked
+  // Reaching the internet, or putting a binary on the machine, is asked
   // first, in the row, like any other consequential action.
   function chooseProvider(port, provider) {
     if (!service || !provider) return
-    if (provider.status === "ready") { service.expose(port, provider.id, ""); return }
-    if (provider.status !== "setup") return
-    if (provider.id === "cloudflared")
-      requestAction("install", selectedEntry(), { provider: provider.id, label: "cloudflared",
+    var entry = entryForPort(port)
+    if (!entry) return
+    if (provider.status === "ready") {
+      requestAction("share", entry, { provider: provider.id, label: entry.name,
+        clause: "publicly, via " + provider.label })
+    } else if (provider.status === "setup" && provider.id === "cloudflared") {
+      requestAction("install", entry, { provider: provider.id, label: "cloudflared",
         clause: "a checksum-pinned release, into ~/.local/bin" })
-    else service.setupProvider(provider.id)
+    }
+  }
+
+  function entryForPort(port) {
+    var i = indexOfPort(port)
+    return i < 0 ? null : visibleEntries[i]
   }
 
   function activateShareChip() {
@@ -716,7 +725,7 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
                 text: stripLink.armed
-                  ? "installs portless with npm, trusts its CA in Chrome and Firefox, starts the proxy"
+                  ? "trusts your Portless CA in Chrome and Firefox and starts the proxy"
                   : (root.portlessProvider ? root.portlessProvider.detail : "")
                 color: root.panelText
                 font.family: root.fontFamily
@@ -727,16 +736,16 @@ Panel {
             }
 
             // Two shapes of "needs setup": something this plugin may do itself
-            // (after saying exactly what: an npm install and a CA trusted in
-            // the browsers), and something only the user's terminal should do
-            // (anything with elevation) — that one is copy, never execute.
+            // (after saying exactly what: a CA trusted in the browsers, a proxy
+            // started), and something only the user's terminal should do (a
+            // package install, anything with elevation) — copy, never execute.
             Row {
               id: stripLink
               anchors.right: parent.right
               anchors.rightMargin: Style.spacing.lg
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.spacing.sm
-              readonly property bool needsSudo: !!(root.portlessProvider && root.portlessProvider.fix)
+              readonly property bool copyOnly: !!(root.portlessProvider && root.portlessProvider.fix)
               readonly property bool busy: root.service && root.service.busyAction === "portless:setup"
               property bool armed: false
               onVisibleChanged: armed = false
@@ -745,14 +754,14 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 text: {
                   if (stripLink.busy) return "setting up…"
-                  if (stripLink.needsSudo) return "Copy fix"
+                  if (stripLink.copyOnly) return "Copy fix"
                   return stripLink.armed ? "set up" : "Set up"
                 }
                 color: Color.accent
                 font.pixelSize: Style.font.bodySmall
                 onClicked: {
                   if (!root.service || stripLink.busy) return
-                  if (stripLink.needsSudo) {
+                  if (stripLink.copyOnly) {
                     root.service.copyText(root.portlessProvider.fix)
                   } else if (stripLink.armed) {
                     stripLink.armed = false

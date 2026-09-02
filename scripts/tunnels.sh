@@ -118,7 +118,9 @@ cloudflared_status() {
   have cloudflared || { printf 'setup|Not installed — click installs the official build (or: sudo pacman -S cloudflared for repo signatures)|'; return; }
   printf 'ready|Quick tunnel, no account needed|'
 }
-cloudflared_launch() { setsid nohup cloudflared tunnel --no-autoupdate --url "http://localhost:$1" >>"$2" 2>&1 & echo $!; }
+# Launchers print "pid starttime"; the helper gives the daemon its own session
+# and a fresh private log, and PROVIDER_BIN is the resolved absolute path.
+cloudflared_launch() { state launch "$STATE_DIR" "${2##*/}" -- "$PROVIDER_BIN" tunnel --no-autoupdate --url "http://localhost:$1"; }
 # pid<TAB>port for every cloudflared serving a local port, from its own argv.
 # Both the adopter and the stopper read this, so they cannot disagree about
 # what a command line means. Pids come from the caller when it already has a
@@ -133,7 +135,7 @@ cloudflared_targets() {  # [pid...]
   done
 }
 
-cloudflared_url_from_log() { grep -m1 -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$1" 2>/dev/null; }
+cloudflared_url_from_log() { cat_own "$1" "$LOG_CAP" | grep -m1 -oE 'https://[a-z0-9-]+\.trycloudflare\.com'; }
 
 NGROK_API_PORT="${NGROK_API_PORT:-4040}"
 ngrok_status() {
@@ -142,27 +144,32 @@ ngrok_status() {
   # config file's mtime so the 30s poll stops paying for it.
   local cfg="${NGROK_CONFIG:-$HOME/.config/ngrok/ngrok.yml}" cache="$STATE_DIR/ngrok.ok"
   local mt; mt=$(stat -c %Y "$cfg" 2>/dev/null || echo 0)
-  if [[ -f $cache && $(cat "$cache" 2>/dev/null) == "$mt" ]]; then
+  if [[ $(read_own "$cache" 64) == "$mt" ]]; then
     printf 'ready|Authenticated|'; return
   fi
   if ngrok config check >/dev/null 2>&1; then
-    printf '%s' "$mt" > "$cache"
+    write_own "$cache" "$mt"
     printf 'ready|Authenticated|'
   else
-    rm -f "$cache"
+    state_remove "$STATE_DIR" ngrok.ok
     printf 'setup|Run: ngrok config add-authtoken <token>|'
   fi
 }
-ngrok_launch() { setsid nohup ngrok http "$1" --log stdout --log-format json >>"$2" 2>&1 & echo $!; }
+ngrok_launch() { state launch "$STATE_DIR" "${2##*/}" -- "$PROVIDER_BIN" http "$1" --log stdout --log-format json; }
 # The agent's local API. One home for the endpoint, its port, and its timeout.
+# Every curl in this file starts with -q: a ~/.curlrc must not be able to add
+# redirects, proxies or output files to a reviewed request.
 ngrok_api_tunnels() {
-  curl -s --max-time "${1:-0.4}" --max-filesize 65536 "http://127.0.0.1:$NGROK_API_PORT/api/tunnels" 2>/dev/null | head -c 65536
+  curl -q -s --max-time "${1:-0.4}" --max-redirs 0 --max-filesize 65536 \
+    "http://127.0.0.1:$NGROK_API_PORT/api/tunnels" 2>/dev/null | head -c 65536
 }
 
-ngrok_url_from_log() { grep -m1 -oP '"url":"\Khttps://[^"]+' "$1" 2>/dev/null; }
+ngrok_url_from_log() { cat_own "$1" "$LOG_CAP" | grep -m1 -oP '"url":"\Khttps://[^"]+'; }
 
 portless_status() {
-  have portless || { printf 'missing|Install with: npm install -g portless|'; return; }
+  # Not installed is a setup state with a copyable command: the plugin never
+  # runs a package manager itself.
+  have portless || { printf 'setup|Local names need portless|npm install -g portless'; return; }
   if ! portless_probe; then
     printf 'setup|Local names are off|'
     return
@@ -277,8 +284,9 @@ dns_published() {  # <host>
       DOH_URL='https://dns.google/resolve'
     fi
   fi
-  curl -sf --max-time 3 "$DOH_URL?name=$1&type=A" -H 'accept: application/dns-json' \
-    | jq -e '(.Answer // []) | length > 0' >/dev/null 2>&1
+  curl -q -sf --max-time 3 --proto =https --max-redirs 0 --max-filesize 16384 \
+    "$DOH_URL?name=$1&type=A" -H 'accept: application/dns-json' 2>/dev/null \
+    | head -c 16384 | jq -e '(.Answer // []) | length > 0' >/dev/null 2>&1
 }
 dns_resolves_here() {  # <host>: the system path answers; flush the stub once if not
   getent hosts "$1" >/dev/null 2>&1 && return 0
@@ -307,9 +315,7 @@ finish_start() {  # <provider> <port> <url> [hint]
 }
 
 cmd_start_portless() {  # <port> <name>
-  local port="$1" name="$2" lf
-  lf=$(logfile portless "$port")
-  : > "$lf"
+  local port="$1" name="$2" out
   # A port holds one name; drop the previous alias on rename.
   local n; n=$(slug "${name:-port-$port}")
   [[ -n $n ]] || n="port-$port"
@@ -318,8 +324,8 @@ cmd_start_portless() {  # <port> <name>
     # A route this plugin did not create (portless run / CLI) still renames.
     old=$(portless_route_name "$port")
   fi
-  [[ -n $old && $old != "$n" ]] && portless alias --remove "$old" >/dev/null 2>&1
-  portless alias "$n" "$port" --force >>"$lf" 2>&1 || die "portless alias failed; see $lf"
+  [[ -n $old && $old != "$n" ]] && "$PROVIDER_BIN" alias --remove "$old" >/dev/null 2>&1
+  out=$("$PROVIDER_BIN" alias "$n" "$port" --force 2>&1 | head -c 4096) || die "portless alias failed: ${out:0:200}"
   write_own "$(namefile portless "$port")" "$n"
   local resolved; resolved=$(portless_route_url "$n")
   [[ -n $resolved ]] || resolved="https://$n.$(portless_tld)"
@@ -343,22 +349,20 @@ cmd_start() {
   valid_port "$port" || die "invalid port"
   known_provider "$provider" || die "unknown provider"
   augment_path
-  have "$provider" || die "$provider is not installed"
+  PROVIDER_BIN=$(resolve_bin "$provider") || die "$provider is not installed as a trusted executable"
 
   if [[ $provider == portless ]]; then cmd_start_portless "$port" "$name"; return; fi
 
   local pf lf
   pf=$(pidfile "$provider" "$port"); lf=$(logfile "$provider" "$port")
   if alive "$pf" "$provider"; then
-    jq -nc --arg u "$(cat "$(urlfile "$provider" "$port")" 2>/dev/null)" '{ok:true,url:$u}'
+    jq -nc --arg u "$(read_own "$(urlfile "$provider" "$port")" 8192)" '{ok:true,url:$u}'
     return
   fi
 
-  rm -f -- "$lf" "$pf" "$(urlfile "$provider" "$port")"
-  : > "$lf"
-
-  local lpid; lpid=$("${provider}_launch" "$port" "$lf")
-  write_own "$pf" "$lpid $(proc_start "$lpid")"
+  state_remove "$STATE_DIR" "$provider-$port".{pid,url,reach,dns}
+  local pidline; pidline=$("${provider}_launch" "$port" "$lf") || die "could not start $provider"
+  write_own "$pf" "$pidline"
 
   # Poll the log for the public URL rather than blocking on the process.
   local url="" i
@@ -370,8 +374,8 @@ cmd_start() {
   done
 
   if [[ -z $url ]]; then
-    local why; why=$(tail -c 400 "$lf" 2>/dev/null | tr '\n' ' ')
-    alive "$pf" "$provider" || rm -f "$pf"
+    local why; why=$(cat_own "$lf" "$LOG_CAP" | tail -c 400 | tr '\n' ' ')
+    alive "$pf" "$provider" || state_remove "$STATE_DIR" "$provider-$port.pid"
     die "no URL after 30s: ${why:-see $lf}"
   fi
   valid_url "$url" || die "$provider reported an unexpected URL; see $lf"
@@ -392,20 +396,22 @@ cmd_stop() {
   valid_port "$port" || die "invalid port"
   if [[ $provider == portless ]]; then
     augment_path
-    local n; n=$(cat "$(namefile "$provider" "$port")" 2>/dev/null)
+    local n; n=$(read_own "$(namefile "$provider" "$port")" 256)
     [[ -n $n ]] || n=$(portless_route_name "$port")
-    [[ -n $n ]] && portless alias --remove "$n" >/dev/null 2>&1
-    rm -f "$(namefile "$provider" "$port")"
-  elif [[ -f $(pidfile "$provider" "$port") ]]; then
+    if [[ -n $n ]]; then
+      PROVIDER_BIN=$(resolve_bin portless) || die "portless is not installed as a trusted executable"
+      "$PROVIDER_BIN" alias --remove "$n" >/dev/null 2>&1
+    fi
+    state_remove "$STATE_DIR" "portless-$port.name"
+  elif own_file "$(pidfile "$provider" "$port")"; then
     local start; read -r pid start <<<"$(read_own "$(pidfile "$provider" "$port")" 64)"
-    # Kill the whole session started by setsid, not just the leader.
+    # Kill the whole session the launcher created, not just the leader.
     owned_pid "$pid" "$provider" "$start" && { kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; }
   elif declare -f "${provider}_stop_adopted" >/dev/null; then
     # Not ours to begin with: the provider knows how to end its own.
     "${provider}_stop_adopted" "$port"
   fi
-  rm -f "$(pidfile "$provider" "$port")" "$(urlfile "$provider" "$port")" \
-        "$(reachfile "$provider" "$port")" "$(dnsfile "$provider" "$port")"
+  state_remove "$STATE_DIR" "$provider-$port".{pid,url,reach,dns,idle}
   echo '{"ok":true}'
 }
 
@@ -451,7 +457,7 @@ cloudflared_adopt() {
   while IFS=$'\t' read -r cfpid tport; do
     mport=$(grep "pid=$cfpid," <<<"$SOCKS" | grep -oP '127\.0\.0\.1:\K[0-9]+' | head -1)
     [[ -n $mport ]] || continue
-    qhost=$(curl -s --max-time 0.4 --max-filesize 16384 "http://127.0.0.1:$mport/quicktunnel" 2>/dev/null \
+    qhost=$(curl -q -s --max-time 0.4 --max-redirs 0 --max-filesize 16384 "http://127.0.0.1:$mport/quicktunnel" 2>/dev/null \
       | head -c 16384 | jq -r '.hostname // empty' 2>/dev/null)
     [[ $qhost =~ ^[a-z0-9-]+\.trycloudflare\.com$ ]] || continue
     printf '%s\thttps://%s\n' "$tport" "$qhost"
@@ -481,49 +487,68 @@ ngrok_stop_adopted() {  # <port>
   local tname
   tname=$(ngrok_api_tunnels 0.6 \
     | jq -r --arg p ":$1" 'first(.tunnels[]? | select(.config.addr | endswith($p)) | .name | @uri) // empty')
-  [[ -n $tname ]] && curl -s --max-time 2 -X DELETE "http://127.0.0.1:$NGROK_API_PORT/api/tunnels/$tname" >/dev/null 2>&1
+  [[ -n $tname ]] && curl -q -s --max-time 2 --max-redirs 0 -X DELETE "http://127.0.0.1:$NGROK_API_PORT/api/tunnels/$tname" >/dev/null 2>&1
   return 0
 }
 
+IDLE_CAP=600   # a public tunnel whose target has been gone this long is stopped
+
 cmd_status() {
-  # Runs every poll. State files first — no PATH work, no provider binaries —
-  # then each provider's _adopt, which is responsible for its own cheap bail.
-  shopt -s nullglob
-  local f tsv="" listed=" "
-  for f in "$STATE_DIR"/*.url; do
-    local base provider port url="" reach="" dns=""
-    base=${f%.url}; provider=${base##*/}; port=${provider##*-}; provider=${provider%-*}
-    url=$(read_own "$f" 8192)
-    [[ -n $url ]] || continue
+  # Runs every poll. State files first — one descriptor-relative dump of the
+  # state directory, no PATH work, no provider binaries — then each provider's
+  # _adopt, which is responsible for its own cheap bail.
+  # One cheap socket dump answers "is anything on this port", which is all
+  # most adopters need. Process attribution costs ~4x more (the kernel walks
+  # /proc to name each socket's owner), so it is computed at most once, on
+  # demand, by the one adopter that cannot work without it.
+  local LIVE_PORTS=" " SOCKS="" _l
+  while read -r _ _ _ _l _; do LIVE_PORTS+="${_l##*:} "; done < <(ss -tlnH 2>/dev/null)
+
+  local dump tsv="" listed=" " now; printf -v now '%(%s)T' -1
+  dump=$(state_dump "$STATE_DIR" 8192)
+  local provider port url reach pidline dns idle base pid start
+  while IFS=$'\t' read -r provider port url reach pidline dns idle; do
+    valid_port "$port" && valid_url "$url" && known_provider "$provider" || continue
+    base="$provider-$port"
     # portless routes have no process of their own, but a route removed with
     # the portless CLI is gone all the same; everything else must be alive.
     if [[ $provider == portless ]]; then
-      [[ -n $(portless_route_name "$port") ]] || { rm -f "$base".{url,name,reach}; continue; }
-    elif ! alive "$base.pid" "$provider"; then
-      rm -f "$base".{url,pid,reach,dns}
-      continue
+      [[ -n $(portless_route_name "$port") ]] || { state_remove "$STATE_DIR" "$base".{url,name,reach}; continue; }
+    else
+      read -r pid start <<<"$pidline"
+      owned_pid "$pid" "$provider" "$start" || { state_remove "$STATE_DIR" "$base".{url,pid,reach,dns,idle}; continue; }
+      # A log is read only while the URL is being minted; afterwards it only grows.
+      if (( $(stat -c %s -- "$STATE_DIR/$base.log" 2>/dev/null || echo 0) > LOG_CAP )); then state_truncate "$STATE_DIR/$base.log" "$LOG_CAP"; fi
+      # A public tunnel whose target is gone stays up for a while (a restart
+      # should not lose the URL), then fails closed: whatever binds that port
+      # next must not inherit the exposure.
+      if [[ $LIVE_PORTS == *" $port "* ]]; then
+        [[ -n $idle ]] && state_remove "$STATE_DIR" "$base.idle"
+      elif [[ -z $idle ]]; then
+        write_own "$STATE_DIR/$base.idle" "$now"
+      elif [[ $idle =~ ^[0-9]+$ ]] && (( now - idle > IDLE_CAP )); then
+        cmd_stop "$provider" "$port" >/dev/null; continue
+      fi
     fi
-    reach=$(read_own "$base.reach" 64)
     [[ -n $reach ]] || reach=$(provider_reach "$provider")
-    # A log is read only while the URL is being minted; afterwards it only grows.
-    if own_file "$base.log" && (( $(stat -c %s -- "$base.log") > LOG_CAP )); then : > "$base.log"; fi
     # A share whose DNS was still pending at start is re-checked each poll,
     # off-path first, and stops being pending the moment the system resolves it.
-    if own_file "$base.dns"; then
-      if dns_published "$(url_host "$url")" && dns_resolves_here "$(url_host "$url")"; then rm -f "$base.dns"
-      else dns=pending; fi
+    if [[ $dns == pending ]]; then
+      if dns_published "$(url_host "$url")" && dns_resolves_here "$(url_host "$url")"; then state_remove "$STATE_DIR" "$base.dns"; dns=""; fi
     fi
     tsv+="$provider"$'\t'"$port"$'\t'"$url"$'\t'"$reach"$'\t'"$dns"$'\n'
     # One key shape for every provider, so adoption dedup is a single test.
     listed+="$provider:$port "
-  done
-
-  # One cheap dump answers "is anything on this port", which is all most
-  # adopters need. Process attribution costs ~4x more (the kernel walks /proc
-  # to name each socket's owner), so it is computed at most once, on demand,
-  # by the one adopter that cannot work without it.
-  local LIVE_PORTS=" " SOCKS="" _l
-  while read -r _ _ _ _l _; do LIVE_PORTS+="${_l##*:} "; done < <(ss -tlnH 2>/dev/null)
+  done < <(jq -r '.files as $f | $f | to_entries[]
+    | select(.key | test("^[a-z]+-[0-9]+\\.url$"))
+    | (.key | sub("\\.url$"; "")) as $b
+    | ($b | split("-")) as $p
+    | [$p[0], $p[1], (.value | split("\n")[0]),
+       (($f[$b + ".reach"] // "") | split("\n")[0]),
+       (($f[$b + ".pid"] // "") | split("\n")[0]),
+       (if $f[$b + ".dns"] != null then "pending" else "" end),
+       (($f[$b + ".idle"] // "") | split("\n")[0])]
+    | @tsv' <<<"$dump")
 
   local row name aport aurl areach
   for row in "${PROVIDERS[@]}"; do
@@ -563,6 +588,7 @@ cmd_setup() {
   declare -f "${provider}_setup" >/dev/null || die "no automatic setup for $provider"
   "${provider}_setup"
 }
+PROVIDER_BIN=""
 
 # Sourced (by the tests) for its functions only; run as a script for the CLI.
 [[ ${BASH_SOURCE[0]} == "$0" ]] || return 0

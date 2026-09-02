@@ -17,6 +17,12 @@
 
 set -o pipefail
 set -f          # addresses contain '*'; never let the shell glob them
+exec 2> >(head -c 4096 >&2)   # stderr is a producer too: capped here, not by the reader
+
+# Every field this script emits is capped, and so is the number of records:
+# past MAX_PORTS the scan fails closed with an error rather than an
+# ever-growing document.
+MAX_PORTS=512
 
 command -v ss >/dev/null 2>&1 || { echo '{"version":1,"error":"ss not found","ports":[]}'; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo '{"version":1,"error":"jq not found","ports":[]}'; exit 0; }
@@ -32,7 +38,7 @@ if [[ ${1:-} == --probe ]]; then
   trap 'rm -rf "$PROBE_DIR"' EXIT
   for _pp in $2; do
     [[ $_pp =~ ^[0-9]+$ ]] || continue
-    curl -so /dev/null -w '%{http_code} %{time_total}' \
+    curl -q -so /dev/null -w '%{http_code} %{time_total}' --max-redirs 0 --max-filesize 65536 \
       --max-time 1 "http://localhost:$_pp/" > "$PROBE_DIR/$_pp" 2>/dev/null &
   done
   wait
@@ -113,7 +119,7 @@ project_info() {
     local info
     info=$(head -c 262144 -- "$root/package.json" 2>/dev/null \
       | jq -r --argjson allow "$ALLOW_JSON" '
-          [ (if (.name | type) == "string" then .name else "" end),
+          [ (if (.name | type) == "string" then .name[:256] else "" end),
             ( ((.dependencies // {}) + (.devDependencies // {}) + (.peerDependencies // {}))
               | keys | map(select(. as $d | $allow | index($d))) | join(" ") )
           ] | @tsv' 2>/dev/null)
@@ -144,6 +150,9 @@ while read -r _state _rq _sq local_addr _peer procinfo; do
   port="${local_addr##*:}"
   addr="${local_addr%:*}"
   [[ $port =~ ^[0-9]+$ ]] || continue
+  if (( ${#PORT_ADDRS[@]} >= MAX_PORTS )) && [[ -z ${PORT_ADDRS[$port]+x} ]]; then
+    echo "{\"version\":1,\"error\":\"more than $MAX_PORTS listening ports\",\"ports\":[]}"; exit 0
+  fi
   addr="${addr%\%*}"          # strip %iface
   addr="${addr#[}"; addr="${addr%]}"
   addr="${addr#::ffff:}"      # v4-mapped
@@ -178,6 +187,7 @@ emit() {
     if [[ -n $pid && -r /proc/$pid/comm ]]; then
       { comm=$(< "/proc/$pid/comm"); } 2>/dev/null
       comm="${comm%-MainThread}"   # node names its main thread; the process is still node
+      comm="${comm:0:64}"
       # One read serves both forms: the exact argv (record-separated, split in
       # the single assembly jq — no per-pid jq fork) and the display cmdline.
       # A command line past the cap is flagged: restart must not re-run a
@@ -188,7 +198,7 @@ emit() {
       [[ ${#argv_rs} -gt 65536 ]] && { argv_rs="${argv_rs:0:65536}"; argv_cut=1; }
       cmdline="${argv_rs//$'\x1e'/ }"
       cmdline="${cmdline:0:2048}"
-      cwd=$(readlink -- "/proc/$pid/cwd" 2>/dev/null)
+      cwd=$(readlink -- "/proc/$pid/cwd" 2>/dev/null); cwd="${cwd:0:4096}"
       # stat: field 3 is run state; utime+stime are 14+15; starttime is 22 —
       # but comm (field 2) may contain spaces, so parse after the closing paren.
       local statline

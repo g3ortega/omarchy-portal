@@ -116,6 +116,7 @@ case "${1:-list}" in
   expose)    shift; cmd_expose "$@" ;;
   stop)      shift; cmd_stop "$@" ;;
   stop-all)  "$HERE/tunnels.sh" stop-all | jq -r 'if .ok then "stopped every share" else ("error: " + .error) end' ;;
+  uninstall) shift; "$HERE/uninstall.sh" "$@" ;;
   doctor)    cmd_doctor ;;
   refresh)   omarchy-shell "$PLUGIN_ID" refresh ;;
   setup)     "$HERE/portless-setup.sh" run | jq . ;;
@@ -133,6 +134,7 @@ case "${1:-list}" in
   portal expose <provider> <port> [name]
   portal stop <provider> <port>
   portal stop-all                    stop every share and name
+  portal uninstall [--dry]           reverse everything Portal put on the machine
   portal refresh                     ask the running shell to rescan
   portal setup                       full portless setup (installs, trusts browsers)
   portal doctor                      check the plugin's dependencies
