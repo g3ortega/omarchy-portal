@@ -83,7 +83,7 @@ owned_pid() {  # <pid> <name> [start]: the process is that program, and the same
   # process after the descriptor number, so the executable itself also counts.
   local c e
   [[ $1 =~ ^[1-9][0-9]*$ ]] && { read -r c < "/proc/$1/comm"; } 2>/dev/null || return 1
-  [[ $c == "$2" ]] || { e=$(readlink "/proc/$1/exe" 2>/dev/null); [[ ${e##*/} == "$2" ]]; } || return 1
+  [[ $c == "$2" ]] || { e=$(readlink "/proc/$1/exe" 2>/dev/null); e=${e% (deleted)}; [[ ${e##*/} == "$2" ]]; } || return 1
   [[ -z ${3:-} || $(proc_start "$1") == "$3" ]]
 }
 
@@ -466,11 +466,18 @@ cmd_stop() {
       "$bin" alias --remove "$n" >/dev/null 2>&1 || die "portless could not remove the name $n"
     fi
     state_remove "$STATE_DIR" "portless-$port.name"
-  elif pidline=$(read_own "$(pidfile "$provider" "$port")" 64) && [[ -n $pidline ]]; then
-    stop_line "$pidline" "$provider" || die "$provider on port $port did not stop; its records are kept"
-  elif declare -f "${provider}_stop_adopted" >/dev/null; then
-    # Not ours to begin with: the provider knows how to end its own.
-    "${provider}_stop_adopted" "$port"
+  else
+    local pf; pf=$(pidfile "$provider" "$port")
+    if [[ -e $pf || -L $pf ]]; then
+      # Ours: a pidfile that is present but unreadable (truncated, a planted
+      # link) is a failure, not an invitation to adopt — its records stay.
+      pidline=$(read_own "$pf" 64)
+      [[ -n $pidline ]] || die "$provider on port $port has a pidfile that cannot be read; its records are kept"
+      stop_line "$pidline" "$provider" || die "$provider on port $port did not stop; its records are kept"
+    elif declare -f "${provider}_stop_adopted" >/dev/null; then
+      # Not ours to begin with: the provider knows how to end its own.
+      "${provider}_stop_adopted" "$port"
+    fi
   fi
   clear_share "$provider" "$port"
   echo '{"ok":true}'
@@ -536,9 +543,19 @@ cloudflared_stop_adopted() {  # <port>
 ngrok_adopt() {
   [[ $LIVE_PORTS == *" $NGROK_API_PORT "* ]] || return 0
   [[ -n $SOCKS ]] || SOCKS=$(ss -tlnpH 2>/dev/null)
-  grep -F ":$NGROK_API_PORT " <<<"$SOCKS" | grep -qF '"ngrok",pid=' || return 0
+  # comm is settable with prctl, so pin the 4040 owner to the ngrok binary by
+  # its executable, and accept only ngrok's own public hostnames — a hostile
+  # same-uid process cannot then inject an arbitrary "your tunnel" URL.
+  local apid; apid=$(grep -F ":$NGROK_API_PORT " <<<"$SOCKS" | grep -oP 'pid=\K[0-9]+' | head -1)
+  [[ -n $apid ]] || return 0
+  local nbin xe; nbin=$(provider_bin ngrok) || return 0
+  xe=$(readlink "/proc/$apid/exe" 2>/dev/null); xe=${xe% (deleted)}
+  [[ $xe == "$nbin" ]] || return 0
   ngrok_api_tunnels \
-    | jq -r '.tunnels[]? | [( .config.addr | capture(":(?<p>[0-9]+)$").p ), .public_url] | @tsv' 2>/dev/null
+    | jq -r '.tunnels[]?
+        | [( .config.addr | capture(":(?<p>[0-9]+)$").p ), .public_url ]
+        | select(.[1] | test("^https://[a-z0-9-]+\\.(ngrok-free\\.app|ngrok\\.app|ngrok\\.io|ngrok-free\\.dev|ngrok\\.dev)(/|$)"))
+        | @tsv' 2>/dev/null
 }
 
 ngrok_stop_adopted() {  # <port>

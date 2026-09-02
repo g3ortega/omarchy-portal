@@ -170,7 +170,7 @@ emit() {
   local port
   for port in "${!PORT_ADDRS[@]}"; do
     local pid="${PORT_PID[$port]}" comm="" cmdline="" cwd="" root=""
-    local argv_rs="" argv_cut="" cpu_ticks="" rss_kb="" up_sec="" pstate=""
+    local argv_rs="" argv_cut="" cpu_ticks="" rss_kb="" up_sec="" pstate="" st=()
     local lat_ms="" http_code=""
     if [[ -n $PROBE_DIR && -f "$PROBE_DIR/$port" ]]; then
       local probe_out t_int t_frac

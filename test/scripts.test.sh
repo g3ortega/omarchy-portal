@@ -74,7 +74,7 @@ R=$(mktemp -d); for i in $(seq 1 12); do state ensure "$R/a/b/c" & done; wait; [
 # The install marker is JSON, so a path with a space survives.
 M=$(mktemp -d); mkdir -p "$M/my bin"; printf 'x' > "$M/my bin/cloudflared"; d=$(sha256sum "$M/my bin/cloudflared" | cut -d' ' -f1)
 jq -nc --arg p "$M/my bin/cloudflared" --arg s "$d" '{path:$p, sha256:$s}' | state write "$M/installed-cloudflared"
-plan=$(PORTAL_METRICS_DIR=$M PORTAL_STATE_DIR=$M/rt "$S/uninstall.sh" --dry 2>&1)
+plan=$(PORTAL_BIN_DIR="$M/my bin" PORTAL_METRICS_DIR=$M PORTAL_STATE_DIR=$M/rt "$S/uninstall.sh" --dry 2>&1)
 grep -qF "would: state_remove $M/my bin cloudflared" <<<"$plan" && ok "uninstall finds a marked binary in a path with a space" || bad "uninstall lost the marked binary: $plan"
 # State roots pointed at a shared directory lose only Portal's own entries.
 mkdir -p "$M/shared/metrics" "$M/rt2"; : > "$M/shared/thesis.txt"; : > "$M/shared/trusted-stores"; : > "$M/shared/metrics/3000.jsonl"; : > "$M/rt2/cloudflared-1.url"; : > "$M/rt2/notes.txt"
@@ -88,11 +88,16 @@ mkdir -p "$M/stub" "$M/held" "$M/st3" "$M/rt3"; printf '#!/bin/bash\n[[ $1 == pl
 printf 'x' > "$M/held/cloudflared"; d=$(sha256sum "$M/held/cloudflared" | cut -d' ' -f1)
 jq -nc --arg p "$M/held/cloudflared" --arg s "$d" '{path:$p, sha256:$s}' | state write "$M/st3/installed-cloudflared"
 chmod 770 "$M/held"
-out=$(PATH="$M/stub:$PATH" PORTAL_METRICS_DIR=$M/st3 PORTAL_STATE_DIR=$M/rt3 "$S/uninstall.sh" 2>&1); rc=$?
+out=$(PATH="$M/stub:$PATH" PORTAL_BIN_DIR="$M/held" PORTAL_METRICS_DIR=$M/st3 PORTAL_STATE_DIR=$M/rt3 "$S/uninstall.sh" 2>&1); rc=$?
 is "uninstall stops when the binary cannot be removed" "$rc" "1"
 grep -q "$M/held/cloudflared.*its marker is kept" <<<"$out" && ok "and says so" || bad "no message about the kept marker: $out"
 [[ -e $M/st3/installed-cloudflared ]] && ok "and the marker survives" || bad "the marker was deleted"
 chmod 700 "$M/held"
+# A marker whose path is not the bin path Portal installs to is never a delete target.
+mkdir -p "$M/ev/st" "$M/ev/rt" "$M/ev/stub" "$M/ev/bin"; printf '#!/bin/bash\n[[ $1 == plugin && $2 == list ]] && { echo "[]"; exit 0; }\nexit 0\n' > "$M/ev/stub/omarchy"; chmod 755 "$M/ev/stub/omarchy"
+printf 'secret' > "$M/ev/victim"; ed=$(sha256sum "$M/ev/victim" | cut -d' ' -f1)
+jq -nc --arg p "$M/ev/victim" --arg s "$ed" '{path:$p, sha256:$s}' | state write "$M/ev/st/installed-cloudflared"
+PATH="$M/ev/stub:$PATH" PORTAL_BIN_DIR="$M/ev/bin" PORTAL_METRICS_DIR=$M/ev/st PORTAL_STATE_DIR=$M/ev/rt "$S/uninstall.sh" --dry 2>/dev/null | grep -qF "$M/ev/victim" && bad "uninstall would delete a file the marker points at outside the bin dir" || ok "uninstall ignores a marker path outside the bin dir"
 rm -rf "$M"
 
 # stop-own ends only shares with a state file of their own, including one
@@ -236,6 +241,14 @@ is "start rejects a malformed owner" "$(stub_env "$R1" 'cmd_start cloudflared 44
 is "start proceeds for the pid that serves the port" "$(stub_env "$R1" "cmd_start cloudflared 4470 --owner $lp" | jq -c .ok)" "true"
 stub_env "$R1" 'cmd_stop cloudflared 4470 >/dev/null'; kill "$lp" 2>/dev/null
 is "cmd_stop rejects a bad port" "$(cmd_stop cloudflared x | jq -r .error)" "invalid port"
+# A pidfile that is present but unreadable is a failure, not an adopt-and-forget.
+UB="$T/unread"; mkdir -p "$UB"; : > "$UB/cloudflared-4600.pid"; printf 'https://x-y.trycloudflare.com' > "$UB/cloudflared-4600.url"
+is "cmd_stop fails on an empty pidfile rather than clearing state" "$(PORTAL_STATE_DIR="$UB" bash -c 'source "'"$S"'/tunnels.sh"; portless_state_load; cmd_stop cloudflared 4600' | jq -r .error)" "cloudflared on port 4600 has a pidfile that cannot be read; its records are kept"
+is "and the records are kept" "$(ls "$UB" | grep -c -E '^cloudflared-4600\.(pid|url)$')" "2"
+# owned_pid accepts a process whose executable path shows "(deleted)".
+sleep 300 & dpid=$!; dstart=$(cut -d')' -f2- "/proc/$dpid/stat" | awk '{print $20}')
+is "owned_pid matches by comm regardless of a deleted exe" "$(bash -c 'source "'"$S"'/tunnels.sh"; owned_pid '"$dpid"' sleep '"$dstart"' && echo yes || echo no')" "yes"
+kill "$dpid" 2>/dev/null
 
 # ---- proc.py: capped runs, and signals bound to one process -----------------
 PR="$S/lib/proc.py"

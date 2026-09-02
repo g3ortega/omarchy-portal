@@ -356,6 +356,8 @@ def cmd_launch(a):
     if len(a) < 4 or a[2] != "--":
         raise Refused("usage: launch <dir> <logname> -- <argv...>")
     d, logname, argv = a[0], a[1], a[3:]
+    if "/" in logname or logname in (".", ".."):
+        raise Refused(f"refused log name: {logname}")
     if not argv or not os.path.isabs(argv[0]):
         raise Refused("launch needs an absolute executable path")
     exefd = open_exe(argv[0])

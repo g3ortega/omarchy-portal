@@ -498,6 +498,9 @@ Item {
     onExited: function (exitCode) {
       if (!root.alive) return
       if (exitCode === 0) root.applyTunnels(tunOut.text)
+      else root.lastError = exitCode === 124 ? "tunnel status timed out; showing the last known state"
+                          : exitCode === 125 ? "tunnel status produced too much output; showing the last known state"
+                          : "tunnel status failed; showing the last known state"
     }
   }
 
@@ -625,7 +628,13 @@ Item {
       if (!root.shareTarget(port, provider)) return "error: bad provider or port"
       var p = root.providerFor(String(provider))
       if (p.status !== "ready") return "error: " + provider + " is not ready (" + p.status + ")"
-      return root.expose(port, provider, "") ? "ok" : "error: busy, try again"
+      // Bind the share to the process the scan saw on that port, like the
+      // panel does, so a port that has changed hands is refused rather than
+      // silently exposing whatever took it.
+      var n = parseInt(port, 10), owner = null
+      for (var i = 0; i < root.ports.length; i++) if (root.ports[i].port === n) { owner = root.ports[i]; break }
+      if (!owner || owner.pid == null) return "error: nothing Portal scanned is listening on port " + port
+      return root.expose(port, provider, "", owner.pid) ? "ok" : "error: busy, try again"
     }
     function unexpose(provider: string, port: string): string {
       if (root.providers.length === 0) return "error: providers not loaded yet, try again"

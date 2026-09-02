@@ -18,6 +18,7 @@
 Runs as python3 -I -S: no environment or working directory redirects it.
 """
 import os
+import re
 import selectors
 import signal
 import sys
@@ -38,7 +39,7 @@ def starttime(pid):
 
 
 def parse_pid(a, b):
-    if not (a.isdigit() and b.isdigit()) or a.startswith("0"):
+    if not re.fullmatch(r"[1-9][0-9]*", a) or not re.fullmatch(r"[0-9]+", b):
         return None, None
     return int(a), b
 

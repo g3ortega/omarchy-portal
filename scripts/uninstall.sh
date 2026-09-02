@@ -47,6 +47,11 @@ fi
 echo "cloudflared, if it is still the copy Portal installed"
 mark=$(cat_own "$PORTAL_STATE_HOME/installed-cloudflared" 4096)
 path=$(jq -r '.path // empty' <<<"$mark" 2>/dev/null); sum=$(jq -r '.sha256 // empty' <<<"$mark" 2>/dev/null)
+# The marker is under our own state dir, but bound the target anyway: only the
+# one path Portal installs to is ever a delete candidate, so a rewritten marker
+# cannot point the removal at another file.
+EXPECT_BIN="${PORTAL_BIN_DIR:-$HOME/.local/bin}/cloudflared"
+[[ $path == "$EXPECT_BIN" ]] || path=""
 # The digest is taken from the bytes the state helper binds (no link, ours,
 # writable by nobody else), never from whatever a pathname resolves to at the
 # time. A binary that is there but cannot be bound is not judged at all: the

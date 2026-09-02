@@ -91,8 +91,12 @@ case "${1:-}" in
         for v in $(compgen -e); do unset "$v"; done
         for kv in "${envs[@]}"; do [[ $kv =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && export "$kv"; done
       fi
-      cd "$cwd" && exec setsid -f "${argv[@]}" >/dev/null 2>&1 </dev/null
+      cd "$cwd" && exec /usr/bin/setsid -f "${argv[@]}" >/dev/null 2>&1 </dev/null
     )
+    # Report success only once the port is serving again; the relaunch is
+    # detached, so give it a moment. An exec that failed leaves the port free.
+    for ((i = 0; i < 50; i++)); do port_busy "$port" && break; sleep 0.1; done
+    port_busy "$port" || die "restart did not bring a listener back on port $port"
     echo '{"ok":true}'
     ;;
   *) echo '{"ok":false,"error":"usage: lifecycle.sh pause|resume|stop <pid> <start> <port> | restart <pid> <start> <port> <cwd> <argv-json>"}' ;;

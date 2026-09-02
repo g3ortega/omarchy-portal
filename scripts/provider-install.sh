@@ -55,19 +55,21 @@ install_cloudflared() {
     --max-filesize 134217728 -o "$tmp/cloudflared" "$url" \
     || die "download failed from $url"
 
-  local sum; sum=$(sha256sum "$tmp/cloudflared" | cut -d' ' -f1)
+  # Open the download once and never reopen it by path: /proc/self/fd/$dl is
+  # the inode we opened, so a same-uid process cannot swap the file between the
+  # checksum and the install. Every check and the install read that descriptor.
+  exec {dl}<"$tmp/cloudflared" || die "could not open the download"
+  local sum; sum=$(sha256sum "/proc/self/fd/$dl" | cut -d' ' -f1)
   [[ $sum == "${CLOUDFLARED_SHA256[$arch]}" ]] \
-    || die "checksum mismatch for cloudflared $CLOUDFLARED_VERSION ($arch): got $sum"
-  # It must be an ELF binary, not an error page that got a 200.
-  [[ $(head -c 4 "$tmp/cloudflared" | od -An -tx1 | tr -d ' \n') == 7f454c46 ]] \
-    || die "downloaded file is not an ELF binary"
-  chmod 700 "$tmp/cloudflared"
-  local ver
-  ver=$("$tmp/cloudflared" --version 2>/dev/null | head -1)
-  [[ $ver == cloudflared* ]] || die "binary failed its own --version check"
+    || { exec {dl}<&-; die "checksum mismatch for cloudflared $CLOUDFLARED_VERSION ($arch): got $sum"; }
+  # It must be an ELF binary, not an error page that got a 200. The checksum
+  # already pins the exact official bytes, so no separate --version reopen.
+  [[ $(head -c 4 "/proc/self/fd/$dl" | od -An -tx1 | tr -d ' \n') == 7f454c46 ]] \
+    || { exec {dl}<&-; die "downloaded file is not an ELF binary"; }
 
-  own_dir "$BIN_DIR" || die "$BIN_DIR is not a private directory of yours"
-  state write "$BIN_DIR/cloudflared" 755 < "$tmp/cloudflared" || die "could not install into $BIN_DIR"
+  own_dir "$BIN_DIR" || { exec {dl}<&-; die "$BIN_DIR is not a private directory of yours"; }
+  state write "$BIN_DIR/cloudflared" 755 < "/proc/self/fd/$dl" || { exec {dl}<&-; die "could not install into $BIN_DIR"; }
+  exec {dl}<&-
   # Without the marker removal could not tell this copy from the user's own:
   # no marker, no install.
   if ! { own_dir "${MARK%/*}" && write_own "$MARK" "$(jq -nc --arg p "$BIN_DIR/cloudflared" --arg s "$sum" '{path:$p, sha256:$s}')"; }; then
@@ -75,7 +77,7 @@ install_cloudflared() {
     die "could not record the install under ${MARK%/*}"
   fi
 
-  jq -nc --arg v "$ver" --arg p "$BIN_DIR/cloudflared" \
+  jq -nc --arg v "$CLOUDFLARED_VERSION" --arg p "$BIN_DIR/cloudflared" \
     '{ok:true, version:$v, path:$p, note:"official Cloudflare release, checksum-pinned; prefer sudo pacman -S cloudflared for repo signatures"}'
 }
 
