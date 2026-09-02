@@ -45,22 +45,26 @@ else
 fi
 
 echo "cloudflared, if it is still the copy Portal installed"
-mark=$(cat_own "$PORTAL_STATE_HOME/installed-cloudflared" 4096)
-path=$(jq -r '.path // empty' <<<"$mark" 2>/dev/null); sum=$(jq -r '.sha256 // empty' <<<"$mark" 2>/dev/null)
-# The marker is under our own state dir, but bound the target anyway: only the
-# one path Portal installs to is ever a delete candidate, so a rewritten marker
-# cannot point the removal at another file.
+MARKER="$PORTAL_STATE_HOME/installed-cloudflared"
 EXPECT_BIN="${PORTAL_BIN_DIR:-$HOME/.local/bin}/cloudflared"
-[[ $path == "$EXPECT_BIN" ]] || path=""
-# The digest is taken from the bytes the state helper binds (no link, ours,
-# writable by nobody else), never from whatever a pathname resolves to at the
-# time. A binary that is there but cannot be bound is not judged at all: the
-# marker is the only thing that says it is Portal's to delete, so it outlives
-# any removal that did not happen.
-if [[ -n $path && ( -e $path || -L $path ) ]]; then
-  own_file "$path" 134217728 || { echo "could not read $path safely; its marker is kept; nothing else was removed" >&2; exit 1; }
-  if [[ $(cat_own "$path" 134217728 | sha256sum | cut -d' ' -f1) == "$sum" ]]; then
-    run state_remove "${path%/*}" "${path##*/}" || { echo "could not remove $path; its marker is kept; nothing else was removed" >&2; exit 1; }
+if [[ -e $MARKER || -L $MARKER ]]; then
+  # A marker that exists but cannot be read or decoded is not "no marker": it
+  # is the only record that the binary is Portal's, so a bad read aborts rather
+  # than dropping it below.
+  mark=$(cat_own "$MARKER" 4096) || { echo "the cloudflared install marker cannot be read; nothing was removed" >&2; exit 1; }
+  path=$(jq -r '.path // empty' <<<"$mark" 2>/dev/null)
+  sum=$(jq -r '.sha256 // empty' <<<"$mark" 2>/dev/null)
+  [[ -n $path && -n $sum ]] || { echo "the cloudflared install marker is malformed; nothing was removed" >&2; exit 1; }
+  # Only the one path Portal installs to is ever a delete candidate, and the
+  # digest is taken from the bytes the state helper binds, not from a pathname.
+  # The marker is removed only together with the binary; a binary that is gone,
+  # changed, or not at our path leaves the record in place for a retry.
+  if [[ $path == "$EXPECT_BIN" && ( -e $path || -L $path ) ]]; then
+    own_file "$path" 134217728 || { echo "could not read $path safely; its marker is kept; nothing else was removed" >&2; exit 1; }
+    if [[ $(cat_own "$path" 134217728 | sha256sum | cut -d' ' -f1) == "$sum" ]]; then
+      run state_remove "${path%/*}" "${path##*/}" || { echo "could not remove $path; its marker is kept; nothing else was removed" >&2; exit 1; }
+      run state_remove "$PORTAL_STATE_HOME" installed-cloudflared
+    fi
   fi
 fi
 
@@ -77,7 +81,7 @@ remove_known() {  # <dir> <name regex>
 }
 remove_known "$PORTAL_RUNTIME_DIR" '^[a-z]+-[0-9]+\.(pid|url|reach|dns|idle|log|name)$|^\..*\.tmp$'
 remove_known "$PORTAL_STATE_HOME/metrics" '^[0-9]+\.jsonl$|^\..*\.tmp$'
-remove_known "$PORTAL_STATE_HOME" '^(installed-cloudflared|trusted-stores|watched\.json)$|^\..*\.tmp$'
+remove_known "$PORTAL_STATE_HOME" '^(trusted-stores|watched\.json)$|^\..*\.tmp$'   # the install marker is removed with its binary above
 
 echo
 echo "left in place: the portless package (npm uninstall -g portless), ~/.portless,"

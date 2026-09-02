@@ -98,6 +98,12 @@ mkdir -p "$M/ev/st" "$M/ev/rt" "$M/ev/stub" "$M/ev/bin"; printf '#!/bin/bash\n[[
 printf 'secret' > "$M/ev/victim"; ed=$(sha256sum "$M/ev/victim" | cut -d' ' -f1)
 jq -nc --arg p "$M/ev/victim" --arg s "$ed" '{path:$p, sha256:$s}' | state write "$M/ev/st/installed-cloudflared"
 PATH="$M/ev/stub:$PATH" PORTAL_BIN_DIR="$M/ev/bin" PORTAL_METRICS_DIR=$M/ev/st PORTAL_STATE_DIR=$M/ev/rt "$S/uninstall.sh" --dry 2>/dev/null | grep -qF "$M/ev/victim" && bad "uninstall would delete a file the marker points at outside the bin dir" || ok "uninstall ignores a marker path outside the bin dir"
+# A marker that exists but cannot be decoded aborts uninstall and is kept.
+mkdir -p "$M/cor/st" "$M/cor/rt" "$M/cor/stub"; printf '#!/bin/bash\n[[ $1 == plugin && $2 == list ]] && { echo "[]"; exit 0; }\nexit 0\n' > "$M/cor/stub/omarchy"; chmod 755 "$M/cor/stub/omarchy"
+printf 'not json at all' | state write "$M/cor/st/installed-cloudflared"
+out=$(PATH="$M/cor/stub:$PATH" PORTAL_METRICS_DIR=$M/cor/st PORTAL_STATE_DIR=$M/cor/rt "$S/uninstall.sh" 2>&1); rc=$?
+is "uninstall aborts on a malformed install marker" "$rc" "1"
+[[ -e $M/cor/st/installed-cloudflared ]] && ok "and keeps the malformed marker" || bad "the malformed marker was deleted"
 rm -rf "$M"
 
 # stop-own ends only shares with a state file of their own, including one
@@ -196,6 +202,12 @@ is "status fails closed when the state cannot be listed" "$(PORTAL_STATE_DIR="$R
 # Rows are capped like the scanner's ports: past the cap, an error, not a document.
 RC="$T/rows"; mkdir -p "$RC"; for i in $(seq 1 520); do printf 'https://a-b-%s.trycloudflare.com' "$i" > "$RC/cloudflared-$((10000 + i)).url"; printf '999999 1' > "$RC/cloudflared-$((10000 + i)).pid"; done
 is "status reports an error past the row cap" "$(PORTAL_STATE_DIR="$RC" bash -c 'source "'"$S"'/tunnels.sh"; alive_line() { return 0; }; portless_state_load; cmd_status' | jq -r .error)" "more than 512 tunnels"
+# When the Portless directory is over its cap, status keeps the portless markers
+# rather than reading the refused dump as "the route vanished".
+PS="$T/pstate"; mkdir -p "$PS"; for i in $(seq 1 520); do : > "$PS/j$i"; done
+PD="$T/prt"; mkdir -p "$PD"; printf 'https://acme.localhost' > "$PD/portless-3000.url"; printf 'acme' > "$PD/portless-3000.name"; printf 'local' > "$PD/portless-3000.reach"
+PORTLESS_STATE_DIR="$PS" PORTAL_STATE_DIR="$PD" bash -c 'source "'"$S"'/tunnels.sh"; cmd_status >/dev/null'
+is "status keeps portless markers when the Portless state is unreadable" "$(ls "$PD" | grep -c '^portless-3000\.')" "3"
 rm -f "$R1"/crowd-*
 is "stop-own stops what it can list" "$(PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -c .ok)" "true"
 sleep 0.3; pgrep -f "$T/prov/cloudflared" >/dev/null && bad "stop-own left the tunnel running" || ok "and the tunnel is gone"
@@ -307,6 +319,10 @@ mkdir -p "$T/pl"; printf '#!/bin/sh\n' > "$T/pl/portless"; chmod 777 "$T/pl/port
 rep=$(PATH="$T/pl:$PATH" PORTAL_METRICS_DIR=$T/plm "$S/portless-setup.sh" status)
 is "a portless the trusted resolver refuses is not installed" "$(jq -c .checks.installed <<<"$rep")" "false"
 jq -r '.remaining[0]' <<<"$rep" | grep -q "is not a trusted executable" && ok "and the report says how to fix it" || bad "no fix hint: $(jq -c .remaining <<<"$rep")"
+# A cloudflared install shadowed by an untrusted one earlier on PATH is refused,
+# not silently installed where provider_bin will never find it.
+SH="$T/shadow"; mkdir -p "$SH"; printf '#!/bin/sh\n' > "$SH/cloudflared"; chmod 777 "$SH/cloudflared"
+is "install refuses when an untrusted cloudflared shadows the target" "$(PATH="$SH:$PATH" "$S/provider-install.sh" cloudflared 2>/dev/null | jq -r '.error // empty' | grep -c 'shadows the install')" "1"
 
 # ---- portless-setup.sh untrust: a store that keeps the CA stays on record ----
 if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then
@@ -315,7 +331,7 @@ if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then
   # The import itself, through the setup script's own function, and its record.
   PORTAL_METRICS_DIR=$U PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$U"'/nss"' && ok "trust_store imports the CA" || bad "trust_store failed"
   certutil -d "sql:$U/nss" -L -n "portless Local CA" >/dev/null 2>&1 && ok "and the CA is in the store" || bad "the CA is not in the store"
-  is "and the store is on record" "$(cat "$U/trusted-stores")" "$U/nss"
+  is "and the store is on record with a fingerprint" "$(cut -f1 "$U/trusted-stores"); $(cut -f2 "$U/trusted-stores" | grep -qE '^[0-9A-F]{64}$' && echo fp-ok)" "$U/nss; fp-ok"
   # A trust whose record cannot be written is undone: the store ends without the CA.
   mkdir -p "$U/rb/nss"; certutil -d "sql:$U/rb/nss" -N --empty-password >/dev/null 2>&1; mkdir -p "$U/rb/trusted-stores"
   PORTAL_METRICS_DIR=$U/rb PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$U"'/rb/nss"' && bad "trust_store reported success without a record" || ok "trust_store fails when the record cannot be written"
@@ -331,6 +347,17 @@ if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then
   chmod 700 "$U/nss"
   is "untrust succeeds once the store is writable" "$(PORTAL_METRICS_DIR=$U "$S/portless-setup.sh" untrust | jq -c .ok)" "true"
   certutil -d "sql:$U/nss" -L -n "portless Local CA" >/dev/null 2>&1 && bad "the CA is still in the store" || ok "and the CA is gone from the store"
+  # A certificate that replaced Portal's under the same name is not deleted.
+  V=$(mktemp -d); mkdir -p "$V/nss"; certutil -d "sql:$V/nss" -N --empty-password >/dev/null 2>&1
+  PORTAL_METRICS_DIR=$V PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$V"'/nss"' >/dev/null
+  # replace the cert under the same nickname with a different self-signed CA
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$V/k.pem" -out "$V/other.pem" -days 1 -subj "/CN=portless Local CA" >/dev/null 2>&1
+  certutil -d "sql:$V/nss" -D -n "portless Local CA" >/dev/null 2>&1
+  certutil -d "sql:$V/nss" -A -t "C,," -n "portless Local CA" -i "$V/other.pem" >/dev/null 2>&1
+  out=$(PORTAL_METRICS_DIR=$V "$S/portless-setup.sh" untrust)
+  is "untrust reports success when the recorded cert is gone" "$(jq -c .ok <<<"$out")" "true"
+  certutil -d "sql:$V/nss" -L -n "portless Local CA" >/dev/null 2>&1 && ok "and leaves a replacement cert under the same name in place" || bad "untrust deleted a cert Portal did not import"
+  rm -rf "$V"
   rm -rf "$U"
 else
   ok "untrust checks skipped (no certutil or no local Portless CA)"

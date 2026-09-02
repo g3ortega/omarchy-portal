@@ -581,7 +581,7 @@ cmd_status() {
     case ${_l%:*} in 127.*|'*'|0.0.0.0|'[::]'|'[::1]'|'[::ffff:127.'*|::|::1) LIVE_PORTS+="${_l##*:} " ;; esac
   done < <(ss -tlnH 2>/dev/null)
 
-  portless_state_load
+  portless_state_load; local portless_ok=$?
   local dump tsv="" listed=" " now; printf -v now '%(%s)T' -1
   # An unreadable state directory is not an empty one: a tunnel that cannot be
   # listed cannot be cleaned up either, so the caller keeps its last snapshot.
@@ -595,7 +595,9 @@ cmd_status() {
     # portless routes have no process of their own, but a route removed with
     # the portless CLI is gone all the same; everything else must be alive.
     if [[ $provider == portless ]]; then
-      [[ -n $(portless_route_name "$port") ]] || { state_remove "$STATE_DIR" "$base".{url,name,reach}; continue; }
+      # Only when the Portless state was actually readable does an absent route
+      # mean the name is gone; a refused read keeps the markers.
+      (( portless_ok == 0 )) && [[ -z $(portless_route_name "$port") ]] && { state_remove "$STATE_DIR" "$base".{url,name,reach}; continue; }
     else
       alive_line "$pidline" "$provider" || {
         # Only this snapshot's records go: a start since then has written new ones.

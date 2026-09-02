@@ -130,7 +130,10 @@ Item {
   // may say and a deadline, past either of which its whole process group is
   // ended and nothing is passed on (so no document is ever parsed cut short).
   readonly property var deadlines: ({ scan: 20, poll: 20, action: 330, quick: 15 })
-  readonly property var outputCaps: ({ scan: 8388608, poll: 1048576, action: 1048576, quick: 4194304 })
+  // scan: 512 ports x (8 KiB argv, escaped worst-case x2, + a few KiB of other
+  // fields) stays well under this; the ceiling covers the largest valid scan so
+  // a legitimate document is never killed for its size.
+  readonly property var outputCaps: ({ scan: 16777216, poll: 1048576, action: 1048576, quick: 4194304 })
   function runScript(proc, script, args, kind) {
     if (!alive || !pluginDir || proc.running) return false
     var k = kind || "quick"

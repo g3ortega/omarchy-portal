@@ -32,9 +32,17 @@ command -v curl >/dev/null 2>&1 || die "curl not found"
 
 install_cloudflared() {
   local cf
-  if [[ -z ${PORTAL_BIN_DIR:-} ]] && cf=$(resolve_bin cloudflared); then
-    jq -nc --arg v "$("$cf" --version 2>/dev/null | head -1)" '{ok:true,version:$v}'
-    return
+  if [[ -z ${PORTAL_BIN_DIR:-} ]]; then
+    if cf=$(resolve_bin cloudflared); then
+      jq -nc --arg v "$("$cf" --version 2>/dev/null | head -1)" '{ok:true,version:$v}'
+      return
+    fi
+    # An untrusted cloudflared earlier on PATH than our install target would
+    # keep shadowing the copy we are about to write, so installing would report
+    # success while provider_bin still refuses it. Say so instead.
+    local found; found=$(command -v cloudflared 2>/dev/null)
+    [[ -z $found || $found == "$HOME/.local/bin/cloudflared" ]] \
+      || die "cloudflared at $found is not a trusted executable and shadows the install location; fix its permissions or remove it, then set up again"
   fi
 
   local arch

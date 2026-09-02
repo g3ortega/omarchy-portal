@@ -23,9 +23,12 @@ firefox_profiles() {
 # once in the parent shell; a caller inside $(...) that finds nothing loaded
 # loads for itself. Reload after anything that changes routes.
 PORTLESS_STATE=""
+# Returns nonzero when the read was refused (for example the directory is over
+# its entry cap), so a caller can tell "refused" from "empty" instead of acting
+# as if every route vanished.
 portless_state_load() {
-  PORTLESS_STATE=$(state dump "$PORTLESS_DIR" 1048576 512 routes.json proxy.port proxy.tlds proxy.tld 2>/dev/null) \
-    || PORTLESS_STATE='{"files":{}}'
+  PORTLESS_STATE=$(state dump "$PORTLESS_DIR" 1048576 512 routes.json proxy.port proxy.tlds proxy.tld 2>/dev/null) && return 0
+  PORTLESS_STATE='{"files":{}}'; return 1
 }
 portless_file() {  # <name>: contents, or empty
   [[ -n $PORTLESS_STATE ]] || portless_state_load

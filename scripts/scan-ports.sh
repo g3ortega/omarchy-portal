@@ -191,7 +191,7 @@ emit() {
       # \036 == U+001E record separator (tr speaks octal, not \xHH)
       argv_rs=$(tr '\0' '\036' < "/proc/$pid/cmdline" 2>/dev/null)
       argv_rs="${argv_rs%$'\x1e'}"     # the terminating NUL is not an argument
-      [[ ${#argv_rs} -gt 65536 ]] && { argv_rs="${argv_rs:0:65536}"; argv_cut=1; }
+      [[ ${#argv_rs} -gt 8192 ]] && { argv_rs="${argv_rs:0:8192}"; argv_cut=1; }   # a real argv is tiny; 8 KiB is generous and bounds the whole document
       cmdline="${argv_rs//$'\x1e'/ }"
       cmdline="${cmdline:0:2048}"
       cwd=$(readlink -- "/proc/$pid/cwd" 2>/dev/null); cwd="${cwd:0:4096}"
