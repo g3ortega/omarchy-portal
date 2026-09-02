@@ -388,7 +388,9 @@ Panel {
     if (!entry) return
     if (provider.status === "ready") {
       requestAction("share", entry, { label: entry.name, clause: "publicly, via " + provider.label,
-        run: function () { service.expose(port, provider.id, "", entry.pid) } })
+        // stillListed may keep this question through a dev-server restart, so
+        // the pid is read now, at accept time, not when the question opened.
+        run: function () { var e = entryForPort(port); service.expose(port, provider.id, "", (e || entry).pid) } })
     } else if (provider.status === "setup" && provider.setupClause) {
       requestAction("install", entry, { label: provider.id, clause: provider.setupClause,
         run: function () { service.setupProvider(provider.id) } })

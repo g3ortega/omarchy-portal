@@ -78,21 +78,48 @@ def cmd_signal(a):
 
 
 def end_group(pid):
-    """TERM the group, then KILL what is left after the grace period; reap the leader."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    """TERM the whole group, and if anything is still in it after the grace
+    period, KILL the group. The leader exiting does not end this: a descendant
+    that inherited the pipes and ignores TERM is still a group member."""
+    reaped = False
+
+    def reap():
+        nonlocal reaped
+        if reaped:
+            return
         try:
-            os.killpg(pid, sig)
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                reaped = True
+        except ChildProcessError:
+            reaped = True
+
+    def group_gone():
+        try:
+            os.killpg(pid, 0)   # signal 0 sends nothing; it asks whether the group still has members
+            return False
+        except OSError:
+            return True
+
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        pass
+    limit = time.monotonic() + GRACE
+    while time.monotonic() < limit:
+        reap()
+        if group_gone():
+            break
+        time.sleep(0.05)
+    else:
+        try:
+            os.killpg(pid, signal.SIGKILL)
         except OSError:
             pass
-        limit = time.monotonic() + GRACE
-        while time.monotonic() < limit:
-            try:
-                done, _ = os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                return
-            if done:
-                return
-            time.sleep(0.05)
+    if not reaped:
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
 
 
 def cmd_run(a):

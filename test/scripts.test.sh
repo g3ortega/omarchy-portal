@@ -170,7 +170,7 @@ stub_env() {   # run a snippet with the stub as cloudflared and no DNS gate
 # A tunnel whose pidfile cannot be written is stopped again, not left public with no record.
 R1="$T/rt1"; mkdir -p "$R1/cloudflared-4449.pid"
 is "start reports a pidfile it could not write" "$(stub_env "$R1" 'cmd_start cloudflared 4449' | jq -r .error)" "could not record the cloudflared process; it was stopped again"
-sleep 0.3; ps -eo comm,args | grep -q '^cloudflared *.*300$' && bad "the unrecorded tunnel is still running" || ok "and the unrecorded tunnel was stopped"
+sleep 0.3; pgrep -f "$T/prov/cloudflared" >/dev/null && bad "the unrecorded tunnel is still running" || ok "and the unrecorded tunnel was stopped"
 rmdir "$R1/cloudflared-4449.pid"
 is "the same start succeeds once the pidfile can be written" "$(stub_env "$R1" 'cmd_start cloudflared 4449' | jq -r .url)" "https://stub-one-two.trycloudflare.com"
 # A status snapshot taken before a replacement started does not clear the replacement.
@@ -193,7 +193,7 @@ RC="$T/rows"; mkdir -p "$RC"; for i in $(seq 1 520); do printf 'https://a-b-%s.t
 is "status reports an error past the row cap" "$(PORTAL_STATE_DIR="$RC" bash -c 'source "'"$S"'/tunnels.sh"; alive_line() { return 0; }; portless_state_load; cmd_status' | jq -r .error)" "more than 512 tunnels"
 rm -f "$R1"/crowd-*
 is "stop-own stops what it can list" "$(PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -c .ok)" "true"
-sleep 0.3; ps -eo comm,args | grep -q '^cloudflared *.*300$' && bad "stop-own left the tunnel running" || ok "and the tunnel is gone"
+sleep 0.3; pgrep -f "$T/prov/cloudflared" >/dev/null && bad "stop-own left the tunnel running" || ok "and the tunnel is gone"
 # An expired idle timer in a stale snapshot stops nothing but the snapshot's own process.
 stub_env "$R1" 'cmd_start cloudflared 4449 >/dev/null'; old=$(cat "$R1/cloudflared-4449.pid")
 printf '%s' $(( $(printf '%(%s)T' -1) - 700 )) > "$R1/cloudflared-4449.idle"
@@ -217,6 +217,18 @@ ig=$(ps -eo pid,comm,args | awk -v p="$T/prov/cloudflared 300" '$2=="cloudflared
 printf '%s %s' "$ig" "$(awk '{print $22}' "/proc/$ig/stat")" > "$R1/cloudflared-4449.pid"
 is "cmd_stop escalates past an ignored TERM" "$(stub_env "$R1" 'cmd_stop cloudflared 4449' | jq -c .ok)" "true"
 kill -0 "$ig" 2>/dev/null && bad "the TERM-ignoring process is still alive after ok:true" || ok "and the process is gone before ok:true"
+# stop-all reports a tunnel it could not stop, rather than claiming success.
+setsid bash -c 'trap "" TERM; exec "'"$T"'/prov/cloudflared" 300' >/dev/null 2>&1 & sleep 0.4
+sg=$(ps -eo pid,comm,args | awk -v p="$T/prov/cloudflared 300" '$2=="cloudflared" && index($0, p) {print $1}' | head -1)
+printf '%s %s' "$sg" "$(awk '{print $22}' "/proc/$sg/stat")" > "$R1/cloudflared-4449.pid"
+printf 'https://a-b-c.trycloudflare.com' > "$R1/cloudflared-4449.url"; printf 'public' > "$R1/cloudflared-4449.reach"
+is "stop-all reports a tunnel it could not stop" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; proc() { :; }; kill() { :; }; cmd_stop_all' | jq -r .ok)" "false"
+kill "$sg" 2>/dev/null
+# --owner with no value is rejected at once, not spun on.
+is "start rejects a bare --owner" "$(timeout 5 bash -c 'source "'"$S"'/tunnels.sh"; portless_state_load; cmd_start cloudflared 3000 --owner' | jq -r .error)" "invalid owner pid"
+# stop-own enumerates a portless name-only partial start (alias written, url not yet).
+PN="$T/pn"; mkdir -p "$PN"; printf 'acme' > "$PN/portless-4460.name"
+is "stop-own enumerates a portless name-only partial" "$(PORTAL_STATE_DIR="$PN" bash -c 'source "'"$S"'/tunnels.sh"; state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null | jq -r '"'"'.files | keys[] | select(test("^[a-z]+-[0-9]+\\.(url|pid|name)$")) | sub("\\.(url|pid|name)$"; "")'"'"'')" "portless-4460"
 # A start that names the process it is for refuses a port that process no longer serves.
 python3 -m http.server 4470 --bind 127.0.0.1 >/dev/null 2>&1 & lp=$!; sleep 0.6
 is "start refuses a port served by another pid" "$(stub_env "$R1" 'cmd_start cloudflared 4470 --owner 1' | jq -r .error)" "port 4470 is no longer served by pid 1"
@@ -236,6 +248,16 @@ sleep 0.2; ps -eo args | grep -q '^sleep 40$' && bad "run left the helper's chil
 out=$(/usr/bin/python3 -I -S "$PR" run 1000 1 -- bash -c 'sleep 41 & wait' 2>/dev/null); rc=$?
 is "run returns 124 past the deadline" "$rc" "124"
 ps -eo args | grep -q '^sleep 41$' && bad "run left the helper's child behind past the deadline" || ok "and ends that group too"
+# A descendant that stays in the group (no setsid), inherits the pipes and
+# ignores TERM is still killed once the deadline's grace period passes. It
+# records its own pid; run blocks for the deadline plus the grace, so by the
+# time it returns the process is gone, not merely a zombie.
+dmark="$T/desc.pid"
+/usr/bin/python3 -I -S "$PR" run 100000 1 -- bash -c '(trap "" TERM; echo $BASHPID > "'"$dmark"'"; exec sleep 300) & exit 0' >/dev/null 2>&1
+dp=$(cat "$dmark" 2>/dev/null)
+if [[ -n $dp && -e /proc/$dp && $(awk '{print $3}' "/proc/$dp/stat" 2>/dev/null) != Z ]]; then
+  bad "a TERM-ignoring descendant survived the deadline (pid $dp)"; kill -9 "$dp" 2>/dev/null
+else ok "run kills a TERM-ignoring descendant after the grace period"; fi
 python3 -m http.server 4495 --bind 127.0.0.1 >/dev/null 2>&1 & lp=$!; sleep 0.6
 lst=$(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $20}')
 /usr/bin/python3 -I -S "$PR" check "$lp" "$lst" && ok "check accepts the pid with its own start time" || bad "check refused the right process"

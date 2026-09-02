@@ -392,7 +392,10 @@ cmd_start_portless() {  # <port> <name>
 cmd_start() {  # <provider> <port> [name] [--owner <pid>]
   local provider="$1" port="$2" name="" owner=""; shift 2
   while (( $# )); do
-    case $1 in --owner) owner="${2:-}"; shift 2 ;; *) name="$1"; shift ;; esac
+    case $1 in
+      --owner) (( $# >= 2 )) || die "invalid owner pid"; owner="$2"; shift 2 ;;
+      *) name="$1"; shift ;;
+    esac
   done
   valid_port "$port" || die "invalid port"
   known_provider "$provider" || die "unknown provider"
@@ -640,13 +643,17 @@ cmd_status() {
 
 cmd_stop_all() {
   # Everything status would show, not just what has a state file — otherwise a
-  # row you can stop on its own survives "stop everything".
-  local provider port
+  # row you can stop on its own survives "stop everything". A stop that fails
+  # keeps its records and is reported, so "stop everything" never claims a
+  # tunnel it left running.
+  local provider port out failed=()
   while IFS=$'\t' read -r provider port; do
     [[ -n $provider && $port =~ ^[0-9]+$ ]] || continue
-    cmd_stop "$provider" "$port" >/dev/null
+    out=$(cmd_stop "$provider" "$port")
+    jq -e .ok <<<"$out" >/dev/null 2>&1 || failed+=("$provider:$port $(jq -r .error <<<"$out")")
   done < <(cmd_status | jq -r '.tunnels[]? | [.provider, (.port|tostring)] | @tsv')
-  echo '{"ok":true}'
+  if (( ${#failed[@]} )); then jq -nc --args '{ok:false, error:("could not stop: " + ($ARGS.positional | join("; ")))}' "${failed[@]}"
+  else echo '{"ok":true}'; fi
 }
 
 cmd_stop_own() {
@@ -660,7 +667,7 @@ cmd_stop_own() {
     out=$(cmd_stop "$provider" "$port")
     jq -e .ok <<<"$out" >/dev/null 2>&1 || failed+=("$provider:$port $(jq -r .error <<<"$out")")
   done < <(jq -r '.files | keys[]
-    | select(test("^[a-z]+-[0-9]+\\.(url|pid)$")) | sub("\\.(url|pid)$"; "")' <<<"$rows" | sort -u | tr '-' '\t')
+    | select(test("^[a-z]+-[0-9]+\\.(url|pid|name)$")) | sub("\\.(url|pid|name)$"; "")' <<<"$rows" | sort -u | tr '-' '\t')
   if (( ${#failed[@]} )); then jq -nc --args '{ok:false, error:("could not stop: " + ($ARGS.positional | join("; ")))}' "${failed[@]}"
   else echo '{"ok":true}'; fi
 }
