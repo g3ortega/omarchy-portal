@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qt6-declarative-dev-tools
+
+      # The manifest validator and the qs.Ui / qs.Commons QML modules both live
+      # in the Omarchy tree; test/test.sh consumes them via OMARCHY_PATH.
+      # Quickshell itself is not installed here, so the qmllint step degrades
+      # to syntax-and-error checking (the strict pass runs on developer
+      # machines where Quickshell's QML modules exist).
+      - name: Omarchy sources (pinned commit)
+        run: |
+          git init -q "$RUNNER_TEMP/omarchy"
+          git -C "$RUNNER_TEMP/omarchy" fetch -q --depth 1 https://github.com/omacom/omarchy.git b71dcad96e9d0b2962b7d225828a5cb6000ad720
+          git -C "$RUNNER_TEMP/omarchy" checkout -q FETCH_HEAD
+
+      - name: fonttools (glyph verification)
+        run: pip install fonttools==4.60.0
+
+      # The glyph check asserts every icon's codepoint still resolves to the
+      # intended glyph NAME in the font users actually run the bar with.
+      - name: JetBrainsMono Nerd Font
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/jbm.zip" \
+            https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.zip
+          echo "76f05ff3ace48a464a6ca57977998784ff7bdbb65a6d915d7e401cd3927c493c  $RUNNER_TEMP/jbm.zip" | sha256sum -c -
+          unzip -o "$RUNNER_TEMP/jbm.zip" -d "$RUNNER_TEMP/font" 'JetBrainsMonoNerdFont-Regular.ttf'
+
+      - name: Test suite
+        env:
+          OMARCHY_PATH: ${{ runner.temp }}/omarchy
+          FONT: ${{ runner.temp }}/font/JetBrainsMonoNerdFont-Regular.ttf
+        run: test/test.sh
+
+      # A real farm of listening processes carrying each stack's evidence
+      # profile, driven through the whole pipeline. Runtimes absent on the
+      # runner (deno) skip their fixtures; the shell IPC stage self-skips.
+      - name: Live end-to-end farm
+        run: test/e2e-live.sh

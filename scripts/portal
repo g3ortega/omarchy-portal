@@ -1,0 +1,146 @@
+#!/bin/bash
+# Portal from the terminal.
+#
+# The panel is the primary interface, but everything it does is available here
+# too — which is what makes the plugin developable and scriptable. Uses the
+# running shell over IPC when it is up, and falls back to the scripts directly
+# when it is not, so this works while hacking on the plugin with the shell down.
+
+set -o pipefail
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ID="g3ortega.portal"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+SHELL_UP=""
+shell_up() {
+  [[ -n $SHELL_UP ]] || { have omarchy-shell && [[ $(omarchy-shell shell ping 2>/dev/null) == ok ]]; SHELL_UP=$?; }
+  return "$SHELL_UP"
+}
+
+# --- data sources: prefer the live plugin, fall back to the scripts -----------
+get_ports() {
+  # One IPC round-trip: capture the live plugin's answer, fall back to running
+  # the same scan + Detect.js pipeline the shell uses (via the shared loader).
+  local out
+  if shell_up && out=$(omarchy-shell "$PLUGIN_ID" ports 2>/dev/null) && [[ -n $out ]]; then
+    printf '%s' "$out"
+  else
+    have node || { echo "portal: the shell is down and node is not installed" >&2; return 1; }
+    node "$HERE/lib/qmljs.mjs" decorate "$HERE/scan-ports.sh"
+  fi
+}
+
+get_tunnels() {
+  local out
+  if shell_up && out=$(omarchy-shell "$PLUGIN_ID" tunnels 2>/dev/null) && [[ -n $out ]]; then
+    jq '[.[]]' <<<"$out"
+  else
+    "$HERE/tunnels.sh" status | jq '.tunnels'
+  fi
+}
+
+# Detect.js emits an icon NAME; lib/Icons.js maps it to a codepoint. Resolve
+# through the shared loader so the terminal and the panel show the same glyph.
+icon_map() {
+  have node || { echo '{}'; return; }
+  node "$HERE/lib/qmljs.mjs" icons 2>/dev/null || echo '{}'
+}
+
+cmd_list() {
+  local show_all=0
+  [[ ${1:-} == --all ]] && show_all=1
+  local ports tunnels icons
+  ports=$(get_ports) || { echo "portal: could not read ports" >&2; exit 1; }
+  tunnels=$(get_tunnels)
+  icons=$(icon_map)
+
+  jq -r --argjson tunnels "$tunnels" --argjson all "$show_all" --argjson icons "$icons" '
+    map(select($all == 1 or .category != "system"))
+    | sort_by(
+        (if .category == "dev" then 0 elif .category == "service" then 1 else 2 end),
+        .port
+      )
+    | .[]
+    | . as $p
+    | ($tunnels | map(select(.port == $p.port)) | first) as $t
+    | [
+        (.port|tostring),
+        ($icons[.icon] // " "),
+        .label,
+        (if (.name // "") == .label then "" else (.name // "") end),
+        .scope,
+        (if $t then ($t.url + (if $t.reach == "public" then "  [PUBLIC]" else "  [local]" end))
+         else (.url // "") end)
+      ] | @tsv
+  ' <<<"$ports" | column -t -s$'\t'
+}
+
+cmd_providers() { "$HERE/tunnels.sh" providers | jq -r '.providers[] | [.label, .status, .reach, .detail] | @tsv' | column -t -s$'\t'; }
+
+cmd_expose() {
+  local provider="${1:-}" port="${2:-}"
+  [[ -n $provider && -n $port ]] || { echo "usage: portal expose <cloudflared|ngrok|portless> <port> [name]" >&2; exit 2; }
+  "$HERE/tunnels.sh" start "$provider" "$port" "${3:-}" | jq -r 'if .ok then (.url + (if .reach=="public" then "  [PUBLIC]" else "  [local]" end)) else ("error: " + .error) end'
+}
+
+cmd_stop() {
+  local provider="${1:-}" port="${2:-}"
+  [[ -n $provider && -n $port ]] || { echo "usage: portal stop <provider> <port>" >&2; exit 2; }
+  "$HERE/tunnels.sh" stop "$provider" "$port" | jq -r --arg p "$provider" --arg n "$port" 'if .ok then "stopped \($p) on \($n)" else ("error: " + .error) end'
+}
+
+cmd_shared() { get_tunnels | jq -r '.[] | [.provider, (.port|tostring), .reach, .url] | @tsv' | column -t -s$'\t'; }
+
+cmd_doctor() {
+  printf 'portal         %s\n' "$(jq -r .version "$HERE/../manifest.json" 2>/dev/null)"
+  printf 'plugin dir     %s\n' "$(cd "$HERE/.." && pwd)"
+  printf 'shell          %s\n' "$(shell_up && echo running || echo 'not running (offline mode)')"
+  printf 'ss             %s\n' "$(have ss && echo ok || echo MISSING)"
+  printf 'jq             %s\n' "$(have jq && echo ok || echo MISSING)"
+  printf 'curl           %s\n' "$(have curl && echo ok || echo 'MISSING (probes and tunnels need it)')"
+  printf 'node           %s\n' "$(have node && node --version || echo 'MISSING (offline list needs it)')"
+  printf 'wl-copy        %s\n' "$(have wl-copy && echo ok || echo 'MISSING (copy button will not work)')"
+  printf 'xdg-open       %s\n' "$(have xdg-open && echo ok || echo 'MISSING (open button will not work)')"
+  echo
+  echo 'providers:'
+  cmd_providers | sed 's/^/  /'
+  echo
+  printf 'manifest       %s\n' "$(omarchy plugin validate "$HERE/.." >/dev/null 2>&1 && echo valid || echo INVALID)"
+  printf 'enabled        %s\n' "$(omarchy plugin list --json 2>/dev/null | jq -r --arg id "$PLUGIN_ID" '.[]|select(.id==$id)|.enabled' 2>/dev/null || echo unknown)"
+}
+
+case "${1:-list}" in
+  list)      shift; cmd_list "$@" ;;
+  shared)    cmd_shared ;;
+  providers) cmd_providers ;;
+  expose)    shift; cmd_expose "$@" ;;
+  stop)      shift; cmd_stop "$@" ;;
+  stop-all)  "$HERE/tunnels.sh" stop-all | jq -r 'if .ok then "stopped every share" else ("error: " + .error) end' ;;
+  doctor)    cmd_doctor ;;
+  refresh)   omarchy-shell "$PLUGIN_ID" refresh ;;
+  setup)     "$HERE/portless-setup.sh" run | jq . ;;
+  test)      "$HERE/../test/test.sh" ;;
+  -h|--help|help)
+    cat <<USAGE
+ ___         _        _
+| _ \___ _ _| |_ __ _| |
+|  _/ _ \ '_|  _/ _\` | |
+|_| \___/_|  \__\__,_|_|   $(jq -r .version "$HERE/../manifest.json" 2>/dev/null) · listening ports, what is on them, and how to share them
+
+  portal [list] [--all]              list ports (--all includes system ports)
+  portal shared                      list active shares
+  portal providers                   exposure providers and their readiness
+  portal expose <provider> <port> [name]
+  portal stop <provider> <port>
+  portal stop-all                    stop every share and name
+  portal refresh                     ask the running shell to rescan
+  portal setup                       full portless setup (installs, trusts browsers)
+  portal doctor                      check the plugin's dependencies
+  portal test                        run the unit tests
+
+Providers: cloudflared and ngrok publish to the internet. portless only
+creates a local name on this machine; it does not expose anything.
+USAGE
+    ;;
+  *) echo "portal: unknown command '$1' (try --help)" >&2; exit 2 ;;
+esac

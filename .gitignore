@@ -1,0 +1,15 @@
+# No build output. Runtime state lives under $XDG_RUNTIME_DIR/portal, never
+# here: a write in the plugin directory trips Omarchy's hot reload.
+
+# Local tooling
+.venv/
+node_modules/
+__pycache__/
+
+# Editor and OS droppings
+*.log
+*.swp
+.DS_Store
+
+# e2e farm: generated projects, servers, metrics
+tmp/

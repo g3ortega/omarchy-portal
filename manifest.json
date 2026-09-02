@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "id": "g3ortega.portal",
+  "name": "Portal",
+  "version": "1.0.0",
+  "author": "g3ortega",
+  "license": "MIT",
+  "description": "Every listening port with the framework identified, live connections/cpu/memory per row, pause-resume-restart, stable local names (name.localhost) via Portless, and one-click public exposure via Cloudflare or ngrok.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Portal",
+    "description": "Listening ports, what is running on them, and one-click sharing.",
+    "category": "System",
+    "aliases": [
+      "ports",
+      "portal",
+      "tunnel",
+      "ngrok",
+      "cloudflare",
+      "portless"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshSeconds": 5,
+      "showSystemPorts": "Off",
+      "iconColors": "Brand",
+      "barLabel": "Count",
+      "portlessAutoName": "Project",
+      "portlessTld": "localhost"
+    },
+    "schema": [
+      {
+        "key": "portlessTld",
+        "type": "string",
+        "label": "Portless TLD",
+        "defaultValue": "localhost",
+        "description": "TLD for local names. 'localhost' resolves in every browser with zero setup; any other TLD needs a one-time resolver rule, which Portal hands you as a command."
+      },
+      {
+        "key": "portlessAutoName",
+        "type": "enum",
+        "label": "Portless name",
+        "options": [
+          "Project",
+          "Port"
+        ],
+        "defaultValue": "Project",
+        "description": "Name local routes after the detected project, or as port-<number>."
+      },
+      {
+        "key": "showSystemPorts",
+        "type": "enum",
+        "label": "Show system ports",
+        "options": [
+          "Off",
+          "On"
+        ],
+        "defaultValue": "Off",
+        "description": "Include DNS, printing, SSH, and Portal's own proxy and tunnel processes."
+      },
+      {
+        "key": "iconColors",
+        "type": "enum",
+        "label": "Framework icon colors",
+        "options": [
+          "Brand",
+          "Theme"
+        ],
+        "defaultValue": "Brand",
+        "description": "Brand uses each framework's own color. Theme uses your Omarchy palette."
+      },
+      {
+        "key": "refreshSeconds",
+        "type": "integer",
+        "label": "Refresh interval",
+        "min": 2,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 5,
+        "description": "Seconds between port scans. The scan is a single ss call and a few file reads."
+      },
+      {
+        "key": "barLabel",
+        "type": "enum",
+        "label": "Bar label",
+        "options": [
+          "Count",
+          "Icon only"
+        ],
+        "defaultValue": "Count",
+        "description": "Show the number of running dev servers next to the icon."
+      }
+    ]
+  }
+}
