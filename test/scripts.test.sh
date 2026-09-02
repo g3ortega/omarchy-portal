@@ -82,6 +82,17 @@ plan=$(PORTAL_METRICS_DIR=$M/shared PORTAL_STATE_DIR=$M/rt2 "$S/uninstall.sh" --
 grep -q 'rm -rf' <<<"$plan" && bad "uninstall would remove a state root wholesale" || ok "uninstall never removes a state root wholesale"
 is "uninstall removes Portal's entries by name" "$(grep -c -E "would: state_remove $M/(shared trusted-stores|shared/metrics 3000.jsonl|rt2 cloudflared-1.url)$" <<<"$plan")" "3"
 grep -qE 'thesis|notes' <<<"$plan" && bad "uninstall would touch files that are not Portal's" || ok "and leaves other files alone"
+# A binary that could not be removed keeps its marker, and the removal stops there.
+# (omarchy is a stub here so nothing about the live plugin is touched.)
+mkdir -p "$M/stub" "$M/held" "$M/st3" "$M/rt3"; printf '#!/bin/bash\n[[ $1 == plugin && $2 == list ]] && { echo "[]"; exit 0; }\nexit 1\n' > "$M/stub/omarchy"; chmod 755 "$M/stub/omarchy"
+printf 'x' > "$M/held/cloudflared"; d=$(sha256sum "$M/held/cloudflared" | cut -d' ' -f1)
+jq -nc --arg p "$M/held/cloudflared" --arg s "$d" '{path:$p, sha256:$s}' | state write "$M/st3/installed-cloudflared"
+chmod 770 "$M/held"
+out=$(PATH="$M/stub:$PATH" PORTAL_METRICS_DIR=$M/st3 PORTAL_STATE_DIR=$M/rt3 "$S/uninstall.sh" 2>&1); rc=$?
+is "uninstall stops when the binary cannot be removed" "$rc" "1"
+grep -q "could not remove $M/held/cloudflared; its marker is kept" <<<"$out" && ok "and says so" || bad "no message about the kept marker: $out"
+[[ -e $M/st3/installed-cloudflared ]] && ok "and the marker survives" || bad "the marker was deleted"
+chmod 700 "$M/held"
 rm -rf "$M"
 
 # stop-own ends only shares with a state file of their own, including one
@@ -176,7 +187,38 @@ is "stop-own fails closed when the state cannot be listed" "$(PORTAL_STATE_DIR="
 rm -f "$R1"/crowd-*
 is "stop-own stops what it can list" "$(PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -c .ok)" "true"
 sleep 0.3; ps -eo comm,args | grep -q '^cloudflared *.*300$' && bad "stop-own left the tunnel running" || ok "and the tunnel is gone"
+# An expired idle timer in a stale snapshot stops nothing but the snapshot's own process.
+stub_env "$R1" 'cmd_start cloudflared 4449 >/dev/null'; old=$(cat "$R1/cloudflared-4449.pid")
+printf '%s' $(( $(printf '%(%s)T' -1) - 700 )) > "$R1/cloudflared-4449.idle"
+snap=$(state dump "$R1" 8192 4096)
+state launch "$R1" cloudflared-4449.log -- "$T/prov/cloudflared" 300 > "$R1/cloudflared-4449.pid"; rm -f "$R1/cloudflared-4449.idle"
+SNAP="$snap" stub_env "$R1" 'state() { if [[ $1 == dump && $2 == "$STATE_DIR" ]]; then printf "%s" "$SNAP"; else /usr/bin/python3 -I -S "$STATEDIR_PY" "$@"; fi; }; cmd_status >/dev/null'
+sleep 0.2; kill -0 "${old%% *}" 2>/dev/null && ok "the snapshot's own process is left to its live status" || bad "the old process was stopped from a stale snapshot"
+kill -0 "$(cut -d' ' -f1 "$R1/cloudflared-4449.pid")" 2>/dev/null && ok "and the replacement was not stopped" || bad "the replacement was stopped from a stale snapshot"
+kill "${old%% *}" 2>/dev/null
+# A stop is a stop only once the process is gone: it fails, keeping the records, when nothing works.
+is "cmd_stop fails when the process will not die" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; kill() { :; }; cmd_stop cloudflared 4449' | jq -r .error)" "cloudflared on port 4449 did not stop; its records are kept"
+is "and keeps its records" "$(ls "$R1" | grep -c -E '^cloudflared-4449\.(pid|url)$')" "2"
+stub_env "$R1" 'cmd_stop cloudflared 4449 >/dev/null'   # a real stop ends the replacement
+# A process that ignores TERM is killed, and the stop reports only once it is gone.
+setsid bash -c 'trap "" TERM; exec "'"$T"'/prov/cloudflared" 300' >/dev/null 2>&1 & sleep 0.4
+ig=$(ps -eo pid,comm,args | awk -v p="$T/prov/cloudflared 300" '$2=="cloudflared" && index($0, p) {print $1}' | head -1)
+printf '%s %s' "$ig" "$(awk '{print $22}' "/proc/$ig/stat")" > "$R1/cloudflared-4449.pid"
+is "cmd_stop escalates past an ignored TERM" "$(stub_env "$R1" 'cmd_stop cloudflared 4449' | jq -c .ok)" "true"
+kill -0 "$ig" 2>/dev/null && bad "the TERM-ignoring process is still alive after ok:true" || ok "and the process is gone before ok:true"
+# A start that names the process it is for refuses a port that process no longer serves.
+python3 -m http.server 4470 --bind 127.0.0.1 >/dev/null 2>&1 & lp=$!; sleep 0.6
+is "start refuses a port served by another pid" "$(stub_env "$R1" 'cmd_start cloudflared 4470 --owner 1' | jq -r .error)" "port 4470 is no longer served by pid 1"
+is "start rejects a malformed owner" "$(stub_env "$R1" 'cmd_start cloudflared 4470 --owner 0x1' | jq -r .error)" "invalid owner pid"
+is "start proceeds for the pid that serves the port" "$(stub_env "$R1" "cmd_start cloudflared 4470 --owner $lp" | jq -c .ok)" "true"
+stub_env "$R1" 'cmd_stop cloudflared 4470 >/dev/null'; kill "$lp" 2>/dev/null
 is "cmd_stop rejects a bad port" "$(cmd_stop cloudflared x | jq -r .error)" "invalid port"
+
+# ---- portless-setup.sh status: installed means runnable ---------------------
+mkdir -p "$T/pl"; printf '#!/bin/sh\n' > "$T/pl/portless"; chmod 777 "$T/pl/portless"
+rep=$(PATH="$T/pl:$PATH" PORTAL_METRICS_DIR=$T/plm "$S/portless-setup.sh" status)
+is "a portless the trusted resolver refuses is not installed" "$(jq -c .checks.installed <<<"$rep")" "false"
+jq -r '.remaining[0]' <<<"$rep" | grep -q "is not a trusted executable" && ok "and the report says how to fix it" || bad "no fix hint: $(jq -c .remaining <<<"$rep")"
 
 # ---- portless-setup.sh untrust: a store that keeps the CA stays on record ----
 if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then

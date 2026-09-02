@@ -192,7 +192,16 @@ Panel {
   // it: an answer must never land on a port that stopped listening.
   onVisibleEntriesChanged: {
     if (expandedKind !== "" && indexOfPort(selectedPort) < 0) collapse()
-    if (pendingAction !== null && indexOfPort(pendingAction.entry.port) < 0) pendingAction = null
+    if (pendingAction !== null && !stillListed(pendingAction.entry)) pendingAction = null
+  }
+  // The row a question was asked about, still: same port, and the same
+  // process behind it, or at least the same program in the same directory
+  // (a dev server that restarted itself). A different service that took the
+  // port in the meantime gets no answer meant for another.
+  function stillListed(entry) {
+    var now = entryForPort(entry.port)
+    if (!now) return false
+    return now.pid === entry.pid || (now.name === entry.name && now.cwd === entry.cwd)
   }
 
   readonly property var groupOrder: [
@@ -357,7 +366,7 @@ Panel {
   function confirmAccept() {
     var a = pendingAction
     pendingAction = null
-    if (indexOfPort(a.entry.port) >= 0) a.run()
+    if (stillListed(a.entry)) a.run()
   }
 
   // j/k on the detail page walk sibling ports without leaving the charts.
@@ -379,7 +388,7 @@ Panel {
     if (!entry) return
     if (provider.status === "ready") {
       requestAction("share", entry, { label: entry.name, clause: "publicly, via " + provider.label,
-        run: function () { service.expose(port, provider.id, "") } })
+        run: function () { service.expose(port, provider.id, "", entry.pid) } })
     } else if (provider.status === "setup" && provider.setupClause) {
       requestAction("install", entry, { label: provider.id, clause: provider.setupClause,
         run: function () { service.setupProvider(provider.id) } })

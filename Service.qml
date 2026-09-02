@@ -380,10 +380,13 @@ Item {
 
   // Both return whether the action was actually launched, so a caller (the
   // IPC surface) never reports success for a request the busy channel dropped.
-  function expose(port, provider, name) {
+  // ownerPid, when the caller saw a process behind the port, makes the start
+  // refuse a port that another process has taken since.
+  function expose(port, provider, name, ownerPid) {
     if (!shareTarget(port, provider)) return false
     var args = ["start", String(provider), String(port)]
     if (name) args.push(String(name))
+    if (ownerPid !== undefined && ownerPid !== null && /^[1-9][0-9]*$/.test(String(ownerPid))) args.push("--owner", String(ownerPid))
     return _runAction(provider + ":" + port, args, "could not expose that port")
   }
 

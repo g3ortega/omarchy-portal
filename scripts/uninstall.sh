@@ -48,7 +48,9 @@ echo "cloudflared, if it is still the copy Portal installed"
 mark=$(cat_own "$PORTAL_STATE_HOME/installed-cloudflared" 4096)
 path=$(jq -r '.path // empty' <<<"$mark" 2>/dev/null); sum=$(jq -r '.sha256 // empty' <<<"$mark" 2>/dev/null)
 if [[ -n $path && -f $path && $(sha256sum -- "$path" | cut -d' ' -f1) == "$sum" ]]; then
-  run state_remove "${path%/*}" "${path##*/}"
+  # The marker is the only thing that says the binary is Portal's to delete,
+  # so it outlives a removal that did not happen.
+  run state_remove "${path%/*}" "${path##*/}" || { echo "could not remove $path; its marker is kept; nothing else was removed" >&2; exit 1; }
 fi
 
 echo "Portal state"

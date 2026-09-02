@@ -101,14 +101,21 @@ firefox_untrusted() {
 
 report() {
   local installed ca proxy nss ff_missing tldok remaining=()
-  have portless && installed=true || installed=false
+  # Installed means runnable by Portal: on PATH and a trusted executable.
+  resolve_bin portless >/dev/null 2>&1 && installed=true || installed=false
   [[ -n $CA_PEM ]] && ca=true || ca=false
   proxy=$(proxy_state)
   nss_trusted && nss=true || nss=false
   ff_missing=$(firefox_untrusted | wc -l)
   tld_resolves && tldok=true || tldok=false
 
-  $installed || remaining+=("install portless: npm install -g portless")
+  if ! $installed; then
+    if have portless; then
+      remaining+=("portless at $(command -v portless) is not a trusted executable (it and every directory above it must belong to root or you and be writable by nobody else): fix the permissions or reinstall it")
+    else
+      remaining+=("install portless: npm install -g portless")
+    fi
+  fi
   if [[ $proxy == wrong-tld ]]; then
     remaining+=("restart the proxy so it serves .$(configured_tld) too: $(portless_fix_cmd)")
   elif [[ $proxy != ok ]]; then

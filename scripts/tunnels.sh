@@ -286,10 +286,24 @@ reachfile() { printf '%s/%s-%s.reach' "$STATE_DIR" "$1" "$2"; }
 dnsfile()   { printf '%s/%s-%s.dns'   "$STATE_DIR" "$1" "$2"; }   # exists while DNS is pending
 idlefile()  { printf '%s/%s-%s.idle'  "$STATE_DIR" "$1" "$2"; }   # since when the target has been gone
 clear_share() { local n=(); for s in "${SHARE_FILES[@]}"; do n+=("$1-$2.$s"); done; state_remove "$STATE_DIR" "${n[@]}"; }
+# Ending a tunnel means seeing it gone: TERM, a grace period, then KILL, and
+# failure if it is still there, so a record is never cleared over a process
+# that is still public. Both waits are in tenths of a second.
+STOP_TERM_WAIT=50
+STOP_KILL_WAIT=20
 stop_line() {   # <"pid start"> <comm>: end the whole session the launcher created, not just its leader
-  local pid; read -r pid _ <<<"$1"
-  alive_line "$1" "$2" && { kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; }
+  local pid i sig; read -r pid _ <<<"$1"
+  for sig in TERM KILL; do
+    alive_line "$1" "$2" || return 0
+    kill -"$sig" -- "-$pid" 2>/dev/null || kill -"$sig" "$pid" 2>/dev/null
+    local wait; [[ $sig == TERM ]] && wait=$STOP_TERM_WAIT || wait=$STOP_KILL_WAIT
+    for ((i = 0; i < wait; i++)); do alive_line "$1" "$2" || return 0; sleep 0.1; done
+  done
+  return 1
 }
+# Whether the pidfile still says what a status snapshot said: a start since
+# the snapshot wrote a new one, and that one is not the snapshot's to act on.
+snapshot_current() { [[ $(read_own "$(pidfile "$1" "$2")" 64) == "$3" ]]; }   # <provider> <port> <pidline>
 
 alive_line() {  # <"pid start"> <comm>
   local pid start; read -r pid start <<<"$1"
@@ -372,10 +386,19 @@ cmd_start_portless() {  # <port> <name>
   finish_start portless "$port" "$resolved" "$hint"
 }
 
-cmd_start() {
-  local provider="$1" port="$2" name="$3"
+cmd_start() {  # <provider> <port> [name] [--owner <pid>]
+  local provider="$1" port="$2" name="" owner=""; shift 2
+  while (( $# )); do
+    case $1 in --owner) owner="${2:-}"; shift 2 ;; *) name="$1"; shift ;; esac
+  done
   valid_port "$port" || die "invalid port"
   known_provider "$provider" || die "unknown provider"
+  # The panel names the process it showed the user; the port is shared only
+  # while that process still serves it, not whatever took the port since.
+  if [[ -n $owner ]]; then
+    [[ $owner =~ ^[1-9][0-9]*$ ]] || die "invalid owner pid"
+    ss -tlnpH "sport = :$port" 2>/dev/null | grep -qF "pid=$owner," || die "port $port is no longer served by pid $owner"
+  fi
   portless_state_load
   if [[ $provider == portless ]]; then cmd_start_portless "$port" "$name"; return; fi
   local bin; bin=$(provider_bin "$provider") || die "$provider is not installed as a trusted executable"
@@ -392,7 +415,10 @@ cmd_start() {
   local argv=(); mapfile -t argv < <("${provider}_argv" "$port")
   local pidline; pidline=$(state launch "$STATE_DIR" "${lf##*/}" -- "$bin" "${argv[@]}") || die "could not start $provider"
   # A tunnel nobody has a record of would stay public through a removal.
-  write_own "$pf" "$pidline" || { stop_line "$pidline" "$provider"; die "could not record the $provider process; it was stopped again"; }
+  write_own "$pf" "$pidline" || {
+    stop_line "$pidline" "$provider" && die "could not record the $provider process; it was stopped again"
+    die "could not record the $provider process, and it did not stop: pid ${pidline%% *}"
+  }
 
   # Poll the log for the public URL rather than blocking on the process.
   local url="" i
@@ -435,7 +461,7 @@ cmd_stop() {
     fi
     state_remove "$STATE_DIR" "portless-$port.name"
   elif pidline=$(read_own "$(pidfile "$provider" "$port")" 64) && [[ -n $pidline ]]; then
-    stop_line "$pidline" "$provider"
+    stop_line "$pidline" "$provider" || die "$provider on port $port did not stop; its records are kept"
   elif declare -f "${provider}_stop_adopted" >/dev/null; then
     # Not ours to begin with: the provider knows how to end its own.
     "${provider}_stop_adopted" "$port"
@@ -548,7 +574,7 @@ cmd_status() {
     else
       alive_line "$pidline" "$provider" || {
         # Only this snapshot's records go: a start since then has written new ones.
-        [[ $(read_own "$(pidfile "$provider" "$port")" 64) == "$pidline" ]] && clear_share "$provider" "$port"
+        snapshot_current "$provider" "$port" "$pidline" && clear_share "$provider" "$port"
         continue
       }
       # A log is read only while the URL is being minted; afterwards it only
@@ -562,7 +588,7 @@ cmd_status() {
       elif [[ -z $idle ]]; then
         write_own "$(idlefile "$provider" "$port")" "$now"
       elif [[ $idle =~ ^[0-9]+$ ]] && (( now - idle > IDLE_CAP )); then
-        cmd_stop "$provider" "$port" >/dev/null; continue
+        snapshot_current "$provider" "$port" "$pidline" && cmd_stop "$provider" "$port" >/dev/null; continue
       fi
     fi
     [[ -n $reach ]] || reach=$(provider_reach "$provider")
@@ -661,10 +687,10 @@ fi
 case "${1:-}" in
   providers) cmd_providers ;;
   setup)     cmd_setup "${2:-}" ;;
-  start)     cmd_start "${2:-}" "${3:-}" "${4:-}" ;;
+  start)     cmd_start "${2:-}" "${3:-}" "${@:4}" ;;
   stop)      cmd_stop "${2:-}" "${3:-}" ;;
   status)    cmd_status ;;
   stop-all)  cmd_stop_all ;;
   stop-own)  cmd_stop_own ;;
-  *) echo '{"ok":false,"error":"usage: tunnels.sh providers|setup <provider>|start <provider> <port> [name]|stop <provider> <port>|status|stop-all|stop-own"}' ;;
+  *) echo '{"ok":false,"error":"usage: tunnels.sh providers|setup <provider>|start <provider> <port> [name] [--owner <pid>]|stop <provider> <port>|status|stop-all|stop-own"}' ;;
 esac
