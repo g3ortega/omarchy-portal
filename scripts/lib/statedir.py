@@ -215,22 +215,23 @@ def append_one(dirfd, name, data, maxlines, cap):
         fd = None   # not a sample file of ours: replaced, never appended to
     if fd is None:
         atomic_write(dirfd, name, data)
-        return
-    try:
-        os.write(fd, data)
-        size = os.fstat(fd).st_size
-    finally:
-        os.close(fd)
-    # Small files cannot hold too many lines; only past that is the count
-    # checked, by reading the file. Past the byte cap or the line cap, keep
-    # the newest lines that fit, so the file is never past either after a
-    # call and a reader needs no margin.
-    if size <= cap and size < maxlines * 24:
+        size = len(data)
+    else:
+        try:
+            os.write(fd, data)
+            size = os.fstat(fd).st_size
+        finally:
+            os.close(fd)
+    # A file too small to hold maxlines lines (three bytes is the shortest)
+    # needs no count; past that the count is read. Past the byte cap or the
+    # line cap, keep the newest lines that fit, so the file is never past
+    # either after a call and a reader needs no margin.
+    if size <= cap and size < maxlines * 3:
         return
     body = read_leaf(dirfd, name, cap * 2 + len(data)) or b""
-    lines = body.splitlines(keepends=True)
-    if size <= cap and len(lines) <= maxlines:
+    if size <= cap and body.count(b"\n") <= maxlines:
         return
+    lines = body.splitlines(keepends=True)
     lines = lines[-maxlines:]
     while lines and sum(map(len, lines)) > cap:
         lines.pop(0)
