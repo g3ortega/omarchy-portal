@@ -20,7 +20,11 @@ esac
 run() { if (( DRY )); then echo "would: $*"; else "$@"; fi; }
 
 echo "the plugin, so nothing polls while state is removed"
-command -v omarchy >/dev/null 2>&1 && run omarchy plugin disable g3ortega.portal
+if command -v omarchy >/dev/null 2>&1; then
+  if [[ $(omarchy plugin list --json 2>/dev/null | jq -r '.[] | select(.id == "g3ortega.portal") | .enabled') == true ]]; then
+    run omarchy plugin disable g3ortega.portal || { echo "could not disable the plugin; nothing was removed" >&2; exit 1; }
+  fi
+fi
 
 echo "shares and names created by Portal"
 run "$HERE/tunnels.sh" stop-own

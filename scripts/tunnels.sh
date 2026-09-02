@@ -518,8 +518,12 @@ cmd_status() {
   # most adopters need. Process attribution costs ~4x more (the kernel walks
   # /proc to name each socket's owner), so it is computed at most once, on
   # demand, by the one adopter that cannot work without it.
+  # Live means reachable through localhost, which is what every tunnel and
+  # the proxy target: a listener bound only to a LAN address does not count.
   local LIVE_PORTS=" " SOCKS="" _l
-  while read -r _ _ _ _l _; do LIVE_PORTS+="${_l##*:} "; done < <(ss -tlnH 2>/dev/null)
+  while read -r _ _ _ _l _; do
+    case ${_l%:*} in 127.*|'*'|0.0.0.0|'[::]'|'[::1]'|'[::ffff:127.'*|::|::1) LIVE_PORTS+="${_l##*:} " ;; esac
+  done < <(ss -tlnH 2>/dev/null)
 
   portless_state_load
   local dump tsv="" listed=" " now; printf -v now '%(%s)T' -1
@@ -598,13 +602,14 @@ cmd_stop_all() {
 }
 
 cmd_stop_own() {
-  # Only what Portal created (it has a state file); adopted names and tunnels
-  # belong to whoever started them.
+  # Only what Portal created: anything with a url file, or a pidfile (a tunnel
+  # still minting its URL). Adopted names and tunnels belong to whoever
+  # started them and have neither.
   local provider port
   while IFS=$'\t' read -r provider port; do
     cmd_stop "$provider" "$port" >/dev/null
   done < <(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null | jq -r '.files | keys[]
-    | select(test("^[a-z]+-[0-9]+\\.url$")) | sub("\\.url$"; "") | split("-") | @tsv')
+    | select(test("^[a-z]+-[0-9]+\\.(url|pid)$")) | sub("\\.(url|pid)$"; "")' | sort -u | tr '-' '\t')
   echo '{"ok":true}'
 }
 

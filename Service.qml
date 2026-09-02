@@ -334,15 +334,16 @@ Item {
     }
     // A public URL that disappears without Portal stopping it is a lost share
     // the user may have handed out; one that appears is announced too, whether
-    // the panel or IPC asked for it. Not on the first status after a reload:
+    // the panel or IPC asked for it. A hostname that changes under the same
+    // provider and port is both. Not on the first status after a reload:
     // those are not news.
     for (var k in tunnels) {
-      if (tunnels[k].reach === "public" && !next[k] && _stoppingShare !== k)
+      if (tunnels[k].reach === "public" && _stoppingShare !== k && (!next[k] || next[k].url !== tunnels[k].url))
         notify("Port " + tunnels[k].port + " is no longer shared", tunnels[k].host + " went away")
     }
     if (!first) {
       for (var n in next) {
-        if (next[n].reach === "public" && !tunnels[n])
+        if (next[n].reach === "public" && (!tunnels[n] || tunnels[n].url !== next[n].url))
           notify("Port " + next[n].port + " is public", "reachable from the internet at " + next[n].host)
       }
     }
@@ -358,9 +359,13 @@ Item {
   property string _actionFallback: ""
 
   function _runAction(busyKey, args, fallbackMessage) {
-    if (!runTunnels(actionProcess, args, "action")) { actionHint("still working on " + busyAction + " — try again in a moment"); return }
+    if (!runTunnels(actionProcess, args, "action")) {
+      actionHint("still working on " + busyAction + " — try again in a moment")
+      return false
+    }
     busyAction = busyKey
     _actionFallback = fallbackMessage
+    return true
   }
 
   // Both doors (panel and IPC) land here; the shape is checked once, and
@@ -371,20 +376,20 @@ Item {
     return providers.length === 0 || providerFor(String(provider)) !== null   // roster known: it decides
   }
 
+  // Both return whether the action was actually launched, so a caller (the
+  // IPC surface) never reports success for a request the busy channel dropped.
   function expose(port, provider, name) {
     if (!shareTarget(port, provider)) return false
     var args = ["start", String(provider), String(port)]
     if (name) args.push(String(name))
-    _runAction(provider + ":" + port, args, "could not expose that port")
-    return true
+    return _runAction(provider + ":" + port, args, "could not expose that port")
   }
 
   function unexpose(port, provider) {
     if (!shareTarget(port, provider)) return false
     _stoppingShare = provider + ":" + port
-    _runAction(provider + ":" + port, ["stop", String(provider), String(port)],
-               "could not stop sharing")
-    return true
+    return _runAction(provider + ":" + port, ["stop", String(provider), String(port)],
+                      "could not stop sharing")
   }
 
   // action: pause | resume | stop
@@ -603,10 +608,12 @@ Item {
     function ports(): string { return JSON.stringify(root.ports) }
     function tunnels(): string { return JSON.stringify(root.tunnels) }
     function expose(provider: string, port: string): string {
-      return root.expose(port, provider, "") ? "ok" : "error: bad provider or port"
+      if (!root.shareTarget(port, provider)) return "error: bad provider or port"
+      return root.expose(port, provider, "") ? "ok" : "error: busy, try again"
     }
     function unexpose(provider: string, port: string): string {
-      return root.unexpose(port, provider) ? "ok" : "error: bad provider or port"
+      if (!root.shareTarget(port, provider)) return "error: bad provider or port"
+      return root.unexpose(port, provider) ? "ok" : "error: busy, try again"
     }
   }
 }
