@@ -23,11 +23,13 @@ state_append()   { state append "$1" "$2" "${3:-8388608}" 2>/dev/null; }   # std
 PORTAL_RUNTIME_DIR="${PORTAL_STATE_DIR:-${XDG_RUNTIME_DIR:-$HOME/.cache}/portal}"
 PORTAL_STATE_HOME="${PORTAL_METRICS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/portal}"
 
-lifecycle_lock_shared() {
+# One start at a time, and none during uninstall: overlapping starts for one
+# share would each launch, leaving one tunnel with no record. Fails fast.
+lifecycle_lock_exclusive() {
   command -v flock >/dev/null 2>&1 || return 0
   own_dir "$PORTAL_RUNTIME_DIR" 2>/dev/null || return 0
   { exec 8>"$PORTAL_RUNTIME_DIR/.lifecycle.lock"; } 2>/dev/null || return 0
-  flock -n -s 8 2>/dev/null
+  flock -n -x 8 2>/dev/null
 }
 
 valid_port() { [[ ${1:-} =~ ^[0-9]+$ ]] && (( $1 > 0 && $1 < 65536 )); }

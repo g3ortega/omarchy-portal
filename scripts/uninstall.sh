@@ -86,10 +86,12 @@ remove_known() {  # <dir> <name regex>
   run rmdir --ignore-fail-on-non-empty -- "$1"
   (( DRY )) || [[ ! -d $1 ]] || echo "left in place: $1 holds files that are not Portal's"
 }
-exec 9>&- 2>/dev/null || true
 remove_known "$PORTAL_RUNTIME_DIR" '^[a-z]+-[0-9]+\.(pid|url|reach|dns|idle|log|name)$|^\..*\.tmp$|^\.lifecycle\.lock$'
 remove_known "$PORTAL_STATE_HOME/metrics" '^[0-9]+\.jsonl$|^\..*\.tmp$'
 remove_known "$PORTAL_STATE_HOME" '^(trusted-stores|watched\.json)$|^\..*\.tmp$'   # the install marker is removed with its binary above
+# Released only after cleanup: a start that slips in earlier is refused by the
+# lock instead of having its fresh records deleted above.
+exec 9>&- 2>/dev/null || true
 
 echo
 echo "left in place: the portless package (npm uninstall -g portless), ~/.portless,"

@@ -412,7 +412,7 @@ cmd_start() {  # <provider> <port> [name] [--owner <pid>]
   done
   valid_port "$port" || die "invalid port"
   known_provider "$provider" || die "unknown provider"
-  lifecycle_lock_shared || die "cannot start $provider: uninstall is in progress"
+  lifecycle_lock_exclusive || die "cannot start $provider: another operation is in progress"
   # The panel names the process it showed the user; the port is shared only
   # while that process still serves it, not whatever took the port since.
   if [[ -n $owner ]]; then
@@ -612,12 +612,21 @@ cmd_status() {
     # the portless CLI is gone all the same; everything else must be alive.
     if [[ $provider == portless ]]; then
       # Only when the Portless state was actually readable does an absent route
-      # mean the name is gone; a refused read keeps the markers.
-      (( portless_ok == 0 )) && [[ -z $(portless_route_name "$port") ]] && { state_remove "$STATE_DIR" "$base".{url,name,reach}; continue; }
+      # mean the name is gone; a refused read keeps the markers. Re-read before
+      # deleting: an alias registered after this poll's snapshot must not lose
+      # its markers to the stale one.
+      if (( portless_ok == 0 )) && [[ -z $(portless_route_name "$port") ]]; then
+        # Re-read before deleting: an alias registered after this poll's
+        # snapshot must not lose its markers to the stale one.
+        portless_state_load && [[ -z $(portless_route_name "$port") ]] \
+          && { state_remove "$STATE_DIR" "$base".{url,name,reach}; continue; }
+      fi
     else
       alive_line "$pidline" "$provider" || {
         # Only this snapshot's records go: a start since then has written new ones.
-        snapshot_current "$provider" "$port" "$pidline" && clear_share "$provider" "$port"
+        # An unreadable pidfile is not proof of death — a stop fails on those
+        # instead of clearing — so only a readable record is ever removed here.
+        [[ -n $pidline ]] && snapshot_current "$provider" "$port" "$pidline" && clear_share "$provider" "$port"
         continue
       }
       # A log is read only while the URL is being minted; afterwards it only
@@ -681,12 +690,14 @@ cmd_stop_all() {
   # row you can stop on its own survives "stop everything". A stop that fails
   # keeps its records and is reported, so "stop everything" never claims a
   # tunnel it left running.
-  local provider port out failed=()
+  local provider port out failed=() status_out
+  status_out=$(cmd_status)
+  jq -e .ok <<<"$status_out" >/dev/null 2>&1 || die "could not list tunnels; nothing was stopped"
   while IFS=$'\t' read -r provider port; do
     [[ -n $provider && $port =~ ^[0-9]+$ ]] || continue
     out=$(cmd_stop "$provider" "$port")
     jq -e .ok <<<"$out" >/dev/null 2>&1 || failed+=("$provider:$port $(jq -r .error <<<"$out")")
-  done < <(cmd_status | jq -r '.tunnels[]? | [.provider, (.port|tostring)] | @tsv')
+  done < <(jq -r '.tunnels[]? | [.provider, (.port|tostring)] | @tsv' <<<"$status_out")
   if (( ${#failed[@]} )); then jq -nc --args '{ok:false, error:("could not stop: " + ($ARGS.positional | join("; ")))}' "${failed[@]}"
   else echo '{"ok":true}'; fi
 }

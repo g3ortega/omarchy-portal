@@ -129,6 +129,7 @@ mkfifo "$STATE_DIR/cloudflared-4446.pid"; printf 'https://f.trycloudflare.com' >
 out=$(timeout 10 bash -c 'source "'"$S"'/tunnels.sh"; cmd_status' 2>/dev/null); rc=$?
 [[ $rc -eq 0 ]] && ok "status returns with a FIFO planted at a pidfile path" || bad "status blocked or failed (rc=$rc)"
 is "and the FIFO-backed entry is not a tunnel" "$(jq -c '[.tunnels[]|select(.port==4446)]|length' <<<"$out")" "0"
+[[ -e $STATE_DIR/cloudflared-4446.url ]] && ok "and the unreadable pidfile's records are kept" || bad "status cleared records over an unreadable pidfile"
 rm -f "$STATE_DIR/cloudflared-4446".*
 crowd=$(mktemp -d); for i in $(seq 1 600); do : > "$crowd/f$i"; done
 is "a state directory with too many entries dumps nothing" "$(state_dump "$crowd" | jq -c '.files|length')" "0"
@@ -199,6 +200,7 @@ is "status keeps a live share with no reach record" "$(ls "$R1" | grep -c -E '^c
 (cd "$R1" && touch $(seq -f 'crowd-%g' 1 4100))
 is "stop-own fails closed when the state cannot be listed" "$(PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -r .error)" "could not list Portal's state; nothing was stopped"
 is "status fails closed when the state cannot be listed" "$(PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" status | jq -r .error)" "could not list Portal's state"
+is "stop-all fails instead of claiming success when the state cannot be listed" "$(PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-all | jq -r .error)" "could not list tunnels; nothing was stopped"
 # Rows are capped like the scanner's ports: past the cap, an error, not a document.
 RC="$T/rows"; mkdir -p "$RC"; for i in $(seq 1 520); do printf 'https://a-b-%s.trycloudflare.com' "$i" > "$RC/cloudflared-$((10000 + i)).url"; printf '999999 1' > "$RC/cloudflared-$((10000 + i)).pid"; done
 is "status reports an error past the row cap" "$(PORTAL_STATE_DIR="$RC" bash -c 'source "'"$S"'/tunnels.sh"; alive_line() { return 0; }; portless_state_load; cmd_status' | jq -r .error)" "more than 512 tunnels"
@@ -358,6 +360,17 @@ if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then
   is "untrust reports success when the recorded cert is gone" "$(jq -c .ok <<<"$out")" "true"
   certutil -d "sql:$V/nss" -L -n "portless Local CA" >/dev/null 2>&1 && ok "and leaves a replacement cert under the same name in place" || bad "untrust deleted a cert Portal did not import"
   rm -rf "$V"
+  # A ledger that exists but cannot be read is not an empty one: no import may
+  # overwrite it and orphan every earlier record.
+  W=$(mktemp -d); mkdir -p "$W/nss" "$W/nss2"
+  certutil -d "sql:$W/nss" -N --empty-password >/dev/null 2>&1
+  certutil -d "sql:$W/nss2" -N --empty-password >/dev/null 2>&1
+  PORTAL_METRICS_DIR=$W PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$W"'/nss"' >/dev/null
+  chmod 777 "$W/trusted-stores"
+  PORTAL_METRICS_DIR=$W PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$W"'/nss2"' >/dev/null 2>&1 \
+    && bad "trust_store imported over an unreadable ledger" || ok "trust_store refuses when the ledger cannot be read"
+  is "and the earlier record survives" "$(wc -l < "$W/trusted-stores")" "1"
+  chmod 700 "$W/trusted-stores"; rm -rf "$W"
   rm -rf "$U"
 else
   ok "untrust checks skipped (no certutil or no local Portless CA)"

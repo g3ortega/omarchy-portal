@@ -52,12 +52,15 @@ MAX_TRUSTED_STORES=512
 # The SHA-256 fingerprint of a PEM certificate, uppercase hex, no colons.
 ca_fingerprint() { openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g'; }
 trust_store() {  # <nss dir>
-  local pem="$PORTAL_STATE_HOME/ca-import.pem" rc fp count
+  local pem="$PORTAL_STATE_HOME/ca-import.pem" rc fp count rec=""
   fp=$(printf '%s' "$CA_PEM" | ca_fingerprint)
   [[ -n $fp ]] || return 1
-  # Refuse further imports if the record is at capacity, so we never trim and
-  # lose track of earlier imports that uninstall must revert.
-  count=$(cat_own "$TRUSTED" "$TRUSTED_CAP" 2>/dev/null | grep -c $'[^\t]')
+  # A ledger that exists but cannot be read is not an empty one: importing
+  # over it would replace every earlier record with this one entry.
+  if [[ -e $TRUSTED || -L $TRUSTED ]]; then
+    rec=$(cat_own "$TRUSTED" "$TRUSTED_CAP" 2>/dev/null) || return 1
+  fi
+  count=$(grep -c $'[^\t]' <<<"$rec")
   (( count < MAX_TRUSTED_STORES )) || return 1
   { own_dir "$PORTAL_STATE_HOME" && printf '%s' "$CA_PEM" | state write "$pem"; } 2>/dev/null || return 1
   certutil -d "sql:$1" -A -t "C,," -n "$NICK" -i "$pem" >/dev/null 2>&1; rc=$?

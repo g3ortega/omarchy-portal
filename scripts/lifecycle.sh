@@ -97,6 +97,13 @@ case "${1:-}" in
     # detached, so give it a moment. An exec that failed leaves the port free.
     for ((i = 0; i < 50; i++)); do port_busy "$port" && break; sleep 0.1; done
     port_busy "$port" || die "restart did not bring a listener back on port $port"
+    # The listener must be the relaunched service: anything else that grabbed
+    # the port in the meantime is not a successful restart.
+    restart_ok=""
+    for lpid in $(ss -tlnpH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\),.*/\1/p' | sort -u); do
+      [[ $(readlink "/proc/$lpid/cwd" 2>/dev/null) == "$cwd" ]] && { restart_ok=1; break; }
+    done
+    [[ -n $restart_ok ]] || die "port $port is held by another process after restart"
     echo '{"ok":true}'
     ;;
   *) echo '{"ok":false,"error":"usage: lifecycle.sh pause|resume|stop <pid> <start> <port> | restart <pid> <start> <port> <cwd> <argv-json>"}' ;;
