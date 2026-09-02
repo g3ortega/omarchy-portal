@@ -207,18 +207,22 @@ else
 # procState comes from the scanner, so a parsing regression here fails the
 # same way the panel would see it.
 state_of() { "$S/scan-ports.sh" | jq -r --argjson p 45901 '.ports[] | select(.port == $p) | .procState'; }
-out=$("$S/lifecycle.sh" stop "$((NPID + 1))" 45901)
+NSTART=$(jq -r '.[] | select(.port == 45901) | .start' <<<"$DECORATED" | head -1)
+[[ $NSTART =~ ^[0-9]+$ ]] && ok "the scan carries the kernel start time" || bad "no start time in the scan: $NSTART"
+out=$("$S/lifecycle.sh" stop "$((NPID + 1))" "$NSTART" 45901)
 [[ $(jq -r .ok <<<"$out") == false ]] && ok "a pid that does not own the port is refused" || bad "ownership check: $out"
+out=$("$S/lifecycle.sh" stop "$NPID" "$((NSTART + 1))" 45901)
+[[ $(jq -r .ok <<<"$out") == false ]] && ok "a start time that is not the process's is refused" || bad "identity check: $out"
 kill -0 "$NPID" 2>/dev/null && ok "and the real process was not signalled" || bad "the real process died"
-"$S/lifecycle.sh" pause "$NPID" 45901 >/dev/null
+"$S/lifecycle.sh" pause "$NPID" "$NSTART" 45901 >/dev/null
 st=$(state_of)
 [[ $st == T ]] && ok "paused (state T)" || bad "pause: state=$st"
-"$S/lifecycle.sh" resume "$NPID" 45901 >/dev/null
+"$S/lifecycle.sh" resume "$NPID" "$NSTART" 45901 >/dev/null
 st=$(state_of)
 [[ $st == S || $st == R ]] && ok "resumed (state $st)" || bad "resume: state=$st"
 ARGV=$(jq -r --argjson p 45901 '.[] | select(.port == $p) | .argv | @json' <<<"$DECORATED")
 CWD="$FARM/next-app"
-"$S/lifecycle.sh" restart "$NPID" 45901 "$CWD" "$ARGV" >/dev/null
+"$S/lifecycle.sh" restart "$NPID" "$NSTART" 45901 "$CWD" "$ARGV" >/dev/null
 sleep 1
 NEW=$("$S/scan-ports.sh" | jq -r --argjson p 45901 '.ports[] | select(.port == $p) | .pid')
 if [[ -n $NEW && $NEW != "$NPID" ]]; then ok "restarted ($NPID -> $NEW)"; echo "$NEW" >> "$PIDS"
@@ -226,9 +230,9 @@ else bad "restart failed"; fi
 fi
 
 say "restart keeps every byte of an argument"
-LPID=$("$S/scan-ports.sh" | jq -r '.ports[] | select(.port == 45925) | .pid')
-LARGV=$("$S/scan-ports.sh" | jq -c '.ports[] | select(.port == 45925) | .argv')
-"$S/lifecycle.sh" restart "$LPID" 45925 "$FARM/nl-app" "$LARGV" >/dev/null; sleep 1
+LSCAN=$("$S/scan-ports.sh" | jq -c '.ports[] | select(.port == 45925)')
+LPID=$(jq -r .pid <<<"$LSCAN"); LSTART=$(jq -r .start <<<"$LSCAN"); LARGV=$(jq -c .argv <<<"$LSCAN")
+"$S/lifecycle.sh" restart "$LPID" "$LSTART" 45925 "$FARM/nl-app" "$LARGV" >/dev/null; sleep 1
 LNEW=$("$S/scan-ports.sh" | jq -r '.ports[] | select(.port == 45925) | .pid')
 if [[ -n $LNEW && $LNEW != "$LPID" ]]; then
   echo "$LNEW" >> "$PIDS"
@@ -236,9 +240,9 @@ if [[ -n $LNEW && $LNEW != "$LPID" ]]; then
 else bad "no new pid on 45925"; fi
 
 say "restart carries the process's own environment"
-HPID=$("$S/scan-ports.sh" | jq -r '.ports[] | select(.port == 45924) | .pid')
-HARGV=$("$S/scan-ports.sh" | jq -c '.ports[] | select(.port == 45924) | .argv')
-out=$("$S/lifecycle.sh" restart "$HPID" 45924 "$FARM/hook-app" "$HARGV")
+HSCAN=$("$S/scan-ports.sh" | jq -c '.ports[] | select(.port == 45924)')
+HPID=$(jq -r .pid <<<"$HSCAN"); HSTART=$(jq -r .start <<<"$HSCAN"); HARGV=$(jq -c .argv <<<"$HSCAN")
+out=$("$S/lifecycle.sh" restart "$HPID" "$HSTART" 45924 "$FARM/hook-app" "$HARGV")
 [[ $(jq -r .ok <<<"$out") == true ]] && ok "a launcher off this shell's PATH restarts" || bad "restart via process PATH: $out"
 sleep 1
 HNEW=$("$S/scan-ports.sh" | jq -r '.ports[] | select(.port == 45924) | .pid')

@@ -292,10 +292,12 @@ clear_share() { local n=(); for s in "${SHARE_FILES[@]}"; do n+=("$1-$2.$s"); do
 STOP_TERM_WAIT=50
 STOP_KILL_WAIT=20
 stop_line() {   # <"pid start"> <comm>: end the whole session the launcher created, not just its leader
-  local pid i sig; read -r pid _ <<<"$1"
+  local pid start i sig; read -r pid start <<<"$1"
   for sig in TERM KILL; do
     alive_line "$1" "$2" || return 0
-    kill -"$sig" -- "-$pid" 2>/dev/null || kill -"$sig" "$pid" 2>/dev/null
+    # The leader through a pidfd bound to that very process, then the rest of
+    # its group by id; a leader that is gone means the group is not ours.
+    proc signal "$pid" "$start" "$sig" && kill -"$sig" -- "-$pid" 2>/dev/null
     local wait; [[ $sig == TERM ]] && wait=$STOP_TERM_WAIT || wait=$STOP_KILL_WAIT
     for ((i = 0; i < wait; i++)); do alive_line "$1" "$2" || return 0; sleep 0.1; done
   done

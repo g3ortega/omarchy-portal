@@ -198,11 +198,11 @@ sleep 0.2; kill -0 "${old%% *}" 2>/dev/null && ok "the snapshot's own process is
 kill -0 "$(cut -d' ' -f1 "$R1/cloudflared-4449.pid")" 2>/dev/null && ok "and the replacement was not stopped" || bad "the replacement was stopped from a stale snapshot"
 kill "${old%% *}" 2>/dev/null
 # A stop is a stop only once the process is gone: it fails, keeping the records, when nothing works.
-is "cmd_stop fails when the process will not die" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; kill() { :; }; cmd_stop cloudflared 4449' | jq -r .error)" "cloudflared on port 4449 did not stop; its records are kept"
+is "cmd_stop fails when the process will not die" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; proc() { :; }; kill() { :; }; cmd_stop cloudflared 4449' | jq -r .error)" "cloudflared on port 4449 did not stop; its records are kept"
 is "and keeps its records" "$(ls "$R1" | grep -c -E '^cloudflared-4449\.(pid|url)$')" "2"
 # An idle tunnel whose stop failed stays in the status, records and all.
 printf '%s' $(( $(printf '%(%s)T' -1) - 700 )) > "$R1/cloudflared-4449.idle"
-is "status keeps listing an idle tunnel it could not stop" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; kill() { :; }; cmd_status' | jq -c '[.tunnels[]|select(.provider=="cloudflared")|.port]')" "[4449]"
+is "status keeps listing an idle tunnel it could not stop" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; proc() { :; }; kill() { :; }; cmd_status' | jq -c '[.tunnels[]|select(.provider=="cloudflared")|.port]')" "[4449]"
 is "and its records" "$(ls "$R1" | grep -c -E '^cloudflared-4449\.(pid|url)$')" "2"
 stub_env "$R1" 'cmd_stop cloudflared 4449 >/dev/null'   # a real stop ends the replacement
 # A process that ignores TERM is killed, and the stop reports only once it is gone.
@@ -218,6 +218,33 @@ is "start rejects a malformed owner" "$(stub_env "$R1" 'cmd_start cloudflared 44
 is "start proceeds for the pid that serves the port" "$(stub_env "$R1" "cmd_start cloudflared 4470 --owner $lp" | jq -c .ok)" "true"
 stub_env "$R1" 'cmd_stop cloudflared 4470 >/dev/null'; kill "$lp" 2>/dev/null
 is "cmd_stop rejects a bad port" "$(cmd_stop cloudflared x | jq -r .error)" "invalid port"
+
+# ---- proc.py: capped runs, and signals bound to one process -----------------
+PR="$S/lib/proc.py"
+is "run passes output and exit status through" "$(/usr/bin/python3 -I -S "$PR" run 1000 5 -- bash -c 'echo hello; exit 3'; echo "rc=$?")" "hello
+rc=3"
+out=$(/usr/bin/python3 -I -S "$PR" run 100 5 -- bash -c 'sleep 40 & yes | head -c 5000; wait' 2>/dev/null); rc=$?
+is "run returns 125 past the output cap" "$rc" "125"
+is "and passes nothing on" "${#out}" "0"
+sleep 0.2; ps -eo args | grep -q '^sleep 40$' && bad "run left the helper's child behind past the cap" || ok "and ends the whole process group"
+out=$(/usr/bin/python3 -I -S "$PR" run 1000 1 -- bash -c 'sleep 41 & wait' 2>/dev/null); rc=$?
+is "run returns 124 past the deadline" "$rc" "124"
+ps -eo args | grep -q '^sleep 41$' && bad "run left the helper's child behind past the deadline" || ok "and ends that group too"
+python3 -m http.server 4495 --bind 127.0.0.1 >/dev/null 2>&1 & lp=$!; sleep 0.6
+lst=$(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $20}')
+/usr/bin/python3 -I -S "$PR" check "$lp" "$lst" && ok "check accepts the pid with its own start time" || bad "check refused the right process"
+/usr/bin/python3 -I -S "$PR" check "$lp" "$((lst + 1))" && bad "check accepted a wrong start time" || ok "check refuses a wrong start time"
+/usr/bin/python3 -I -S "$PR" signal "$lp" "$((lst + 1))" STOP && bad "signal sent to a wrong start time" || ok "signal refuses a wrong start time"
+is "and the process was not touched" "$(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $1}')" "S"
+# lifecycle.sh carries the same identity from the scan to every signal.
+is "lifecycle refuses a pid that is not the listed process" "$("$S/lifecycle.sh" pause "$lp" "$((lst + 1))" 4495 | jq -r .error)" "pid $lp is no longer the process that was listed"
+is "lifecycle refuses a port the process does not own" "$("$S/lifecycle.sh" pause "$lp" "$lst" 4496 | jq -r .error)" "pid $lp no longer owns port 4496"
+is "lifecycle pauses the listed process" "$("$S/lifecycle.sh" pause "$lp" "$lst" 4495 | jq -c .ok) $(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $1}')" "true T"
+is "lifecycle resumes it" "$("$S/lifecycle.sh" resume "$lp" "$lst" 4495 | jq -c .ok) $(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $1}')" "true S"
+is "lifecycle stops it" "$("$S/lifecycle.sh" stop "$lp" "$lst" 4495 | jq -c .ok)" "true"
+sleep 0.5; kill -0 "$lp" 2>/dev/null && bad "the listener survived stop" || ok "and it is gone"
+scan=$("$S/scan-ports.sh")
+is "the scan carries a numeric start time for every attributed port" "$(jq -c '[.ports[] | select(.pid != null) | .start | type == "number"] | all' <<<"$scan")" "true"
 
 # ---- statedir.py: a short write is completed, never reported as done --------
 SW=$(mktemp -d); /usr/bin/python3 - "$SW" "$S/lib/statedir.py" <<'PY'

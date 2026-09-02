@@ -397,5 +397,8 @@ check("a wildcard bind still opens localhost", e({
   else { fail++; console.log("  FAIL chart rules"); for (const b of bad) console.log("         " + b) }
 }
 
+check("the kernel start time passes through with the pid", { port: 3000, pid: 10, start: 15273183, comm: "node", cmdline: "node srv.js", cwd: "/tmp/x", addresses: ["127.0.0.1"] }, { pid: 10, start: 15273183 })
+check("a scan without a start time yields null, never undefined", { port: 3001, pid: 11, comm: "node", cmdline: "node", cwd: "/tmp/x", addresses: ["127.0.0.1"] }, { start: null })
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

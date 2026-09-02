@@ -225,7 +225,7 @@ emit() {
     for f in "$port" "${PORT_ADDRS[$port]}" "$pid" "$comm" "$cmdline" "$cwd" \
              "$root" "$PROJ_NAME" "$PROJ_MARKERS" "$PROJ_DEPS" \
              "${PORT_CONNS[$port]:-0}" "$cpu_ticks" "$rss_kb" "$up_sec" "$pstate" "$argv_json" \
-             "$lat_ms" "$http_code" "$argv_cut"; do
+             "$lat_ms" "$http_code" "$argv_cut" "${st[19]}"; do
       f="${f//$'\t'/ }"; f="${f//$'\n'/ }"
       f="${f//[$'\x01'-$'\x1f'$'\x7f']/}"   # no C0 control survives; argv is already escaped
       joined+="${joined:+$'\t'}$f"
@@ -258,7 +258,8 @@ emit | jq -Rsc '
       argv: (.[15] | if . == "" then [] else (("\"" + . + "\"") | fromjson | split("\u001e")) end),
       latMs: (.[16] | num),
       httpCode: (.[17] | num),
-      argvTruncated: (.[18] == "1")
+      argvTruncated: (.[18] == "1"),
+      start: (.[19] | num)
     }
     | .scope = (if (.addresses | any(. == "0.0.0.0" or . == "*" or . == "::")) then "all"
                 elif (.addresses | all(. == "127.0.0.1" or . == "::1" or startswith("127."))) then "local"

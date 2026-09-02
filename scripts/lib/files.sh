@@ -5,7 +5,9 @@
 # are exclusive temporaries renamed into place. Third-party state (Portless's
 # directory) is read the same way.
 STATEDIR_PY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/statedir.py"
+PROC_PY="${STATEDIR_PY%/*}/proc.py"
 state() { /usr/bin/python3 -I -S "$STATEDIR_PY" "$@"; }   # -I: no env or cwd can redirect the interpreter
+proc()  { /usr/bin/python3 -I -S "$PROC_PY" "$@"; }       # signal <pid> <start> <SIG> | check <pid> <start>
 own_dir()   { state ensure "$@" 2>/dev/null; }                   # create 0700 and verify
 own_file()  { state read "$1" "${2:-1048576}" >/dev/null 2>&1; }  # a plain owned file under the cap
 cat_own()   { state read "$1" "${2:-1048576}" 2>/dev/null; }      # whole file, capped

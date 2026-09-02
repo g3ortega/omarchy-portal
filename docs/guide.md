@@ -284,11 +284,14 @@ Portal runs unsandboxed inside `omarchy-shell`, like every Omarchy plugin.
   Portless's own state, goes through `scripts/lib/statedir.py`: files are
   opened relative to a verified directory, never through a link, under a byte
   cap, and replaced atomically. A pidfile records the process's kernel start
-  time, so a reused pid is never signaled.
+  time, the scan carries it for every listed process, and every signal goes
+  through a pidfd bound to that pid and start time (`scripts/lib/proc.py`),
+  so a reused pid is never signaled.
   Provider binaries run by absolute path after a regular-file, owner and
   mode check, never by a bare name through PATH.
-- Every helper runs under a hard deadline (`timeout`, which signals the whole
-  process group); the scanner caps every field, its stderr, and the number
+- Every helper runs under a byte ceiling on its output and a hard deadline
+  (`scripts/lib/proc.py`, which ends the whole process group past either and
+  passes nothing on); the scanner caps every field, its stderr, and the number
   of ports it will describe (past 512 it reports an error instead); provider
   API bodies and the installer download are byte-capped; every `curl` starts
   with `-q` so a `~/.curlrc` cannot alter the request; a tunnel's log

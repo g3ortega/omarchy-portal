@@ -3,13 +3,16 @@
 # re-executes processes the user already owns — kill(2) refuses cross-user
 # signals, so there is no privilege to escalate and none is requested.
 #
-#   pause <pid> <port>                SIGSTOP (freeze; resume brings it back)
-#   resume <pid> <port>               SIGCONT
-#   stop <pid> <port>                 SIGTERM
-#   restart <pid> <port> <cwd> <argv-json>
+#   pause <pid> <start> <port>        SIGSTOP (freeze; resume brings it back)
+#   resume <pid> <start> <port>       SIGCONT
+#   stop <pid> <start> <port>         SIGTERM
+#   restart <pid> <start> <port> <cwd> <argv-json>
 #
-# Every action re-checks that <pid> still owns the listening socket on <port>
-# before signalling: the pid was scanned seconds ago and may have been reused.
+# <start> is the kernel start time the scan saw (field 22 of /proc/<pid>/stat):
+# pid and start time together name one process, so a pid reused since the
+# scan is refused. Every action re-checks that identity and that the process
+# still owns the listening socket on <port>, and signals through a pidfd
+# bound to that same process (scripts/lib/proc.py), never a bare pid.
 #
 # restart re-executes the process's own exact argv (NUL-split by the scanner,
 # passed as JSON) in its own cwd and with its own environment, read from
@@ -18,6 +21,9 @@
 # the argv, and the environment is applied with builtins, never on a command
 # line where another user could read it.
 set -o pipefail
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/files.sh
+source "$HERE/lib/files.sh"
 
 die() { jq -nc --arg e "$1" '{ok:false,error:$e}'; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo '{"ok":false,"error":"jq not found"}'; exit 0; }
@@ -25,30 +31,33 @@ command -v jq >/dev/null 2>&1 || { echo '{"ok":false,"error":"jq not found"}'; e
 port_busy() { ss -tlnH "sport = :$1" 2>/dev/null | grep -q .; }
 owns_port() { ss -tlnpH "sport = :$2" 2>/dev/null | grep -qF "pid=$1,"; }
 
-target() {  # <pid> <port>: validated, and still the socket's owner
-  [[ $1 =~ ^[1-9][0-9]*$ && $2 =~ ^[0-9]+$ ]] && (( $2 > 0 && $2 < 65536 )) || die "invalid pid/port"
-  owns_port "$1" "$2" || die "pid $1 no longer owns port $2"
+target() {  # <pid> <start> <port>: validated, the process the scan listed, and still the socket's owner
+  [[ $1 =~ ^[1-9][0-9]*$ && $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] && (( $3 > 0 && $3 < 65536 )) || die "invalid pid/start/port"
+  proc check "$1" "$2" || die "pid $1 is no longer the process that was listed"
+  owns_port "$1" "$3" || die "pid $1 no longer owns port $3"
 }
 
 case "${1:-}" in
   pause|resume|stop)
     case $1 in pause) sig=STOP ;; resume) sig=CONT ;; stop) sig=TERM ;; esac
-    target "${2:-}" "${3:-}"
-    kill -"$sig" "$2" 2>/dev/null || die "could not $1 pid $2"
+    target "${2:-}" "${3:-}" "${4:-}"
+    proc signal "$2" "$3" "$sig" || die "could not $1 pid $2"
     echo '{"ok":true}'
     ;;
   restart)
-    pid="${2:-}" port="${3:-}" cwd="${4:-}" argv_json="${5:-}"
-    target "$pid" "$port"
+    pid="${2:-}" start="${3:-}" port="${4:-}" cwd="${5:-}" argv_json="${6:-}"
+    target "$pid" "$start" "$port"
     [[ -d $cwd ]] || die "working directory is gone: $cwd"
     # Rebuild the exact argv, NUL-separated so an argument may hold anything,
     # newlines included. jq validates; bash mapfile keeps each element intact —
     # no word splitting, no glob, no shell -c anywhere.
     mapfile -d '' argv < <(jq --raw-output0 '.[] | strings' <<<"$argv_json" 2>/dev/null)
     [[ ${#argv[@]} -gt 0 ]] || die "no command line recorded for pid $pid"
-    # The process's environment and executable, while it still exists.
+    # The process's environment and executable, while it still exists; the
+    # identity is checked again afterwards, so what was read is that process's.
     envs=(); mapfile -d '' envs < "/proc/$pid/environ" 2>/dev/null
     exe=$(readlink "/proc/$pid/exe" 2>/dev/null); exe=${exe% (deleted)}
+    proc check "$pid" "$start" || die "pid $pid exited while its environment was read"
     # argv[0] may be absolute, on the process's own PATH, or relative to its
     # cwd (./bin/dev is common); its executable is the fallback for a name
     # only a shell hook could resolve. Checked before touching the process.
@@ -60,7 +69,7 @@ case "${1:-}" in
       argv[0]=$exe
     fi
 
-    kill -TERM "$pid" 2>/dev/null || die "could not stop pid $pid"
+    proc signal "$pid" "$start" TERM || die "could not stop pid $pid"
     # Wait for the port to actually free before relaunching into EADDRINUSE.
     for ((i = 0; i < 25; i++)); do
       port_busy "$port" || break
@@ -82,5 +91,5 @@ case "${1:-}" in
     )
     echo '{"ok":true}'
     ;;
-  *) echo '{"ok":false,"error":"usage: lifecycle.sh pause|resume|stop <pid> <port> | restart <pid> <port> <cwd> <argv-json>"}' ;;
+  *) echo '{"ok":false,"error":"usage: lifecycle.sh pause|resume|stop <pid> <start> <port> | restart <pid> <start> <port> <cwd> <argv-json>"}' ;;
 esac

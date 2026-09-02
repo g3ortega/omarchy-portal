@@ -126,10 +126,16 @@ Item {
   // helper's output is bounded by construction: capped fields, capped reads,
   // one JSON document. The seconds are per process, sized to the slowest
   // legitimate run of what it carries.
+  // Every helper runs under scripts/lib/proc.py: a byte ceiling on what it
+  // may say and a deadline, past either of which its whole process group is
+  // ended and nothing is passed on (so no document is ever parsed cut short).
   readonly property var deadlines: ({ scan: 20, poll: 20, action: 330, quick: 15 })
+  readonly property var outputCaps: ({ scan: 8388608, poll: 1048576, action: 1048576, quick: 4194304 })
   function runScript(proc, script, args, kind) {
     if (!alive || !pluginDir || proc.running) return false
-    proc.command = ["/usr/bin/timeout", "-k", "5", String(deadlines[kind || "quick"]),
+    var k = kind || "quick"
+    proc.command = ["/usr/bin/python3", "-I", "-S", pluginDir + "/scripts/lib/proc.py", "run",
+                    String(outputCaps[k]), String(deadlines[k]), "--",
                     "/usr/bin/bash", pluginDir + "/scripts/" + script].concat(args || [])
     proc.running = true
     return true
@@ -274,7 +280,7 @@ Item {
     for (var k in tunnels) {
       var t = tunnels[k]
       if (t.reach === "public" && !live[t.port]) out.push({
-        port: t.port, pid: null, comm: "", cmdline: "", cwd: "", projectRoot: "", scope: "local",
+        port: t.port, pid: null, start: null, comm: "", cmdline: "", cwd: "", projectRoot: "", scope: "local",
         addresses: [], kind: "orphan", label: "shared while nothing listens", icon: "broadcast",
         color: "", category: "dev", web: false, name: "port " + t.port, url: "", argv: [],
         argvTruncated: false
@@ -401,9 +407,9 @@ Item {
 
   // action: pause | resume | stop
   function signalProcess(entry, action) {
-    if (!entry || !entry.pid) return
+    if (!entry || !entry.pid || entry.start == null) return
     if (action === "stop") _expectGone(entry.port)
-    _runLifecycle(entry, [action, String(entry.pid), String(entry.port)], "could not " + action)
+    _runLifecycle(entry, [action, String(entry.pid), String(entry.start), String(entry.port)], "could not " + action)
   }
 
   // A truncated command line must never be re-run: half a flag is a different
@@ -415,7 +421,7 @@ Item {
   function restartProcess(entry) {
     if (!canRestart(entry)) return
     _expectGone(entry.port)
-    _runLifecycle(entry, ["restart", String(entry.pid), String(entry.port),
+    _runLifecycle(entry, ["restart", String(entry.pid), String(entry.start), String(entry.port),
                           String(entry.cwd), JSON.stringify(entry.argv)],
                   "could not restart")
   }

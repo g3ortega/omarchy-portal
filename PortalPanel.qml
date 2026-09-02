@@ -201,7 +201,7 @@ Panel {
   function stillListed(entry) {
     var now = entryForPort(entry.port)
     if (!now) return false
-    return now.pid === entry.pid || (now.name === entry.name && now.cwd === entry.cwd)
+    return (now.pid === entry.pid && now.start === entry.start) || (now.name === entry.name && now.cwd === entry.cwd)
   }
 
   readonly property var groupOrder: [
