@@ -21,13 +21,21 @@ run() { if (( DRY )); then echo "would: $*"; else "$@"; fi; }
 
 echo "the plugin, so nothing polls while state is removed"
 if command -v omarchy >/dev/null 2>&1; then
-  if [[ $(omarchy plugin list --json 2>/dev/null | jq -r '.[] | select(.id == "g3ortega.portal") | .enabled') == true ]]; then
+  # An unreadable plugin state is not "disabled": a service still polling
+  # would recreate what is removed below.
+  listed=$(omarchy plugin list --json 2>/dev/null) && enabled=$(jq -r '.[] | select(.id == "g3ortega.portal") | .enabled' <<<"$listed" 2>/dev/null) \
+    || { echo "could not read the plugin state; nothing was removed" >&2; exit 1; }
+  if [[ $enabled == true ]]; then
     run omarchy plugin disable g3ortega.portal || { echo "could not disable the plugin; nothing was removed" >&2; exit 1; }
   fi
 fi
 
 echo "shares and names created by Portal"
-run "$HERE/tunnels.sh" stop-own
+if (( DRY )); then run "$HERE/tunnels.sh" stop-own
+else
+  out=$("$HERE/tunnels.sh" stop-own)
+  jq -e .ok <<<"$out" >/dev/null || { echo "$(jq -r '.error' <<<"$out"); their records are kept; nothing else was removed" >&2; exit 1; }
+fi
 
 echo "browser trust Portal added for the Portless CA"
 if (( DRY )); then run "$HERE/portless-setup.sh" untrust
@@ -37,7 +45,8 @@ else
 fi
 
 echo "cloudflared, if it is still the copy Portal installed"
-read -r path sum <<<"$(read_own "$PORTAL_STATE_HOME/installed-cloudflared" 4096)"
+mark=$(cat_own "$PORTAL_STATE_HOME/installed-cloudflared" 4096)
+path=$(jq -r '.path // empty' <<<"$mark" 2>/dev/null); sum=$(jq -r '.sha256 // empty' <<<"$mark" 2>/dev/null)
 if [[ -n $path && -f $path && $(sha256sum -- "$path" | cut -d' ' -f1) == "$sum" ]]; then
   run state_remove "${path%/*}" "${path##*/}"
 fi

@@ -70,7 +70,7 @@ install_cloudflared() {
   state write "$BIN_DIR/cloudflared" 755 < "$tmp/cloudflared" || die "could not install into $BIN_DIR"
   # Without the marker removal could not tell this copy from the user's own:
   # no marker, no install.
-  if ! { own_dir "${MARK%/*}" && write_own "$MARK" "$BIN_DIR/cloudflared $sum"; }; then
+  if ! { own_dir "${MARK%/*}" && write_own "$MARK" "$(jq -nc --arg p "$BIN_DIR/cloudflared" --arg s "$sum" '{path:$p, sha256:$s}')"; }; then
     state_remove "$BIN_DIR" cloudflared
     die "could not record the install under ${MARK%/*}"
   fi

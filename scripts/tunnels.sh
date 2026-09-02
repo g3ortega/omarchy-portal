@@ -421,8 +421,9 @@ cmd_stop() {
     local n; n=$(read_own "$(namefile "$provider" "$port")" 256)
     [[ -n $n ]] || n=$(portless_route_name "$port")
     if [[ -n $n ]]; then
-      bin=$(provider_bin portless) || die "portless is not installed as a trusted executable"
-      "$bin" alias --remove "$n" >/dev/null 2>&1
+      # The record of a name stays until Portless has actually let it go.
+      bin=$(provider_bin portless) || die "portless is not installed as a trusted executable; the name $n is still registered"
+      "$bin" alias --remove "$n" >/dev/null 2>&1 || die "portless could not remove the name $n"
     fi
     state_remove "$STATE_DIR" "portless-$port.name"
   elif pidline=$(read_own "$(pidfile "$provider" "$port")" 64) && [[ -n $pidline ]]; then
@@ -604,13 +605,16 @@ cmd_stop_all() {
 cmd_stop_own() {
   # Only what Portal created: anything with a url file, or a pidfile (a tunnel
   # still minting its URL). Adopted names and tunnels belong to whoever
-  # started them and have neither.
-  local provider port
+  # started them and have neither. A stop that fails keeps its records and
+  # is reported, so a caller can retry.
+  local provider port out failed=()
   while IFS=$'\t' read -r provider port; do
-    cmd_stop "$provider" "$port" >/dev/null
+    out=$(cmd_stop "$provider" "$port")
+    jq -e .ok <<<"$out" >/dev/null 2>&1 || failed+=("$provider:$port $(jq -r .error <<<"$out")")
   done < <(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null | jq -r '.files | keys[]
     | select(test("^[a-z]+-[0-9]+\\.(url|pid)$")) | sub("\\.(url|pid)$"; "")' | sort -u | tr '-' '\t')
-  echo '{"ok":true}'
+  if (( ${#failed[@]} )); then jq -nc --args '{ok:false, error:("could not stop: " + ($ARGS.positional | join("; ")))}' "${failed[@]}"
+  else echo '{"ok":true}'; fi
 }
 
 # One-click remediation for a provider reporting status=setup. Only actions

@@ -53,7 +53,10 @@ def open_dir(path, create=False):
             except FileNotFoundError:
                 if not create:
                     raise Refused(f"missing: {path}")
-                os.mkdir(comp, 0o700, dir_fd=fd)
+                try:
+                    os.mkdir(comp, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass          # another helper created it first; open what is there
                 nfd = os.open(comp, DIR_FLAGS, dir_fd=fd)
             except OSError as e:
                 raise Refused(f"refused {path}: {e.strerror} at {comp}")

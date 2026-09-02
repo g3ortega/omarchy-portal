@@ -68,6 +68,15 @@ out=$(cmd_stop cloudflared 4444)
 is "cmd_stop with a reused pid returns ok without signalling" "$out" '{"ok":true}'
 [[ -f $STATE_DIR/cloudflared-4444.url ]] && bad "cmd_stop left the url file" || ok "cmd_stop cleared the state files"
 
+# Concurrent first use: many helpers creating the same missing directory all succeed.
+R=$(mktemp -d); for i in $(seq 1 12); do state ensure "$R/a/b/c" & done; wait; [[ -d $R/a/b/c ]] && ok "concurrent ensure creates the directory once, without error" || bad "concurrent ensure failed"; rm -rf "$R"
+
+# The install marker is JSON, so a path with a space survives.
+M=$(mktemp -d); mkdir -p "$M/my bin"; printf 'x' > "$M/my bin/cloudflared"; d=$(sha256sum "$M/my bin/cloudflared" | cut -d' ' -f1)
+jq -nc --arg p "$M/my bin/cloudflared" --arg s "$d" '{path:$p, sha256:$s}' | state write "$M/installed-cloudflared"
+PORTAL_METRICS_DIR=$M PORTAL_STATE_DIR=$M/rt "$S/uninstall.sh" --dry 2>/dev/null | grep -qF "would: state_remove $M/my bin cloudflared" && ok "uninstall finds a marked binary in a path with a space" || bad "uninstall lost the marked binary"
+rm -rf "$M"
+
 # stop-own ends only shares with a state file of their own, including one
 # still minting its URL (a pidfile, no url yet).
 printf 'https://own.trycloudflare.com' > "$STATE_DIR/cloudflared-4447.url"; printf '1 1' > "$STATE_DIR/cloudflared-4447.pid"

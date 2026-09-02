@@ -41,6 +41,14 @@ ca_load() { CA_PEM=$(cat_own "$CA" 16384); }
 ca_load
 # Stores Portal imported into, so removal touches nothing it did not add.
 TRUSTED="$PORTAL_STATE_HOME/trusted-stores"
+# Import into one store and record it; a trust that could not be recorded is
+# undone at once, since removal would never find it.
+trust_store() {  # <nss dir>
+  certutil -d "sql:$1" -A -t "C,," -n "$NICK" -i <(printf '%s' "$CA_PEM") >/dev/null 2>&1 || return 1
+  printf '%s\n' "$1" | state_append "$TRUSTED" 64 && return 0
+  certutil -d "sql:$1" -D -n "$NICK" >/dev/null 2>&1
+  return 1
+}
 ca_is_portless() {
   [[ -n $CA_PEM ]] || return 1
   have openssl || return 1
@@ -134,12 +142,8 @@ case "${1:-status}" in
       if [[ ! -d $NSSDB ]]; then
         own_dir "$NSSDB" && certutil -d "sql:$NSSDB" -N --empty-password >/dev/null 2>&1
       fi
-      nss_trusted || { certutil -d "sql:$NSSDB" -A -t "C,," -n "$NICK" -i <(printf '%s' "$CA_PEM") >/dev/null 2>&1 \
-        && printf '%s\n' "$NSSDB" | state_append "$TRUSTED" 64; }
-      firefox_untrusted | while read -r d; do
-        certutil -d "sql:$d" -A -t "C,," -n "$NICK" -i <(printf '%s' "$CA_PEM") >/dev/null 2>&1 \
-          && printf '%s\n' "$d" | state_append "$TRUSTED" 64
-      done
+      nss_trusted || trust_store "$NSSDB"
+      firefox_untrusted | while read -r d; do trust_store "$d"; done
     fi
     report
     ;;
