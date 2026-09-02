@@ -22,10 +22,10 @@ Bind it to a key (pick one that's free in `omarchy menu keybindings --print`):
 o.bind("SUPER + ALT + P", "Portal", "omarchy-shell g3ortega.portal toggle")
 ```
 
-Remove with `scripts/portal uninstall` first (it stops every share and name,
-drops the Portless CA from your browser stores, deletes cloudflared if Portal
-installed it, and removes Portal's state), then
-`omarchy plugin remove g3ortega.portal`.
+Remove with `scripts/portal uninstall` first (it disables the plugin, stops
+every share and name Portal created, drops the Portless CA from the browser
+stores Portal added it to, deletes cloudflared if it is still Portal's copy,
+and removes Portal's state), then `omarchy plugin remove g3ortega.portal`.
 
 Portal talks to: `localhost` ports it lists (latency probes), the local
 Portless proxy and ngrok agent, `1.1.1.1` or `dns.google` over HTTPS to

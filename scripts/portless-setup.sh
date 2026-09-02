@@ -34,7 +34,13 @@ have jq || { echo '{"ok":false,"error":"jq not found"}'; exit 0; }
 # The file at $CA is trusted browser-wide, so it must be what portless mints:
 # a self-signed root whose subject is its own nickname. Anything else in that
 # path (a swapped file, a different state dir) is not imported.
-CA_PEM=$(cat_own "$CA" 16384)   # read once; every check and import below uses these bytes
+# The CA bytes, read once through the state helper; reloaded after a proxy
+# start, which is what mints the file the first time.
+CA_PEM=""
+ca_load() { CA_PEM=$(cat_own "$CA" 16384); }
+ca_load
+# Stores Portal imported into, so removal touches nothing it did not add.
+TRUSTED="$PORTAL_STATE_HOME/trusted-stores"
 ca_is_portless() {
   [[ -n $CA_PEM ]] || return 1
   have openssl || return 1
@@ -122,24 +128,30 @@ case "${1:-status}" in
       "$PORTLESS" proxy start -p "${PORTAL_PORTLESS_PORT:-1355}" \
         --tld "$(portless_tld_arg)" >/dev/null 2>&1
       sleep 1
-      portless_probe_reset
+      portless_probe_reset; ca_load
     fi
     if ca_is_portless && have certutil; then
       if [[ ! -d $NSSDB ]]; then
         own_dir "$NSSDB" && certutil -d "sql:$NSSDB" -N --empty-password >/dev/null 2>&1
       fi
-      nss_trusted || certutil -d "sql:$NSSDB" -A -t "C,," -n "$NICK" -i <(printf '%s' "$CA_PEM") >/dev/null 2>&1
+      nss_trusted || { certutil -d "sql:$NSSDB" -A -t "C,," -n "$NICK" -i <(printf '%s' "$CA_PEM") >/dev/null 2>&1 \
+        && printf '%s\n' "$NSSDB" | state_append "$TRUSTED" 64; }
       firefox_untrusted | while read -r d; do
-        certutil -d "sql:$d" -A -t "C,," -n "$NICK" -i <(printf '%s' "$CA_PEM") >/dev/null 2>&1
+        certutil -d "sql:$d" -A -t "C,," -n "$NICK" -i <(printf '%s' "$CA_PEM") >/dev/null 2>&1 \
+          && printf '%s\n' "$d" | state_append "$TRUSTED" 64
       done
     fi
     report
     ;;
   untrust)
+    # Only the stores Portal itself imported into; trust the user set up
+    # before Portal stays.
     if have certutil; then
-      [[ -d $NSSDB ]] && certutil -d "sql:$NSSDB" -D -n "$NICK" >/dev/null 2>&1
-      firefox_profiles | while read -r d; do certutil -d "sql:$d" -D -n "$NICK" >/dev/null 2>&1; done
+      cat_own "$TRUSTED" 4096 | while read -r d; do
+        [[ -d $d ]] && certutil -d "sql:$d" -D -n "$NICK" >/dev/null 2>&1
+      done
     fi
+    state_remove "${TRUSTED%/*}" "${TRUSTED##*/}"
     echo '{"ok":true}'
     ;;
   *) echo '{"ok":false,"error":"usage: portless-setup.sh status|run|untrust"}' ;;

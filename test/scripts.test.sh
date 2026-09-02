@@ -68,6 +68,11 @@ out=$(cmd_stop cloudflared 4444)
 is "cmd_stop with a reused pid returns ok without signalling" "$out" '{"ok":true}'
 [[ -f $STATE_DIR/cloudflared-4444.url ]] && bad "cmd_stop left the url file" || ok "cmd_stop cleared the state files"
 
+# stop-own ends only shares with a state file of their own.
+printf 'https://own.trycloudflare.com' > "$STATE_DIR/cloudflared-4447.url"; printf '1 1' > "$STATE_DIR/cloudflared-4447.pid"
+is "stop-own returns ok" "$(cmd_stop_own)" '{"ok":true}'
+[[ -e $STATE_DIR/cloudflared-4447.url ]] && bad "stop-own left a created share" || ok "stop-own cleared the created share"
+
 # The pidfile binds pid and kernel start time; a matching comm is not enough.
 mystart=$(proc_start "$$")
 owned_pid "$$" "$me" "$mystart" && ok "owned_pid accepts the true start time" || bad "owned_pid rejected the true start time"

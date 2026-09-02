@@ -59,7 +59,8 @@ known_provider() { provider_reach "$1" >/dev/null; }
 STATE_DIR="$PORTAL_RUNTIME_DIR"
 LOG_CAP=4194304   # a provider's log is truncated past this; O_APPEND writers carry on
 IDLE_CAP=600      # a public tunnel whose target has been gone this long is stopped
-SHARE_FILES=(pid url reach dns idle)   # what a share leaves in STATE_DIR, besides its log
+SHARE_FILES=(pid url reach dns idle log)   # what a share leaves in STATE_DIR
+STATE_FILES_CAP=4096                        # the dump refuses past this; six files per share
 
 die() { jq -nc --arg e "$1" '{ok:false,error:$e}'; exit 0; }
 json_str() { jq -Rn --arg v "$1" '$v'; }
@@ -397,7 +398,7 @@ cmd_start() {
   if [[ -z $url ]]; then
     local why; why=$(cat_own "$lf" "$LOG_CAP" | tail -c 400 | tr '\n' ' ')
     alive_line "$pidline" "$provider" || state_remove "$STATE_DIR" "$provider-$port.pid"
-    die "no URL after 30s: ${why:-see $lf}"
+    die "no URL after 30s: ${why:-see $lf}"   # the log stays for a look
   fi
   valid_url "$url" || die "$provider reported an unexpected URL; see $lf"
 
@@ -522,7 +523,7 @@ cmd_status() {
 
   portless_state_load
   local dump tsv="" listed=" " now; printf -v now '%(%s)T' -1
-  dump=$(state_dump "$STATE_DIR" 8192)
+  dump=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null || echo '{"files":{}}')
   local provider port url reach pidline dns idle base pid
   while IFS=$'\t' read -r provider port url reach pidline dns idle; do
     valid_port "$port" && valid_url "$url" && known_provider "$provider" || continue
@@ -596,6 +597,17 @@ cmd_stop_all() {
   echo '{"ok":true}'
 }
 
+cmd_stop_own() {
+  # Only what Portal created (it has a state file); adopted names and tunnels
+  # belong to whoever started them.
+  local provider port
+  while IFS=$'\t' read -r provider port; do
+    cmd_stop "$provider" "$port" >/dev/null
+  done < <(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null | jq -r '.files | keys[]
+    | select(test("^[a-z]+-[0-9]+\\.url$")) | sub("\\.url$"; "") | split("-") | @tsv')
+  echo '{"ok":true}'
+}
+
 # One-click remediation for a provider reporting status=setup. Only actions
 # that are safe and unprivileged live here; anything needing a package install
 # or a secret stays a printed instruction for the user to run themselves.
@@ -603,6 +615,7 @@ cmd_setup() {
   local provider="$1"
   known_provider "$provider" || die "unknown provider"
   portless_state_load
+  augment_path   # exported: the setup engine is a child process
   declare -f "${provider}_setup" >/dev/null || die "no automatic setup for $provider"
   "${provider}_setup"
 }
@@ -630,5 +643,6 @@ case "${1:-}" in
   stop)      cmd_stop "${2:-}" "${3:-}" ;;
   status)    cmd_status ;;
   stop-all)  cmd_stop_all ;;
-  *) echo '{"ok":false,"error":"usage: tunnels.sh providers|setup <provider>|start <provider> <port> [name]|stop <provider> <port>|status|stop-all"}' ;;
+  stop-own)  cmd_stop_own ;;
+  *) echo '{"ok":false,"error":"usage: tunnels.sh providers|setup <provider>|start <provider> <port> [name]|stop <provider> <port>|status|stop-all|stop-own"}' ;;
 esac

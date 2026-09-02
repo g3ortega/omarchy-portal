@@ -379,6 +379,8 @@ Panel {
     } else if (provider.status === "setup" && provider.setupClause) {
       requestAction("install", entry, { label: provider.id, clause: provider.setupClause,
         run: function () { service.setupProvider(provider.id) } })
+    } else if (provider.status === "setup") {
+      service.setupProvider(provider.id)   // nothing to do here; the provider says what to run
     }
   }
 

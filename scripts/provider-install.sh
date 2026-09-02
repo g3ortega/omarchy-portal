@@ -68,7 +68,7 @@ install_cloudflared() {
 
   own_dir "$BIN_DIR" || die "$BIN_DIR is not a private directory of yours"
   state write "$BIN_DIR/cloudflared" 755 < "$tmp/cloudflared" || die "could not install into $BIN_DIR"
-  own_dir "${MARK%/*}" && write_own "$MARK" "$BIN_DIR/cloudflared"
+  own_dir "${MARK%/*}" && write_own "$MARK" "$BIN_DIR/cloudflared $sum"
 
   jq -nc --arg v "$ver" --arg p "$BIN_DIR/cloudflared" \
     '{ok:true, version:$v, path:$p, note:"official Cloudflare release, checksum-pinned; prefer sudo pacman -S cloudflared for repo signatures"}'
