@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import qs.Commons
 import "lib/Detect.js" as Detect
 
 // Portal's single source of truth.
@@ -31,6 +32,7 @@ Item {
   property string lastError: ""
   property string busyAction: ""    // "provider:port" while a start/stop is in flight
   property int refreshSeconds: 5
+  onRefreshSecondsChanged: refreshSeconds = Util.clamp(refreshSeconds, 2, 120)   // shell.json is hand-editable
   property string namingMode: "Project"
   property string portlessTld: "localhost"
 
@@ -96,14 +98,6 @@ Item {
     if (entryUrl) return entryUrl
     var t = publicTunnelFor(port)
     return t && t.url && t.dns !== "pending" ? t.url : ""
-  }
-
-  function ipcTarget(provider, port) {
-    var id = String(provider)
-    if (id.length > 32 || !providerFor(id)) return null
-    if (!/^[0-9]{1,5}$/.test(String(port))) return null
-    var n = parseInt(port, 10)
-    return n > 0 && n < 65536 ? { provider: id, port: n } : null
   }
 
   function providerFor(id) {
@@ -266,10 +260,9 @@ Item {
     ports = out
   }
 
-  // Public tunnels whose target is no longer listening. They stay open on
-  // purpose (a dev server restart should not lose the URL you handed out),
-  // but they must stay visible and stoppable: the next process to bind that
-  // port is public the moment it starts.
+  // Public tunnels whose target is no longer listening. tunnels.sh keeps one
+  // open for a while (a dev server restart should not lose the URL you handed
+  // out) and then stops it; meanwhile it must stay visible and stoppable.
   readonly property var orphanShares: {
     var live = ({})
     for (var i = 0; i < ports.length; i++) live[ports[i].port] = true
@@ -291,6 +284,7 @@ Item {
   // built only from the port number and the rule's own label, never from
   // process-controlled strings.
   property var _expectedGone: ({})
+  readonly property int expectedGoneMs: 20000
   function _expectGone(port) { _expectedGone[port] = Date.now() }
 
   function _notifyVanishedDev(devPorts) {
@@ -299,11 +293,11 @@ Item {
       var was = _prevDevPorts[k]
       var still = devPorts.some(function (d) { return d.port === was.port })
       if (still) continue
-      if (Date.now() - (_expectedGone[was.port] || 0) < 20000) { delete _expectedGone[was.port]; continue }
+      if (Date.now() - (_expectedGone[was.port] || 0) < expectedGoneMs) { delete _expectedGone[was.port]; continue }
       var shared = publicTunnelFor(was.port) ? "; its public tunnel is still open" : ""
       notify("Port " + was.port + " went quiet", was.label + " is no longer listening" + shared)
     }
-    for (var g in _expectedGone) if (Date.now() - _expectedGone[g] > 60000) delete _expectedGone[g]
+    for (var g in _expectedGone) if (Date.now() - _expectedGone[g] > expectedGoneMs) delete _expectedGone[g]
   }
 
   function notify(summary, body) {
@@ -322,6 +316,7 @@ Item {
     if (!parsed || !Array.isArray(parsed.tunnels)) return
     var key = JSON.stringify(parsed.tunnels)
     if (key === _lastTunnelsKey) return
+    var first = _lastTunnelsKey === ""
     _lastTunnelsKey = key
     var next = ({})
     for (var i = 0; i < parsed.tunnels.length; i++) {
@@ -333,17 +328,19 @@ Item {
         host: String(t.url).replace(/^[a-z]+:\/\//, "").replace(/:\d+$/, "")
       }
     }
-    // A public URL that disappears without Portal stopping it is a lost
-    // share the user may have handed out; say so. A public URL that appears
-    // is said too, whichever door asked for it (a click or the IPC surface):
-    // the desktop must never carry an exposure the user did not see.
+    // A public URL that disappears without Portal stopping it is a lost share
+    // the user may have handed out; one that appears is announced too, whether
+    // the panel or IPC asked for it. Not on the first status after a reload:
+    // those are not news.
     for (var k in tunnels) {
       if (tunnels[k].reach === "public" && !next[k] && _stoppingShare !== k)
         notify("Port " + tunnels[k].port + " is no longer shared", tunnels[k].host + " went away")
     }
-    for (var n in next) {
-      if (next[n].reach === "public" && !tunnels[n])
-        notify("Port " + next[n].port + " is public", "reachable from the internet at " + next[n].host)
+    if (!first) {
+      for (var n in next) {
+        if (next[n].reach === "public" && !tunnels[n])
+          notify("Port " + next[n].port + " is public", "reachable from the internet at " + next[n].host)
+      }
     }
     _stoppingShare = ""
     tunnels = next
@@ -362,16 +359,28 @@ Item {
     _actionFallback = fallbackMessage
   }
 
+  // Both doors (panel and IPC) land here; the shape is checked once, and
+  // tunnels.sh refuses anything not on its roster.
+  function shareTarget(port, provider) {
+    var n = /^[0-9]{1,5}$/.test(String(port)) ? parseInt(port, 10) : 0
+    if (!/^[a-z]{1,32}$/.test(String(provider)) || n <= 0 || n >= 65536) return false
+    return providers.length === 0 || providerFor(String(provider)) !== null   // roster known: it decides
+  }
+
   function expose(port, provider, name) {
+    if (!shareTarget(port, provider)) return false
     var args = ["start", String(provider), String(port)]
     if (name) args.push(String(name))
     _runAction(provider + ":" + port, args, "could not expose that port")
+    return true
   }
 
   function unexpose(port, provider) {
+    if (!shareTarget(port, provider)) return false
     _stoppingShare = provider + ":" + port
     _runAction(provider + ":" + port, ["stop", String(provider), String(port)],
                "could not stop sharing")
+    return true
   }
 
   // action: pause | resume | stop
@@ -517,7 +526,7 @@ Item {
 
   // ---- timers ---------------------------------------------------------------
   Timer {
-    interval: Math.max(2, root.refreshSeconds) * 1000
+    interval: root.refreshSeconds * 1000
     running: root.alive
     repeat: true
     triggeredOnStart: true
@@ -589,19 +598,11 @@ Item {
     function toggle(): string { root.summonRequested(); return "ok" }
     function ports(): string { return JSON.stringify(root.ports) }
     function tunnels(): string { return JSON.stringify(root.tunnels) }
-    // The IPC surface takes only what the panel would: a known provider id
-    // and a port number. Anything else is refused before a helper is spawned.
     function expose(provider: string, port: string): string {
-      var p = root.ipcTarget(provider, port)
-      if (!p) return "error: unknown provider or port"
-      root.expose(p.port, p.provider, "")
-      return "ok"
+      return root.expose(port, provider, "") ? "ok" : "error: bad provider or port"
     }
     function unexpose(provider: string, port: string): string {
-      var p = root.ipcTarget(provider, port)
-      if (!p) return "error: unknown provider or port"
-      root.unexpose(p.port, p.provider)
-      return "ok"
+      return root.unexpose(port, provider) ? "ok" : "error: bad provider or port"
     }
   }
 }

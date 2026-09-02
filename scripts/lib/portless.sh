@@ -6,12 +6,32 @@
 PORTLESS_DIR="${PORTLESS_STATE_DIR:-$HOME/.portless}"
 # shellcheck source=files.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/files.sh"
-# portless's own state is read with the same owner-only rules as ours.
-ROUTES_CACHE=""; ROUTES_CACHED=0
-routes_json() {   # read once per process; several rungs ask
-  if (( ! ROUTES_CACHED )); then ROUTES_CACHE=$(cat_own "$PORTLESS_DIR/routes.json" 1048576); ROUTES_CACHED=1; fi
-  printf '%s' "$ROUTES_CACHE"
+
+# The browser trust for portless's CA, shared by setup and removal.
+CA="$PORTLESS_DIR/ca.pem"
+NSSDB="$HOME/.pki/nssdb"
+NICK="portless Local CA"
+firefox_profiles() {
+  local d
+  for d in "$HOME"/.mozilla/firefox/*/; do
+    [[ -f "$d/cert9.db" || -f "$d/prefs.js" ]] && printf '%s\n' "${d%/}"
+  done
 }
+
+# portless's own state files, read in one descriptor-relative pass per
+# command (owner-only rules, same as ours). Commands call portless_state_load
+# once in the parent shell; a caller inside $(...) that finds nothing loaded
+# loads for itself. Reload after anything that changes routes.
+PORTLESS_STATE=""
+portless_state_load() {
+  PORTLESS_STATE=$(state dump "$PORTLESS_DIR" 1048576 512 routes.json proxy.port proxy.tlds proxy.tld 2>/dev/null) \
+    || PORTLESS_STATE='{"files":{}}'
+}
+portless_file() {  # <name>: contents, or empty
+  [[ -n $PORTLESS_STATE ]] || portless_state_load
+  jq -r --arg n "$1" '.files[$n] // empty' <<<"$PORTLESS_STATE"
+}
+routes_json() { portless_file routes.json; }
 
 # Probe for a live proxy instead of trusting state files: pidfiles go stale,
 # kill -0 answers EPERM (not "running") for a root-owned proxy, and the
@@ -22,9 +42,8 @@ PROBE_SCHEME=""
 portless_probe_reset() { PROBE_PORT=""; PROBE_SCHEME=""; }
 portless_probe() {
   [[ -n $PROBE_PORT ]] && return 0
-  local cand p seen=" " saved=""
-  saved=$(read_own "$PORTLESS_DIR/proxy.port" 64)
-  cand="$saved 443 80"
+  local cand p seen=" "
+  cand="$(portless_file proxy.port | head -n 1) 443 80"
   for p in $cand; do
     [[ $p =~ ^[0-9]+$ ]] || continue
     [[ $seen == *" $p "* ]] && continue
@@ -120,13 +139,12 @@ portless_tld_arg() {
 # The TLD set the LIVE proxy serves: proxy.tlds (JSON array or comma/line
 # list), the legacy proxy.tld, else the built-in localhost default.
 portless_running_tlds() {
-  local f="$PORTLESS_DIR/proxy.tlds" t
+  local raw t
   {
-    if own_file "$f" && [[ -s $f ]]; then
-      if [[ $(head -c1 -- "$f") == "[" ]]; then cat_own "$f" 4096 | jq -r '.[]' 2>/dev/null
-      else cat_own "$f" 4096 | tr ',' '\n'; fi
-    elif own_file "$PORTLESS_DIR/proxy.tld" && [[ -s "$PORTLESS_DIR/proxy.tld" ]]; then
-      cat_own "$PORTLESS_DIR/proxy.tld" 4096
+    if raw=$(portless_file proxy.tlds) && [[ -n $raw ]]; then
+      if [[ $raw == \[* ]]; then jq -r '.[]' <<<"$raw" 2>/dev/null; else tr ',' '\n' <<<"$raw"; fi
+    elif raw=$(portless_file proxy.tld) && [[ -n $raw ]]; then
+      printf '%s\n' "$raw"
     else
       echo localhost
     fi

@@ -9,15 +9,15 @@
 # the setup surfaces that alternative rather than hiding it.
 #
 # The download lands in a private temp dir, must match its digest, must parse
-# as an ELF, and must execute `--version` before it is installed (0755) into
-# ~/.local/bin. Nothing runs elevated.
+# as an ELF, and must execute `--version` before it is installed into
+# ~/.local/bin through the same descriptor-relative path as every other file
+# Portal writes. Nothing runs elevated.
 set -o pipefail
 # shellcheck source=lib/files.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/files.sh"
 
 BIN_DIR="${PORTAL_BIN_DIR:-$HOME/.local/bin}"
-# A marker so removal knows this binary is Portal's to delete.
-MARK_DIR="${PORTAL_METRICS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/portal}"
+MARK="$PORTAL_STATE_HOME/installed-cloudflared"   # so removal knows the binary is Portal's to delete
 
 CLOUDFLARED_VERSION="2026.8.3"
 declare -A CLOUDFLARED_SHA256=(
@@ -31,9 +31,9 @@ command -v jq >/dev/null 2>&1 || { echo '{"ok":false,"error":"jq not found"}'; e
 command -v curl >/dev/null 2>&1 || die "curl not found"
 
 install_cloudflared() {
-  if command -v cloudflared >/dev/null 2>&1 && [[ -z ${PORTAL_BIN_DIR:-} ]]; then
-    printf '{"ok":true,"already":true,"version":%s}\n' \
-      "$(cloudflared --version 2>/dev/null | head -1 | jq -R .)"
+  local cf
+  if [[ -z ${PORTAL_BIN_DIR:-} ]] && cf=$(resolve_bin cloudflared); then
+    jq -nc --arg v "$("$cf" --version 2>/dev/null | head -1)" '{ok:true,version:$v}'
     return
   fi
 
@@ -66,11 +66,9 @@ install_cloudflared() {
   ver=$("$tmp/cloudflared" --version 2>/dev/null | head -1)
   [[ $ver == cloudflared* ]] || die "binary failed its own --version check"
 
-  # Into the user's bin through the same descriptor-relative path as every
-  # other file Portal writes: exclusive temporary, verified parent, atomic.
   own_dir "$BIN_DIR" || die "$BIN_DIR is not a private directory of yours"
   state write "$BIN_DIR/cloudflared" 755 < "$tmp/cloudflared" || die "could not install into $BIN_DIR"
-  own_dir "$MARK_DIR" && write_own "$MARK_DIR/installed-cloudflared" "$BIN_DIR/cloudflared"
+  own_dir "${MARK%/*}" && write_own "$MARK" "$BIN_DIR/cloudflared"
 
   jq -nc --arg v "$ver" --arg p "$BIN_DIR/cloudflared" \
     '{ok:true, version:$v, path:$p, note:"official Cloudflare release, checksum-pinned; prefer sudo pacman -S cloudflared for repo signatures"}'

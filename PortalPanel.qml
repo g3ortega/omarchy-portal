@@ -33,8 +33,8 @@ Panel {
   // Anything that disrupts a running process — stop, pause, restart — goes
   // through one confirmation. Resume does not: it is the recovery action, and
   // friction on the way back out is friction in the wrong place.
-  // { kind, entry, label?, clause?, provider? }. kind is the verb the answer
-  // wears: stop | pause | restart | install.
+  // { kind, entry, label?, clause?, run }. kind is the verb the answer wears
+  // (stop, pause, restart, share, install); run is what accepting does.
   property var pendingAction: null
   property bool helpOpen: false
   property bool settingsOpen: false
@@ -240,10 +240,7 @@ Panel {
     return -1
   }
 
-  function selectedEntry() {
-    var i = indexOfPort(selectedPort)
-    return i < 0 ? null : visibleEntries[i]
-  }
+  function selectedEntry() { return entryForPort(selectedPort) }
 
   function selectedOrFirst() {
     if (indexOfPort(selectedPort) < 0 && visibleEntries.length > 0)
@@ -277,7 +274,9 @@ Panel {
   }
 
   function requestAction(kind, entry, extra) {
-    pendingAction = Object.assign({ kind: kind, entry: entry }, extra || {})
+    var run = kind === "restart" ? function () { service.restartProcess(entry) }
+                                 : function () { service.signalProcess(entry, kind) }
+    pendingAction = Object.assign({ kind: kind, entry: entry, run: run }, extra || {})
     // The question renders on the row itself, so the row must be on screen
     // and current — even when the key was pressed from the charts page — and
     // the keyboard must answer it even if a name editor had focus.
@@ -354,10 +353,7 @@ Panel {
   function confirmAccept() {
     var a = pendingAction
     pendingAction = null
-    if (a.kind === "install") service.setupProvider(a.provider)
-    else if (a.kind === "share") service.expose(a.entry.port, a.provider, "")
-    else if (a.kind === "restart") service.restartProcess(a.entry)
-    else service.signalProcess(a.entry, a.kind)
+    a.run()
   }
 
   // j/k on the detail page walk sibling ports without leaving the charts.
@@ -369,18 +365,20 @@ Panel {
   }
 
   // One activation body for the keyboard and the row's own chips.
-  // Reaching the internet, or putting a binary on the machine, is asked
-  // first, in the row, like any other consequential action.
+  // Reaching the internet, or putting something on the machine, is asked
+  // first, in the row, like any other consequential action. What a setup
+  // does comes from the provider itself (setupClause), so no provider is
+  // named here.
   function chooseProvider(port, provider) {
     if (!service || !provider) return
     var entry = entryForPort(port)
     if (!entry) return
     if (provider.status === "ready") {
-      requestAction("share", entry, { provider: provider.id, label: entry.name,
-        clause: "publicly, via " + provider.label })
-    } else if (provider.status === "setup" && provider.id === "cloudflared") {
-      requestAction("install", entry, { provider: provider.id, label: "cloudflared",
-        clause: "a checksum-pinned release, into ~/.local/bin" })
+      requestAction("share", entry, { label: entry.name, clause: "publicly, via " + provider.label,
+        run: function () { service.expose(port, provider.id, "") } })
+    } else if (provider.status === "setup" && provider.setupClause) {
+      requestAction("install", entry, { label: provider.id, clause: provider.setupClause,
+        run: function () { service.setupProvider(provider.id) } })
     }
   }
 
@@ -724,8 +722,8 @@ Panel {
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
-                text: stripLink.armed
-                  ? "trusts your Portless CA in Chrome and Firefox and starts the proxy"
+                text: stripLink.armed && root.portlessProvider
+                  ? root.portlessProvider.setupClause
                   : (root.portlessProvider ? root.portlessProvider.detail : "")
                 color: root.panelText
                 font.family: root.fontFamily
@@ -736,9 +734,8 @@ Panel {
             }
 
             // Two shapes of "needs setup": something this plugin may do itself
-            // (after saying exactly what: a CA trusted in the browsers, a proxy
-            // started), and something only the user's terminal should do (a
-            // package install, anything with elevation) — copy, never execute.
+            // (after saying what, in the provider's own words), and something
+            // only the user's terminal should do — copy, never execute.
             Row {
               id: stripLink
               anchors.right: parent.right

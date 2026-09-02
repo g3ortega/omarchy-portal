@@ -11,11 +11,12 @@ the byte cap. Writes create a random adjacent temporary with O_CREAT|O_EXCL
 mode 0600, fsync it, renameat it into place and fsync the directory. Appends
 and truncation go through the validated descriptor, never the path again.
 
-  ensure   <dir>                          create (0700) and verify a directory
-  dump     <dir> [maxbytes] [maxfiles]    JSON {"files":{name:text}} of every leaf
+  ensure   <dir>...                       create (0700) and verify directories
+  dump     <dir> [maxbytes] [maxfiles] [name...]  JSON {"files":{name:text}} of every leaf, or only the named ones
   read     <path> [maxbytes]              raw bytes to stdout
   write    <path> [mode]                  stdin -> atomic replace
   append   <path> <maxlines> [maxbytes]   stdin lines -> descriptor append, trimmed
+  append-many <dir> <maxlines> <maxbytes> stdin rows "<name>\t<line>" -> one append each
   remove   <dir> <name>...                unlink leaves (never directories)
   truncate <path> <maxbytes>              empty the file once it is past the cap
   launch   <dir> <logname> -- <argv...>   daemonize argv with the log as stdio;
@@ -24,9 +25,7 @@ and truncation go through the validated descriptor, never the path again.
 Exit status 0 on success, 1 when a path is refused, 2 on usage; every refusal
 fails closed with nothing read or written. Runs under the caller's timeout.
 """
-import json
 import os
-import secrets
 import stat
 import sys
 
@@ -35,6 +34,7 @@ DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 LEAF_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 MAX_FILES = 512
 MAX_BYTES = 1 << 20
+WRITE_CAP = 128 << 20   # the largest thing ever written: a provider binary
 
 
 class Refused(Exception):
@@ -90,6 +90,17 @@ def open_leaf(dirfd, name, flags, cap):
     return fd
 
 
+def read_leaf(dirfd, name, cap):
+    """The bytes of a bound leaf, or None when there is no such file."""
+    fd = open_leaf(dirfd, name, os.O_RDONLY, cap)
+    if fd is None:
+        return None
+    try:
+        return read_fd(fd, cap)
+    finally:
+        os.close(fd)
+
+
 def read_fd(fd, cap):
     out = bytearray()
     while len(out) <= cap:
@@ -103,16 +114,19 @@ def read_fd(fd, cap):
 
 
 def atomic_write(dirfd, name, data, mode=0o600):
-    tmp = f".{name}.{secrets.token_hex(8)}.tmp"
+    """data is bytes, or a callable that writes to the descriptor and returns the byte count."""
+    tmp = f".{name}.{os.urandom(8).hex()}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
     try:
-        view = memoryview(data)
-        while view:
-            n = os.write(fd, view)
-            view = view[n:]
+        if callable(data):
+            data(fd)
+        else:
+            view = memoryview(data)
+            while view:
+                n = os.write(fd, view)
+                view = view[n:]
         os.fsync(fd)
-        if mode != 0o600:
-            os.fchmod(fd, mode)
+        os.fchmod(fd, mode)
         os.close(fd)
         os.rename(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
         os.fsync(dirfd)
@@ -129,29 +143,29 @@ def atomic_write(dirfd, name, data, mode=0o600):
 
 
 def cmd_ensure(a):
-    os.close(open_dir(a[0], create=True))
+    for d in a:
+        os.close(open_dir(d, create=True))
 
 
 def cmd_dump(a):
+    import json
     cap = int(a[1]) if len(a) > 1 else MAX_BYTES
     maxfiles = int(a[2]) if len(a) > 2 else MAX_FILES
-    dirfd = open_dir(a[0])
+    dirfd = open_dir(a[0], create=True)
     try:
         names = sorted(os.listdir(dirfd))
         if len(names) > maxfiles:
             raise Refused(f"refused: more than {maxfiles} entries in {a[0]}")
+        if len(a) > 3:
+            names = [n for n in names if n in a[3:]]
         files = {}
         for name in names:
             try:
-                fd = open_leaf(dirfd, name, os.O_RDONLY, cap)
+                data = read_leaf(dirfd, name, cap)
             except Refused:
                 continue          # a directory, link, FIFO or oversized file is simply not state
-            if fd is None:
-                continue
-            try:
-                files[name] = read_fd(fd, cap).decode("utf-8", "replace")
-            finally:
-                os.close(fd)
+            if data is not None:
+                files[name] = data.decode("utf-8", "replace")
         sys.stdout.write(json.dumps({"files": files}))
     finally:
         os.close(dirfd)
@@ -162,13 +176,10 @@ def cmd_read(a):
     d, name = split(a[0])
     dirfd = open_dir(d)
     try:
-        fd = open_leaf(dirfd, name, os.O_RDONLY, cap)
-        if fd is None:
+        data = read_leaf(dirfd, name, cap)
+        if data is None:
             return 1
-        try:
-            sys.stdout.buffer.write(read_fd(fd, cap))
-        finally:
-            os.close(fd)
+        sys.stdout.buffer.write(data)
     finally:
         os.close(dirfd)
 
@@ -176,14 +187,49 @@ def cmd_read(a):
 def cmd_write(a):
     mode = int(a[1], 8) if len(a) > 1 else 0o600
     d, name = split(a[0])
-    data = sys.stdin.buffer.read(MAX_BYTES * 128 + 1)
-    if len(data) > MAX_BYTES * 128:
-        raise Refused("refused: content past the cap")
+
+    def copy_stdin(fd):
+        total = 0
+        while True:
+            chunk = sys.stdin.buffer.read(1 << 20)
+            if not chunk:
+                return total
+            total += len(chunk)
+            if total > WRITE_CAP:
+                raise Refused("refused: content past the cap")
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(fd, view):]
+
     dirfd = open_dir(d, create=True)
     try:
-        atomic_write(dirfd, name, data, mode)
+        atomic_write(dirfd, name, copy_stdin, mode)
     finally:
         os.close(dirfd)
+
+
+def append_one(dirfd, name, data, maxlines, cap):
+    try:
+        fd = open_leaf(dirfd, name, os.O_WRONLY | os.O_APPEND, cap * 2)
+    except Refused:
+        fd = None   # not a sample file of ours: replaced, never appended to
+    if fd is None:
+        atomic_write(dirfd, name, data)
+        return
+    try:
+        os.write(fd, data)
+        size = os.fstat(fd).st_size
+    finally:
+        os.close(fd)
+    if size <= cap:
+        return
+    # Past the cap: keep the newest lines that fit, so the file is never past
+    # the cap after a call and a reader needs no margin.
+    body = read_leaf(dirfd, name, cap * 2 + len(data)) or b""
+    lines = body.splitlines(keepends=True)[-maxlines:]
+    while lines and sum(map(len, lines)) > cap:
+        lines.pop(0)
+    atomic_write(dirfd, name, b"".join(lines))
 
 
 def cmd_append(a):
@@ -195,32 +241,23 @@ def cmd_append(a):
         raise Refused("refused: content past the cap")
     dirfd = open_dir(d, create=True)
     try:
-        try:
-            fd = open_leaf(dirfd, name, os.O_WRONLY | os.O_APPEND, cap * 2)
-        except Refused:
-            # Whatever is there is not a sample file of ours (or is far past the
-            # cap): it is replaced by the new samples, never appended to.
-            atomic_write(dirfd, name, data)
-            return
-        if fd is None:
-            atomic_write(dirfd, name, data)
-            return
-        try:
-            os.write(fd, data)
-            size = os.fstat(fd).st_size
-        finally:
-            os.close(fd)
-        if size <= cap:
-            return
-        # Past the cap: keep the newest lines, through a fresh bound read and an atomic replace.
-        fd = open_leaf(dirfd, name, os.O_RDONLY, cap * 2)
-        if fd is None:
-            return
-        try:
-            lines = read_fd(fd, cap * 2).splitlines(keepends=True)
-        finally:
-            os.close(fd)
-        atomic_write(dirfd, name, b"".join(lines[-maxlines:]))
+        append_one(dirfd, name, data, maxlines, cap)
+    finally:
+        os.close(dirfd)
+
+
+def cmd_append_many(a):
+    maxlines, cap = int(a[1]), int(a[2])
+    batch = sys.stdin.buffer.read(MAX_BYTES + 1)
+    if len(batch) > MAX_BYTES:
+        raise Refused("refused: batch past the cap")
+    dirfd = open_dir(a[0], create=True)
+    try:
+        for row in batch.splitlines():
+            name, _, line = row.partition(b"\t")
+            if not name or b"/" in name or name in (b".", b"..") or not line:
+                raise Refused(f"refused row: {row[:64]!r}")
+            append_one(dirfd, name.decode(), line + b"\n", maxlines, cap)
     finally:
         os.close(dirfd)
 
@@ -260,10 +297,9 @@ def cmd_truncate(a):
 
 
 def cmd_launch(a):
-    if "--" not in a:
+    if len(a) < 4 or a[2] != "--":
         raise Refused("usage: launch <dir> <logname> -- <argv...>")
-    sep = a.index("--")
-    d, logname, argv = a[0], a[1], a[sep + 1:]
+    d, logname, argv = a[0], a[1], a[3:]
     if not argv or not os.path.isabs(argv[0]):
         raise Refused("launch needs an absolute executable path")
     dirfd = open_dir(d, create=True)
@@ -303,20 +339,17 @@ def cmd_launch(a):
 
 COMMANDS = {
     "ensure": (cmd_ensure, 1), "dump": (cmd_dump, 1), "read": (cmd_read, 1), "write": (cmd_write, 1),
-    "append": (cmd_append, 2), "remove": (cmd_remove, 2), "truncate": (cmd_truncate, 2), "launch": (cmd_launch, 4),
+    "append": (cmd_append, 2), "append-many": (cmd_append_many, 3), "remove": (cmd_remove, 2),
+    "truncate": (cmd_truncate, 2), "launch": (cmd_launch, 4),
 }
 
 
 def main(argv):
-    if not argv or argv[0] not in COMMANDS:
-        sys.stderr.write(__doc__)
-        return 2
-    fn, arity = COMMANDS[argv[0]]
-    if len(argv) - 1 < arity:
+    if not argv or argv[0] not in COMMANDS or len(argv) - 1 < COMMANDS[argv[0]][1]:
         sys.stderr.write(__doc__)
         return 2
     try:
-        return fn(argv[1:]) or 0
+        return COMMANDS[argv[0]][0](argv[1:]) or 0
     except Refused as e:
         sys.stderr.write(f"statedir: {e}\n")
         return 1

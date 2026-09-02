@@ -37,8 +37,7 @@ BarWidget {
   // them down whenever either side changes.
   function pushSettings() {
     if (!service) return
-    // shell.json is hand-editable: values are clamped to the manifest schema.
-    service.refreshSeconds = Util.clamp(Number(setting("refreshSeconds", 5)) || 5, 2, 120)
+    service.refreshSeconds = Number(setting("refreshSeconds", 5)) || 5
     service.namingMode = String(setting("portlessAutoName", "Project"))
     service.portlessTld = String(setting("portlessTld", "localhost"))
   }

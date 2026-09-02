@@ -17,12 +17,10 @@
 
 set -o pipefail
 set -f          # addresses contain '*'; never let the shell glob them
-exec 2> >(head -c 4096 >&2)   # stderr is a producer too: capped here, not by the reader
-
-# Every field this script emits is capped, and so is the number of records:
-# past MAX_PORTS the scan fails closed with an error rather than an
-# ever-growing document.
-MAX_PORTS=512
+# stderr is a producer too: the first 4 KiB reach the reader, the rest is
+# drained so no writer ever sees a closed pipe.
+exec 2> >(head -c 4096 >&2; cat >/dev/null)
+MAX_PORTS=512   # past this the scan reports an error, not a growing document
 
 command -v ss >/dev/null 2>&1 || { echo '{"version":1,"error":"ss not found","ports":[]}'; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo '{"version":1,"error":"jq not found","ports":[]}'; exit 0; }
@@ -187,7 +185,6 @@ emit() {
     if [[ -n $pid && -r /proc/$pid/comm ]]; then
       { comm=$(< "/proc/$pid/comm"); } 2>/dev/null
       comm="${comm%-MainThread}"   # node names its main thread; the process is still node
-      comm="${comm:0:64}"
       # One read serves both forms: the exact argv (record-separated, split in
       # the single assembly jq — no per-pid jq fork) and the display cmdline.
       # A command line past the cap is flagged: restart must not re-run a

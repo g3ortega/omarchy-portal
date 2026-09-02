@@ -77,7 +77,7 @@ sudo. Portal never runs sudo for you. It shows the command and you paste it.
 Providers are detected, not assumed. Each shows ready, needs setup (with a
 fix where one exists), or not installed. Sharing asks first, in place, naming the
 port and the provider, and a desktop notification confirms every new public
-URL whichever door asked for it, the panel or IPC. A fix that puts something
+URL, whether the panel or IPC asked for it. A fix that puts something
 on the machine asks too: installing cloudflared names the release and the
 directory; setting up local names says it will trust your Portless CA in
 Chrome and Firefox and start the proxy. Anything reachable from
@@ -90,11 +90,11 @@ poison your resolver's cache. If it is still not resolvable after that, the
 row shows the URL dimmed with "waiting for dns…" and turns into a link on the
 poll it resolves.
 
-When the server behind a public tunnel dies, the tunnel stays open for ten
-minutes (a restart should not lose the URL you handed out) and its row stays
-too, reading "shared while nothing listens" with one verb, stop sharing.
-After ten minutes with nothing listening the tunnel is stopped, so whatever
-binds that port next never inherits the exposure.
+When the server behind a tunnel Portal started dies, the tunnel stays open
+for ten minutes (a restart should not lose the URL you handed out) and its
+row stays too, reading "shared while nothing listens" with one verb, stop
+sharing. Then it is stopped, so whatever binds that port next never inherits
+the exposure.
 
 Portal also adopts what you already run: routes created with the `portless`
 CLI, cloudflared quick tunnels you started in a terminal, and tunnels on
@@ -281,19 +281,17 @@ Portal runs unsandboxed inside `omarchy-shell`, like every Omarchy plugin.
 - Metric samples live in XDG state (700/600), hold only numbers and
   timestamps, and are deleted when a port is unwatched. Tunnel state lives
   in `$XDG_RUNTIME_DIR/portal` with the same modes. Every state file, and
-  Portless's own state, goes through `scripts/lib/statedir.py`: the directory
-  is walked from `/` without following links, a leaf is opened
-  `O_NOFOLLOW|O_NONBLOCK` and bound after `fstat` (regular, owned, one link,
-  under a byte cap), writes are exclusive temporaries renamed into place, and
-  appends and truncation go through the bound descriptor. A pidfile records
-  the process's kernel start time, so a reused pid is never signalled.
+  Portless's own state, goes through `scripts/lib/statedir.py`: files are
+  opened relative to a verified directory, never through a link, under a byte
+  cap, and replaced atomically. A pidfile records the process's kernel start
+  time, so a reused pid is never signaled.
   Provider binaries run by absolute path after a regular-file, owner and
   mode check, never by a bare name through PATH.
 - Every helper runs under a hard deadline (`timeout`, which signals the whole
   process group); the scanner caps every field, its stderr, and the number
   of ports it will describe (past 512 it reports an error instead); provider
   API bodies and the installer download are byte-capped; every `curl` starts
-  with `-q` so a `~/.curlrc` cannot alter a reviewed request; a tunnel's log
+  with `-q` so a `~/.curlrc` cannot alter the request; a tunnel's log
   is truncated past 4 MiB.
 - The Portless CA is imported only when it is a small plain file the user
   owns, is self-signed under Portless's own name, and verifies the

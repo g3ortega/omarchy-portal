@@ -42,6 +42,7 @@ is "route_name strips the TLD" "$(portless_route_name 5173)" "dash"
 is "route_name is empty for an unknown port" "$(portless_route_name 9)" ""
 
 # ---- tunnels.sh validators -------------------------------------------------
+me=$(< /proc/$$/comm)
 valid_url "https://a-b.trycloudflare.com" && ok "valid_url accepts a hostname" || bad "valid_url rejected a hostname"
 valid_url "http://acme.localhost:1355/x?y=1" && ok "valid_url accepts port and path" || bad "valid_url rejected port+path"
 valid_url "javascript:alert(1)" && bad "valid_url accepted javascript:" || ok "valid_url rejects javascript:"
@@ -53,7 +54,6 @@ valid_port 65535 && ok "valid_port upper bound" || bad "valid_port rejected 6553
 valid_port 65536 && bad "valid_port accepted 65536" || ok "valid_port rejects 65536"
 valid_port 0 && bad "valid_port accepted 0" || ok "valid_port rejects 0"
 valid_port 12a && bad "valid_port accepted 12a" || ok "valid_port rejects non-digits"
-me=$(< /proc/$$/comm)
 owned_pid "$$" "$me" && ok "owned_pid matches this shell" || bad "owned_pid rejected this shell ($me)"
 owned_pid "$$" ngrok && bad "owned_pid matched the wrong comm" || ok "owned_pid rejects the wrong comm"
 owned_pid "0$$" bash && bad "owned_pid accepted a zero-padded pid" || ok "owned_pid rejects a zero-padded pid"
@@ -69,7 +69,7 @@ is "cmd_stop with a reused pid returns ok without signalling" "$out" '{"ok":true
 [[ -f $STATE_DIR/cloudflared-4444.url ]] && bad "cmd_stop left the url file" || ok "cmd_stop cleared the state files"
 
 # The pidfile binds pid and kernel start time; a matching comm is not enough.
-me=$(< /proc/$$/comm); mystart=$(proc_start "$$")
+mystart=$(proc_start "$$")
 owned_pid "$$" "$me" "$mystart" && ok "owned_pid accepts the true start time" || bad "owned_pid rejected the true start time"
 owned_pid "$$" "$me" "$((mystart + 1))" && bad "owned_pid accepted a stale start time" || ok "owned_pid rejects a stale start time"
 printf '%s %s' "$$" "$mystart" > "$STATE_DIR/x-1.pid"
@@ -89,11 +89,11 @@ is "a state directory with too many entries dumps nothing" "$(state_dump "$crowd
 rm -rf "$crowd"
 # State is read only from plain files we own; a planted link is not a file.
 ln -s /etc/hostname "$STATE_DIR/cloudflared-4445.url"; ln -s /proc/self/stat "$STATE_DIR/cloudflared-4445.pid"
-own_file "$STATE_DIR/cloudflared-4445.url" && bad "own_file accepted a symlink" || ok "own_file rejects a symlink"
 is "read_own returns nothing for a symlink" "$(read_own "$STATE_DIR/cloudflared-4445.url")" ""
+before=$(wc -c < /etc/hostname)
 write_own "$STATE_DIR/cloudflared-4445.url" "replaced"
 [[ -L $STATE_DIR/cloudflared-4445.url ]] && bad "write_own followed a link" || ok "write_own replaces a link with a file"
-is "and the target was never touched" "$(cat /etc/hostname | wc -c | tr -d ' ')" "$(cat /etc/hostname | wc -c | tr -d ' ')"
+is "and the target was never touched" "$(wc -c < /etc/hostname)" "$before"
 rm -f "$STATE_DIR"/cloudflared-4445.*
 mkdir -p "$T/notmine"; chmod 700 "$T/notmine"; ln -s "$T/notmine" "$T/link-dir"
 own_dir "$T/link-dir" && bad "own_dir accepted a symlinked directory" || ok "own_dir rejects a symlinked directory"
@@ -135,15 +135,17 @@ is "read survives a torn last line" "$("$M" read 3000 | jq -c '.samples|length')
 ln -s /etc/hostname "$PORTAL_METRICS_DIR/metrics/5000.jsonl"
 is "read refuses a symlinked sample file" "$("$M" read 5000 | jq -c '.samples|length')" "0"
 "$M" append-batch '{"5000":{"t":1}}' >/dev/null
-[[ ! -L $PORTAL_METRICS_DIR/metrics/5000.jsonl && -f $PORTAL_METRICS_DIR/metrics/5000.jsonl && $(wc -c < /etc/hostname) -lt 64 ]] && ok "append replaces a planted link with a fresh file and never follows it" || bad "append followed or kept a symlinked path"
+[[ ! -L $PORTAL_METRICS_DIR/metrics/5000.jsonl && -f $PORTAL_METRICS_DIR/metrics/5000.jsonl && $(wc -c < /etc/hostname) == "$before" ]] && ok "append replaces a planted link with a fresh file and never follows it" || bad "append followed or kept a symlinked path"
 mkfifo "$PORTAL_METRICS_DIR/metrics/5001.jsonl"
 is "read of a planted FIFO returns at once, empty" "$(timeout 5 "$M" read 5001 | jq -c '.samples|length')" "0"
 "$M" append-batch '{"5001":{"t":1}}' >/dev/null; [[ -f $PORTAL_METRICS_DIR/metrics/5001.jsonl && ! -p $PORTAL_METRICS_DIR/metrics/5001.jsonl ]] && ok "append replaces a planted FIFO with a fresh file" || bad "append left or blocked on a FIFO"
 big=$(mktemp -p "$PORTAL_METRICS_DIR/metrics"); head -c 9000000 /dev/zero > "$big"; mv "$big" "$PORTAL_METRICS_DIR/metrics/5002.jsonl"
 is "read refuses a file past the cap" "$(timeout 5 "$M" read 5002 | jq -c '.samples|length')" "0"
+# 19300 x ~130 B is past MAX_BYTES, so the append trims to MAX_LINES.
 yes '{"t":1756700000,"conns":0,"cpuPct":0,"rssKb":73000,"latMs":12,"httpCode":200,"pad":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}' | head -n 19300 > "$PORTAL_METRICS_DIR/metrics/4000.jsonl"
 "$M" append-batch '{"4000":{"t":2}}' >/dev/null
-is "append-batch trims past the hard bound" "$(wc -l < "$PORTAL_METRICS_DIR/metrics/4000.jsonl")" "17280"
+lines=$(wc -l < "$PORTAL_METRICS_DIR/metrics/4000.jsonl"); bytes=$(wc -c < "$PORTAL_METRICS_DIR/metrics/4000.jsonl")
+(( lines > 0 && lines <= 17280 && bytes <= 2097152 )) && ok "append-batch trims to what fits under the cap ($lines lines, $bytes bytes)" || bad "trim left $lines lines, $bytes bytes"
 "$M" unwatch 3000 >/dev/null
 [[ -e $PORTAL_METRICS_DIR/metrics/3000.jsonl ]] && bad "unwatch left the metric file" || ok "unwatch deletes the metric file"
 is "state files are private" "$(stat -c %a "$PORTAL_METRICS_DIR/metrics/4000.jsonl")" "600"

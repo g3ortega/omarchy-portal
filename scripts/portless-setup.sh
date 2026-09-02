@@ -5,6 +5,7 @@
 #
 #   status  -> {"ok":true,"checks":{...},"remaining":[...]}
 #   run     -> performs unprivileged fixes, then prints the same report
+#   untrust -> removes the CA from the browser stores it was imported into
 #
 # The rungs:
 #   installed      portless on PATH (the npm install is a copyable command;
@@ -18,17 +19,14 @@
 #   trust_firefox  CA in each Firefox profile's cert9.db (fix: certutil)
 #
 # Security: the only certificate ever imported is ~/.portless/ca.pem — the CA
-# this user's own portless generated, read descriptor-relative and verified
-# against the live proxy. Nothing is fetched, nothing is installed, nothing
-# elevates.
+# this user's own portless generated, read once through the state helper and
+# verified against the live proxy. Nothing is fetched, nothing is installed,
+# nothing elevates.
 set -o pipefail
 
 SETUP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/portless.sh
 source "$SETUP_DIR/lib/portless.sh"
-CA="$PORTLESS_DIR/ca.pem"
-NSSDB="$HOME/.pki/nssdb"
-NICK="portless Local CA"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 have jq || { echo '{"ok":false,"error":"jq not found"}'; exit 0; }
@@ -36,13 +34,13 @@ have jq || { echo '{"ok":false,"error":"jq not found"}'; exit 0; }
 # The file at $CA is trusted browser-wide, so it must be what portless mints:
 # a self-signed root whose subject is its own nickname. Anything else in that
 # path (a swapped file, a different state dir) is not imported.
-ca_pem() { cat_own "$CA" 16384; }   # bound read, 16 KiB cap
+CA_PEM=$(cat_own "$CA" 16384)   # read once; every check and import below uses these bytes
 ca_is_portless() {
-  local pem; pem=$(ca_pem) && [[ -n $pem ]] || return 1
+  [[ -n $CA_PEM ]] || return 1
   have openssl || return 1
   local subj issuer
-  subj=$(openssl x509 -noout -subject <<<"$pem" 2>/dev/null)
-  issuer=$(openssl x509 -noout -issuer <<<"$pem" 2>/dev/null)
+  subj=$(openssl x509 -noout -subject <<<"$CA_PEM" 2>/dev/null)
+  issuer=$(openssl x509 -noout -issuer <<<"$CA_PEM" 2>/dev/null)
   [[ $subj == *"CN=$NICK"* && $issuer == *"CN=$NICK"* ]] || return 1
   # The file is trusted browser-wide only when it is the CA behind the
   # certificate the live proxy actually presents: a replaced file that signs
@@ -51,7 +49,7 @@ ca_is_portless() {
   local leaf; leaf=$(mktemp) || return 1
   openssl s_client -connect "127.0.0.1:$PROBE_PORT" -servername "portal-probe.$(configured_tld)" </dev/null 2>/dev/null \
     | openssl x509 -outform PEM > "$leaf" 2>/dev/null
-  openssl verify -CAfile <(ca_pem) "$leaf" >/dev/null 2>&1; local rc=$?
+  openssl verify -CAfile <(printf '%s' "$CA_PEM") "$leaf" >/dev/null 2>&1; local rc=$?
   rm -f -- "$leaf"
   return $rc
 }
@@ -71,13 +69,6 @@ nss_trusted() {
     && certutil -d "sql:$NSSDB" -L 2>/dev/null | grep -q "$NICK"
 }
 
-firefox_profiles() {
-  local d
-  for d in "$HOME"/.mozilla/firefox/*/; do
-    [[ -f "$d/cert9.db" || -f "$d/prefs.js" ]] && printf '%s\n' "${d%/}"
-  done
-}
-
 firefox_untrusted() {
   have certutil || return 0
   firefox_profiles | while read -r d; do
@@ -88,7 +79,7 @@ firefox_untrusted() {
 report() {
   local installed ca proxy nss ff_missing tldok remaining=()
   have portless && installed=true || installed=false
-  [[ -f $CA ]] && ca=true || ca=false
+  [[ -n $CA_PEM ]] && ca=true || ca=false
   proxy=$(proxy_state)
   nss_trusted && nss=true || nss=false
   ff_missing=$(firefox_untrusted | wc -l)
@@ -112,13 +103,14 @@ report() {
                  remaining:$ARGS.positional}' "${remaining[@]}"
 }
 
+portless_state_load
 case "${1:-status}" in
   status) report ;;
   run)
     # A proxy missing the configured TLD is restarted only when that is
     # unprivileged (ours, on a high port); the 443 case stays in `remaining`
     # as a copyable command.
-    PORTLESS=$(resolve_bin portless) || PORTLESS=""
+    PORTLESS=$(resolve_bin portless)
     if [[ -n $PORTLESS ]] && [[ $(proxy_state) == wrong-tld ]]; then
       portless_clean_port || "$PORTLESS" proxy stop >/dev/null 2>&1
       portless_probe_reset
@@ -136,12 +128,19 @@ case "${1:-status}" in
       if [[ ! -d $NSSDB ]]; then
         own_dir "$NSSDB" && certutil -d "sql:$NSSDB" -N --empty-password >/dev/null 2>&1
       fi
-      nss_trusted || certutil -d "sql:$NSSDB" -A -t "C,," -n "$NICK" -i <(ca_pem) >/dev/null 2>&1
+      nss_trusted || certutil -d "sql:$NSSDB" -A -t "C,," -n "$NICK" -i <(printf '%s' "$CA_PEM") >/dev/null 2>&1
       firefox_untrusted | while read -r d; do
-        certutil -d "sql:$d" -A -t "C,," -n "$NICK" -i <(ca_pem) >/dev/null 2>&1
+        certutil -d "sql:$d" -A -t "C,," -n "$NICK" -i <(printf '%s' "$CA_PEM") >/dev/null 2>&1
       done
     fi
     report
     ;;
-  *) echo '{"ok":false,"error":"usage: portless-setup.sh status|run"}' ;;
+  untrust)
+    if have certutil; then
+      [[ -d $NSSDB ]] && certutil -d "sql:$NSSDB" -D -n "$NICK" >/dev/null 2>&1
+      firefox_profiles | while read -r d; do certutil -d "sql:$d" -D -n "$NICK" >/dev/null 2>&1; done
+    fi
+    echo '{"ok":true}'
+    ;;
+  *) echo '{"ok":false,"error":"usage: portless-setup.sh status|run|untrust"}' ;;
 esac

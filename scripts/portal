@@ -136,7 +136,7 @@ case "${1:-list}" in
   portal stop-all                    stop every share and name
   portal uninstall [--dry]           reverse everything Portal put on the machine
   portal refresh                     ask the running shell to rescan
-  portal setup                       full portless setup (installs, trusts browsers)
+  portal setup                       full portless setup (starts the proxy, trusts browsers)
   portal doctor                      check the plugin's dependencies
   portal test                        run the unit tests
 
