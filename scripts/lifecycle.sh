@@ -7,6 +7,7 @@
 #   resume <pid> <start> <port>       SIGCONT
 #   stop <pid> <start> <port>         SIGTERM
 #   restart <pid> <start> <port> <cwd> <argv-json>
+#           (cwd is what the scan saw; the process's live cwd is what is used)
 #
 # <start> is the kernel start time the scan saw (field 22 of /proc/<pid>/stat):
 # pid and start time together name one process, so a pid reused since the
@@ -47,6 +48,9 @@ case "${1:-}" in
   restart)
     pid="${2:-}" start="${3:-}" port="${4:-}" cwd="${5:-}" argv_json="${6:-}"
     target "$pid" "$start" "$port"
+    # The working directory and environment are read from the live process,
+    # then its identity is checked again, so both belong to that process.
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || die "could not read the working directory of pid $pid"
     [[ -d $cwd ]] || die "working directory is gone: $cwd"
     # Rebuild the exact argv, NUL-separated so an argument may hold anything,
     # newlines included. jq validates; bash mapfile keeps each element intact —

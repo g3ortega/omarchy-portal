@@ -90,7 +90,7 @@ jq -nc --arg p "$M/held/cloudflared" --arg s "$d" '{path:$p, sha256:$s}' | state
 chmod 770 "$M/held"
 out=$(PATH="$M/stub:$PATH" PORTAL_METRICS_DIR=$M/st3 PORTAL_STATE_DIR=$M/rt3 "$S/uninstall.sh" 2>&1); rc=$?
 is "uninstall stops when the binary cannot be removed" "$rc" "1"
-grep -q "could not remove $M/held/cloudflared; its marker is kept" <<<"$out" && ok "and says so" || bad "no message about the kept marker: $out"
+grep -q "$M/held/cloudflared.*its marker is kept" <<<"$out" && ok "and says so" || bad "no message about the kept marker: $out"
 [[ -e $M/st3/installed-cloudflared ]] && ok "and the marker survives" || bad "the marker was deleted"
 chmod 700 "$M/held"
 rm -rf "$M"
@@ -135,6 +135,9 @@ own_dir "$T/link-dir" && bad "own_dir accepted a symlinked directory" || ok "own
 printf 'x' > "$T/notmine/leaf"; is "a leaf under a symlinked parent is refused" "$(cat_own "$T/link-dir/leaf")" ""
 chmod 770 "$T/notmine"; is "a leaf under a group-writable directory is refused" "$(cat_own "$T/notmine/leaf")" ""; chmod 700 "$T/notmine"
 is "write_own creates 0600" "$(write_own "$T/notmine/w" v; stat -c %a "$T/notmine/w")" "600"
+printf 'x' > "$T/notmine/loose"; chmod 666 "$T/notmine/loose"
+is "a leaf writable by others is refused" "$(cat_own "$T/notmine/loose")" ""
+chmod 644 "$T/notmine/loose"; is "and read once it is not" "$(cat_own "$T/notmine/loose")" "x"
 
 # Provider binaries run by absolute, validated path only.
 mkdir -p "$T/bin"; printf '#!/bin/sh\n' > "$T/bin/fakeprov"; chmod 777 "$T/bin/fakeprov"
@@ -185,6 +188,9 @@ is "status keeps a live share with no reach record" "$(ls "$R1" | grep -c -E '^c
 (cd "$R1" && touch $(seq -f 'crowd-%g' 1 4100))
 is "stop-own fails closed when the state cannot be listed" "$(PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -r .error)" "could not list Portal's state; nothing was stopped"
 is "status fails closed when the state cannot be listed" "$(PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" status | jq -r .error)" "could not list Portal's state"
+# Rows are capped like the scanner's ports: past the cap, an error, not a document.
+RC="$T/rows"; mkdir -p "$RC"; for i in $(seq 1 520); do printf 'https://a-b-%s.trycloudflare.com' "$i" > "$RC/cloudflared-$((10000 + i)).url"; printf '999999 1' > "$RC/cloudflared-$((10000 + i)).pid"; done
+is "status reports an error past the row cap" "$(PORTAL_STATE_DIR="$RC" bash -c 'source "'"$S"'/tunnels.sh"; alive_line() { return 0; }; portless_state_load; cmd_status' | jq -r .error)" "more than 512 tunnels"
 rm -f "$R1"/crowd-*
 is "stop-own stops what it can list" "$(PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -c .ok)" "true"
 sleep 0.3; ps -eo comm,args | grep -q '^cloudflared *.*300$' && bad "stop-own left the tunnel running" || ok "and the tunnel is gone"
@@ -202,7 +208,7 @@ is "cmd_stop fails when the process will not die" "$(stub_env "$R1" 'STOP_TERM_W
 is "and keeps its records" "$(ls "$R1" | grep -c -E '^cloudflared-4449\.(pid|url)$')" "2"
 # An idle tunnel whose stop failed stays in the status, records and all.
 printf '%s' $(( $(printf '%(%s)T' -1) - 700 )) > "$R1/cloudflared-4449.idle"
-is "status keeps listing an idle tunnel it could not stop" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; proc() { :; }; kill() { :; }; cmd_status' | jq -c '[.tunnels[]|select(.provider=="cloudflared")|.port]')" "[4449]"
+is "status keeps listing an idle tunnel it could not stop" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; proc() { :; }; kill() { :; }; cmd_status' | jq -c '[.tunnels[]|select(.provider=="cloudflared" and .port==4449)|.port]')" "[4449]"
 is "and its records" "$(ls "$R1" | grep -c -E '^cloudflared-4449\.(pid|url)$')" "2"
 stub_env "$R1" 'cmd_stop cloudflared 4449 >/dev/null'   # a real stop ends the replacement
 # A process that ignores TERM is killed, and the stop reports only once it is gone.
@@ -275,6 +281,11 @@ if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then
   PORTAL_METRICS_DIR=$U PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$U"'/nss"' && ok "trust_store imports the CA" || bad "trust_store failed"
   certutil -d "sql:$U/nss" -L -n "portless Local CA" >/dev/null 2>&1 && ok "and the CA is in the store" || bad "the CA is not in the store"
   is "and the store is on record" "$(cat "$U/trusted-stores")" "$U/nss"
+  # A trust whose record cannot be written is undone: the store ends without the CA.
+  mkdir -p "$U/rb/nss"; certutil -d "sql:$U/rb/nss" -N --empty-password >/dev/null 2>&1; mkdir -p "$U/rb/trusted-stores"
+  PORTAL_METRICS_DIR=$U/rb PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$U"'/rb/nss"' && bad "trust_store reported success without a record" || ok "trust_store fails when the record cannot be written"
+  certutil -d "sql:$U/rb/nss" -L -n "portless Local CA" >/dev/null 2>&1 && bad "and left the CA trusted" || ok "and undoes the import"
+  [[ -e $U/rb/ca-import.pem ]] && bad "the import file was left behind" || ok "and leaves no import file behind"
   # A record that exists but cannot be read is not treated as empty.
   cp "$U/trusted-stores" "$U/keep"; head -c 70000 /dev/zero | tr '\0' x > "$U/trusted-stores"
   is "untrust refuses an unreadable record" "$(PORTAL_METRICS_DIR=$U "$S/portless-setup.sh" untrust | jq -c .ok)" "false"

@@ -6,8 +6,8 @@ pathname twice. A directory is reached by walking every component from `/`
 with O_DIRECTORY|O_NOFOLLOW, and the final directory must be a real directory
 the current user owns that nobody else can write to. A leaf is opened
 relative to that directory with O_NOFOLLOW|O_NONBLOCK (a planted FIFO cannot
-block, a link is refused), then fstat decides: regular, ours, one link, under
-the byte cap. Writes create a random adjacent temporary with O_CREAT|O_EXCL
+block, a link is refused), then fstat decides: regular, ours, writable by nobody
+else, one link, under the byte cap. Writes create a random adjacent temporary with O_CREAT|O_EXCL
 mode 0600, fsync it, renameat it into place and fsync the directory. Appends
 and truncation go through the validated descriptor, never the path again.
 
@@ -83,7 +83,7 @@ def split(path):
 
 
 def open_leaf(dirfd, name, flags, cap):
-    """Open a leaf relative to a verified directory and bind it: regular, ours, single link, capped."""
+    """Open a leaf relative to a verified directory and bind it: regular, ours, writable by nobody else, single link, capped."""
     try:
         fd = os.open(name, flags | LEAF_FLAGS, dir_fd=dirfd)
     except FileNotFoundError:
@@ -91,9 +91,9 @@ def open_leaf(dirfd, name, flags, cap):
     except OSError as e:
         raise Refused(f"refused {name}: {e.strerror}")
     st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_uid != UID or st.st_nlink != 1 or st.st_size > cap:
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != UID or (st.st_mode & 0o022) or st.st_nlink != 1 or st.st_size > cap:
         os.close(fd)
-        raise Refused(f"refused {name}: not a plain owned file under the cap")
+        raise Refused(f"refused {name}: not a plain owned file, writable by nobody else, under the cap")
     return fd
 
 

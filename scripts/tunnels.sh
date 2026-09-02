@@ -61,6 +61,7 @@ LOG_CAP=4194304   # a provider's log is truncated past this; O_APPEND writers ca
 IDLE_CAP=600      # a public tunnel whose target has been gone this long is stopped
 SHARE_FILES=(pid url reach dns idle log)   # what a share leaves in STATE_DIR
 STATE_FILES_CAP=4096                        # the dump refuses past this; six files per share
+MAX_ROWS=512      # past this many tunnels, status reports an error, not a growing document
 
 die() { jq -nc --arg e "$1" '{ok:false,error:$e}'; exit 0; }
 json_str() { jq -Rn --arg v "$1" '$v'; }
@@ -631,6 +632,7 @@ cmd_status() {
     done < <("${name}_adopt")
   done
 
+  (( $(grep -c . <<<"$tsv") > MAX_ROWS )) && die "more than $MAX_ROWS tunnels"
   printf '%s' "$tsv" | jq -Rsc 'split("\n") | map(select(length > 0) | split("\t")
     | {provider: .[0], port: (.[1] | tonumber), url: .[2], reach: .[3], dns: (.[4] // "")})
     | {ok: true, tunnels: .}'

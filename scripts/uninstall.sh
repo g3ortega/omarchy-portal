@@ -47,10 +47,16 @@ fi
 echo "cloudflared, if it is still the copy Portal installed"
 mark=$(cat_own "$PORTAL_STATE_HOME/installed-cloudflared" 4096)
 path=$(jq -r '.path // empty' <<<"$mark" 2>/dev/null); sum=$(jq -r '.sha256 // empty' <<<"$mark" 2>/dev/null)
-if [[ -n $path && -f $path && $(sha256sum -- "$path" | cut -d' ' -f1) == "$sum" ]]; then
-  # The marker is the only thing that says the binary is Portal's to delete,
-  # so it outlives a removal that did not happen.
-  run state_remove "${path%/*}" "${path##*/}" || { echo "could not remove $path; its marker is kept; nothing else was removed" >&2; exit 1; }
+# The digest is taken from the bytes the state helper binds (no link, ours,
+# writable by nobody else), never from whatever a pathname resolves to at the
+# time. A binary that is there but cannot be bound is not judged at all: the
+# marker is the only thing that says it is Portal's to delete, so it outlives
+# any removal that did not happen.
+if [[ -n $path && ( -e $path || -L $path ) ]]; then
+  own_file "$path" 134217728 || { echo "could not read $path safely; its marker is kept; nothing else was removed" >&2; exit 1; }
+  if [[ $(cat_own "$path" 134217728 | sha256sum | cut -d' ' -f1) == "$sum" ]]; then
+    run state_remove "${path%/*}" "${path##*/}" || { echo "could not remove $path; its marker is kept; nothing else was removed" >&2; exit 1; }
+  fi
 fi
 
 echo "Portal state"

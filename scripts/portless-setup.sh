@@ -46,13 +46,13 @@ TRUSTED="$PORTAL_STATE_HOME/trusted-stores"
 TRUSTED_CAP=65536
 # Import into one store and record it; a trust that could not be recorded is
 # undone at once, since removal would never find it. certutil sizes its input
-# with stat, so the verified bytes go through a private file, not a pipe.
+# with stat, so the verified bytes go through a file: one written by the state
+# helper inside Portal's own directory, where nothing else can swap it.
 trust_store() {  # <nss dir>
-  local pem rc
-  pem=$(mktemp) || return 1
-  printf '%s' "$CA_PEM" > "$pem"
+  local pem="$PORTAL_STATE_HOME/ca-import.pem" rc
+  { own_dir "$PORTAL_STATE_HOME" && printf '%s' "$CA_PEM" | state write "$pem"; } 2>/dev/null || return 1
   certutil -d "sql:$1" -A -t "C,," -n "$NICK" -i "$pem" >/dev/null 2>&1; rc=$?
-  rm -f -- "$pem"
+  state_remove "$PORTAL_STATE_HOME" ca-import.pem
   (( rc == 0 )) || return 1
   printf '%s\n' "$1" | state_append "$TRUSTED" 64 "$TRUSTED_CAP" && return 0
   certutil -d "sql:$1" -D -n "$NICK" >/dev/null 2>&1
