@@ -45,6 +45,11 @@ say "building the farm in tmp/"
 rm -rf "$FARM" "$BIN" "$PIDS" "$PORTAL_METRICS_DIR"
 mkdir -p "$FARM" "$BIN" "$PORTAL_METRICS_DIR"
 : > "$PIDS"
+# A capability on the system node (e.g. cap_net_bind_service) makes its
+# processes non-dumpable, so ss cannot attribute their sockets to a pid.
+# Running an unprivileged copy in $BIN/ drops file capabilities.
+cp "$(readlink -f "$(command -v node)")" "$BIN/node"
+export PATH="$BIN:$PATH"
 
 # One real HTTP server, reused by every fixture.
 cat > "$TMP/srv.py" <<'PYEOF'
