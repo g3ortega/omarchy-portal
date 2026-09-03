@@ -828,39 +828,52 @@ Panel {
           // ---- setup next step ------------------------------------------------
           // One quiet row under the strip: what finishes setup, and the copy
           // that hands it over. The command stays off-screen until pasted.
+          // The step names portless, so it links to the official docs.
           Row {
+            id: stepRow
             visible: root.toastCopy !== ""
             width: parent.width
             spacing: Style.spacing.sm
+            // RichText ignores elide, so clip the rare over-long title here
+            // instead of letting it paint past the row.
+            clip: true
+            readonly property string portlessDocs: "https://github.com/vercel-labs/portless"
 
-            OpticalGlyph {
-              id: stepGlyph
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.font.caption + Style.spacing.xs
-              height: Style.font.caption
-              text: Icons.g("localRoute")
-              fontSize: Style.font.caption
-              color: Util.alpha(Color.accent, 0.7)
+            function richStep(s) {
+              var e = String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+              return e.replace(/portless/i, "<a href=\"" + portlessDocs + "\">$&</a>")
             }
 
             Text {
               anchors.verticalCenter: parent.verticalCenter
-              width: parent.width - stepGlyph.width - stepCopy.implicitWidth - 2 * parent.spacing
-              textFormat: Text.PlainText
-              text: root.toast
+              width: parent.width - copyHit.width - parent.spacing
+              textFormat: Text.RichText
+              text: stepRow.richStep(root.toast)
+              linkColor: Color.accent
               color: Util.alpha(root.panelText, 0.75)
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               elide: Text.ElideRight
+              onLinkActivated: function (link) { if (root.service) root.service.openUrl(link) }
             }
 
-            LinkText {
-              id: stepCopy
+            MouseArea {
+              id: copyHit
               anchors.verticalCenter: parent.verticalCenter
-              text: "Copy"
-              color: Color.accent
-              font.pixelSize: Style.font.bodySmall
+              width: Style.font.bodySmall + Style.spacing.xs
+              height: Style.font.bodySmall + Style.spacing.xs
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
               onClicked: if (root.service) root.service.copyText(root.toastCopy)
+
+              OpticalGlyph {
+                anchors.centerIn: parent
+                width: Style.font.caption + Style.spacing.xs
+                height: Style.font.caption
+                text: Icons.g("copy")
+                fontSize: Style.font.bodySmall
+                color: copyHit.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.7)
+              }
             }
           }
 
