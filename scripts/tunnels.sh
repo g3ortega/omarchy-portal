@@ -835,6 +835,9 @@ cmd_status() {
     valid_port "$port" && known_provider "$provider" || continue
     valid_url "$url" || die "$provider on port $port has a malformed URL record; its records were kept"
     base="$provider-$port"
+    # A legacy share has no trustworthy process identity to migrate. Null
+    # health keeps the display neutral; reconcile_idle gives it a fixed window
+    # for explicit reapproval to write a target record.
     target_health=""
     # portless routes have no process of their own, but a route removed with
     # the portless CLI is gone all the same; everything else must be alive.

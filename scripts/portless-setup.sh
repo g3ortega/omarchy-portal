@@ -280,8 +280,10 @@ case "${1:-status}" in
         || die "the remaining browser trust records could not be saved"
       jq -nc --args '{ok:false, error:"the CA is still trusted in some stores", remaining:$ARGS.positional}' "${left[@]%%$'\t'*}"
     else
-      state_remove "${TRUSTED%/*}" "${TRUSTED##*/}" \
-        || die "the browser trust ledger could not be cleared"
+      if [[ -n $record ]]; then
+        state_remove "${TRUSTED%/*}" "${TRUSTED##*/}" \
+          || die "the browser trust ledger could not be cleared"
+      fi
       echo '{"ok":true}'
     fi
     ;;

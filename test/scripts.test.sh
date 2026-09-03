@@ -544,6 +544,27 @@ is "status marks a tracked tunnel whose localhost target is offline" \
   "$(jq -r '.tunnels[] | select(.provider == "cloudflared" and .port == 4471) | [.targetHealthy, .dns] | @tsv' <<<"$lan_status") $(test -e "$LAN_TARGET/cloudflared-4471.idle" && echo idle || echo no-idle) $(wc -l < "$LAN_TARGET/effects")" \
   $'false\t idle 0'
 
+LEGACY_TARGET="$T/targetless-legacy"; mkdir -p "$LEGACY_TARGET"; : > "$LEGACY_TARGET/effects"
+printf 'https://legacy.trycloudflare.com' > "$LEGACY_TARGET/cloudflared-4473.url"
+printf 'public' > "$LEGACY_TARGET/cloudflared-4473.reach"
+printf '999999 1' > "$LEGACY_TARGET/cloudflared-4473.pid"
+legacy_status=$(PORTAL_STATE_DIR="$LEGACY_TARGET" PORTLESS_STATE_DIR="$PORTLESS_STATE_DIR" \
+  EFFECTS="$LEGACY_TARGET/effects" S="$S" bash -c '
+  source "$S/tunnels.sh"
+  ss() { printf "LISTEN 0 128 127.0.0.1:4473 0.0.0.0:*\n"; }
+  portless_state_load() { return 0; }
+  alive_line() { return 0; }
+  cloudflared_adopt() { :; }
+  ngrok_adopt() { :; }
+  portless_adopt() { :; }
+  kill() { printf "kill %s\n" "$*" >> "$EFFECTS"; return 1; }
+  proc() { printf "proc %s\n" "$*" >> "$EFFECTS"; return 1; }
+  cmd_status
+')
+is "a legacy targetless share gets a fixed reapproval deadline" \
+  "$(jq -r '.tunnels[] | select(.provider == "cloudflared" and .port == 4473) | .targetHealthy' <<<"$legacy_status") $(test -e "$LEGACY_TARGET/cloudflared-4473.idle" && echo idle || echo no-idle) $(wc -l < "$LEGACY_TARGET/effects")" \
+  "null idle 0"
+
 R3="$T/idle-write"; mkdir -p "$R3"
 python3 -m http.server 4472 --bind 127.0.0.1 >/dev/null 2>&1 & idle_listener=$!; sleep 0.4
 idle_start=$(proc_start "$idle_listener")
@@ -762,6 +783,13 @@ is "setup with nothing remaining reports bare ok" "$(cmd_setup portless 2>/dev/n
 SCRIPT_DIR="$OLD_SD"
 
 # ---- portless-setup.sh untrust: a store that keeps the CA stays on record ----
+NO_TRUST="$T/untrust-empty"; mkdir -p "$NO_TRUST/home"
+no_trust=$(HOME="$NO_TRUST/home" XDG_CONFIG_HOME="$NO_TRUST/home/.config" \
+  PORTAL_STATE_DIR="$NO_TRUST/runtime" PORTAL_METRICS_DIR="$NO_TRUST/state" \
+  PORTLESS_STATE_DIR="$NO_TRUST/portless" "$S/portless-setup.sh" untrust)
+is "untrust treats an absent ledger as already cleared" \
+  "$no_trust $(test ! -e "$NO_TRUST/state" && echo state-absent || echo state-created)" \
+  '{"ok":true} state-absent'
 if command -v certutil >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
   U=$(mktemp -d); mkdir -p "$U/nss" "$U/portless"
   openssl req -x509 -newkey rsa:2048 -nodes -keyout "$U/ca.key" -out "$U/portless/ca.pem" \
