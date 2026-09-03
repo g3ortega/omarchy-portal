@@ -126,6 +126,29 @@ is "cmd_start fails without launching or altering group-only records" "$(jq -c .
 is "cmd_status fails and keeps group-only records" "$(jq -c .ok "$GROUP_ONLY/status.out") $(find "$GROUP_ONLY/status" -maxdepth 1 -type f | wc -l)" "false 2"
 is "group-only records never reach a signal path" "$(wc -l < "$GROUP_ONLY/signals") $(grep -Ec -- '(^| )-(0|1)( |$)' "$GROUP_ONLY/signals" 2>/dev/null || true)" "0 0"
 
+RESTART_GROUP="$T/restart-group"; mkdir -p "$RESTART_GROUP"; : > "$RESTART_GROUP/effects"
+printf '999999 1' > "$RESTART_GROUP/.restart-4499.pid"
+PORTAL_STATE_DIR="$RESTART_GROUP" EFFECTS="$RESTART_GROUP/effects" S="$S" bash -c '
+  set -- noop
+  source "$S/lifecycle.sh" >/dev/null
+  proc() { printf "proc %s\n" "$*" >> "$EFFECTS"; return 1; }
+  kill() {
+    printf "kill %s\n" "$*" >> "$EFFECTS"
+    [[ $* == "-0 -- -999999" ]]
+  }
+  for pid in 1 0 -1 "" nope; do group_alive "$pid" >/dev/null 2>&1 || true; done
+  rollback_replacement 999999 1 .restart-4499.pid; rollback_rc=$?
+  [[ -e $PORTAL_RUNTIME_DIR/.restart-4499.pid ]] && rollback_record=kept || rollback_record=lost
+  failure=$(fail_restart 999999 1 .restart-4499.pid "restart did not bring a listener back on port 4499")
+  [[ -e $PORTAL_RUNTIME_DIR/.restart-4499.pid ]] && failure_record=kept || failure_record=lost
+  printf "%s\t%s\t%s\t%s\t%s\n" "$rollback_rc" "$rollback_record" \
+    "$(jq -r .ok <<<"$failure")" "$(jq -r .effect <<<"$failure")" "$failure_record"
+' > "$RESTART_GROUP/result"
+is "restart rollback keeps a live descendant group's identity record" \
+  "$(cat "$RESTART_GROUP/result")" $'1\tkept\tfalse\tstopped\tkept'
+is "restart rollback only probes the guarded replacement group" \
+  "$(grep -c '^kill -0 -- -999999$' "$RESTART_GROUP/effects") $(grep -Ec ' -- -(0|1)$' "$RESTART_GROUP/effects" || true)" "2 0"
+
 ESCALATE_LOG="$GROUP_ONLY/escalate-signals" S="$S" bash -c '
   source "$S/tunnels.sh"
   checks=0; group_dead=0
@@ -497,6 +520,29 @@ real_stub_env "$R2" 'cmd_status >/dev/null'
 proc check ${tunnel_identity%% *} ${tunnel_identity#* } >/dev/null 2>&1 && tunnel_state=alive || tunnel_state=gone
 is "a replacement listener cannot inherit a public share" "$tunnel_state" "gone"
 kill "$replacement_listener" 2>/dev/null; wait "$replacement_listener" 2>/dev/null
+
+LAN_TARGET="$T/target-lan"; mkdir -p "$LAN_TARGET"; : > "$LAN_TARGET/effects"
+printf 'https://stale.trycloudflare.com' > "$LAN_TARGET/cloudflared-4471.url"
+printf 'public' > "$LAN_TARGET/cloudflared-4471.reach"
+printf '999999 1' > "$LAN_TARGET/cloudflared-4471.pid"
+printf '888888 1' > "$LAN_TARGET/cloudflared-4471.target"
+lan_status=$(PORTAL_STATE_DIR="$LAN_TARGET" PORTLESS_STATE_DIR="$PORTLESS_STATE_DIR" \
+  EFFECTS="$LAN_TARGET/effects" S="$S" bash -c '
+  source "$S/tunnels.sh"
+  ss() { printf "LISTEN 0 128 192.168.50.8:4471 0.0.0.0:*\n"; }
+  portless_state_load() { return 0; }
+  alive_line() { return 0; }
+  target_owns_port() { return 1; }
+  cloudflared_adopt() { :; }
+  ngrok_adopt() { :; }
+  portless_adopt() { :; }
+  kill() { printf "kill %s\n" "$*" >> "$EFFECTS"; return 1; }
+  proc() { printf "proc %s\n" "$*" >> "$EFFECTS"; return 1; }
+  cmd_status
+')
+is "status marks a tracked tunnel whose localhost target is offline" \
+  "$(jq -r '.tunnels[] | select(.provider == "cloudflared" and .port == 4471) | [.targetHealthy, .dns] | @tsv' <<<"$lan_status") $(test -e "$LAN_TARGET/cloudflared-4471.idle" && echo idle || echo no-idle) $(wc -l < "$LAN_TARGET/effects")" \
+  $'false\t idle 0'
 
 R3="$T/idle-write"; mkdir -p "$R3"
 python3 -m http.server 4472 --bind 127.0.0.1 >/dev/null 2>&1 & idle_listener=$!; sleep 0.4

@@ -246,6 +246,7 @@ check("a wildcard bind still opens localhost", e({
 {
   const panelSrc = readFileSync(join(here, "..", "PortalPanel.qml"), "utf8")
   const serviceSrc = readFileSync(join(here, "..", "Service.qml"), "utf8")
+  const rowSrc = readFileSync(join(here, "..", "PortRow.qml"), "utf8")
   const scanSrc = readFileSync(join(here, "..", "scripts", "scan-ports.sh"), "utf8")
   const fn = (src, name, params) => {
     const m = src.match(new RegExp("\\n  function " + name + "\\([^)]*\\) \\{\\n([\\s\\S]*?)\\n  \\}\\n"))
@@ -341,6 +342,21 @@ check("a wildcard bind still opens localhost", e({
         { port: 3001, process: { pid: 10, start: "20" }, label: "Node" }
       ]),
     { notices: [["Port 3000 went quiet", "Node is no longer listening"]], markers: {} })
+  if (!serviceSrc.includes("targetHealthy: t.targetHealthy === true ? true"))
+    bad.push("tunnel status drops target health before the UI")
+  const targetOfflineExpr = rowSrc.match(/readonly property bool targetOffline: ([^\n]+)/)?.[1]
+  const publicTunnelTextExpr = rowSrc.match(/readonly property string publicTunnelText: ([^\n]+)/)?.[1]
+  if (!targetOfflineExpr || !publicTunnelTextExpr) {
+    bad.push("the public tunnel row does not model an offline target")
+  } else {
+    const targetOffline = new Function("publicTunnel", "return " + targetOfflineExpr)
+    const publicTunnelText = new Function("publicTunnel", "targetOffline", "return " + publicTunnelTextExpr)
+    const staleTunnel = { url: "https://stale.trycloudflare.com", targetHealthy: false }
+    eq("an unhealthy tracked tunnel is marked offline", targetOffline(staleTunnel), true)
+    eq("an adopted tunnel is not marked offline", targetOffline({ url: "https://adopted.example", targetHealthy: null }), false)
+    eq("the public line names an offline target",
+      publicTunnelText(staleTunnel, true), "https://stale.trycloudflare.com · target offline")
+  }
   const maxPorts = Number(scanSrc.match(/^MAX_PORTS=([0-9]+)/m)?.[1] ?? 0)
   const argvB64Cutoff = Number(scanSrc.match(/\$\{#argv_b64\} -gt ([0-9]+)/)?.[1] ?? 0)
   const scanCap = Number(serviceSrc.match(/outputCaps:[^\n]*scan:\s*([0-9]+)/)?.[1] ?? 0)

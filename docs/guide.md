@@ -34,9 +34,9 @@ A server started through mise, nvm, or a shell hook uses the same launcher.
 Signals only go to processes you own. Stop, pause, and restart ask first and
 name the process. Resume never asks.
 
-Prefork servers (a puma cluster, gunicorn workers) show the first pid the
-kernel lists for the port, which may be a worker rather than the master;
-pause, restart and stop act on that pid.
+When `ss` attributes a prefork listener to multiple PIDs, Portal still lists
+the port. It hides pause, restart, stop, and starting a new public share because
+it cannot bind those actions to one process.
 
 ## Charts
 

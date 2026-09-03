@@ -58,9 +58,12 @@ cancel_restart() {  # <pid> <start> <pidfile> <exit status>
   rollback_replacement "$1" "$2" "$3" || true
   exit "$4"
 }
+group_alive() { (( ${1:-0} > 1 )) && kill -0 -- "-$1" 2>/dev/null; }   # <pid>: its process group still has members
 rollback_replacement() {  # <pid> <start> <pidfile>: keep identity if stop cannot be proven
   if proc check "$1" "$2" >/dev/null 2>&1; then
     proc end "$1" "$2" >/dev/null 2>&1 || return 1
+  elif group_alive "$1"; then
+    return 1
   fi
   state_remove "$PORTAL_RUNTIME_DIR" "$3" >/dev/null 2>&1
 }

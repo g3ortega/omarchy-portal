@@ -45,6 +45,8 @@ Item {
   readonly property var route: service && entry ? service.routeFor(entry.port) : null
   readonly property var publicTunnel: service && entry ? service.publicTunnelFor(entry.port) : null
   readonly property bool dnsPending: publicTunnel !== null && publicTunnel.dns === "pending"
+  readonly property bool targetOffline: publicTunnel !== null && publicTunnel.targetHealthy === false
+  readonly property string publicTunnelText: publicTunnel ? publicTunnel.url + (targetOffline ? " · target offline" : "") : ""
   // Index of the provider chip the panel's keyboard cursor is on while the
   // share picker is open on this row; -1 when the cursor is elsewhere.
   property int shareCursor: -1
@@ -283,7 +285,7 @@ Item {
         anchors.rightMargin: Style.spacing.md
         anchors.verticalCenter: parent.verticalCenter
         textFormat: Text.PlainText
-        text: row.publicTunnel ? row.publicTunnel.url : ""
+        text: row.publicTunnelText
         color: Util.alpha(Color.urgent, row.dnsPending ? 0.5 : 1.0)
         font.family: Style.font.family
         font.pixelSize: Style.font.caption

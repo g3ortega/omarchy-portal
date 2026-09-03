@@ -830,11 +830,12 @@ cmd_status() {
     | select($f[$base + ".url"] == null) | $base' <<<"$dump" | sort -u | tr '-' '\t')
   # Fields are joined with a unit separator: a tab is IFS whitespace, so an
   # empty field between tabs would vanish and shift the ones after it.
-  local provider port url reach pidline dns idle target target_present base target_rc healthy leader dns_left
+  local provider port url reach pidline dns idle target target_present base target_rc healthy leader dns_left target_health
   while IFS=$'\x1f' read -r provider port url reach pidline dns idle target target_present; do
     valid_port "$port" && known_provider "$provider" || continue
     valid_url "$url" || die "$provider on port $port has a malformed URL record; its records were kept"
     base="$provider-$port"
+    target_health=""
     # portless routes have no process of their own, but a route removed with
     # the portless CLI is gone all the same; everything else must be alive.
     if [[ $provider == portless ]]; then
@@ -884,6 +885,7 @@ cmd_status() {
         if (( target_rc == 0 )); then healthy=1
         elif (( target_rc == 2 )); then die "could not query attributed listening sockets"
         fi
+        (( healthy )) && target_health=true || target_health=false
       fi
       snapshot_current "$provider" "$port" "$pidline" || continue
       if [[ $target_present == 1 && $healthy == 0 && $LIVE_PORTS == *" $port "* ]]; then
@@ -905,7 +907,7 @@ cmd_status() {
         dns=""
       fi
     fi
-    tsv+="$provider"$'\t'"$port"$'\t'"$url"$'\t'"$reach"$'\t'"$dns"$'\n'
+    tsv+="$provider"$'\t'"$port"$'\t'"$url"$'\t'"$reach"$'\t'"$dns"$'\t'"$target_health"$'\n'
     # One key shape for every provider, so adoption dedup is a single test.
     listed+="$provider:$port "
   done < <(jq -r 'def line1: split("\n")[0];
@@ -933,14 +935,15 @@ cmd_status() {
     while IFS=$'\t' read -r aport aurl; do
       valid_port "$aport" && valid_url "$aurl" || continue
       [[ $listed == *" $name:$aport "* ]] && continue
-      tsv+="$name"$'\t'"$aport"$'\t'"$aurl"$'\t'"$areach"$'\t'$'\n'
+      tsv+="$name"$'\t'"$aport"$'\t'"$aurl"$'\t'"$areach"$'\t'$'\t'$'\n'
       listed+="$name:$aport "
     done < <("${name}_adopt")
   done
 
   (( $(grep -c . <<<"$tsv") > MAX_ROWS )) && die "more than $MAX_ROWS tunnels"
   printf '%s' "$tsv" | jq -Rsc 'split("\n") | map(select(length > 0) | split("\t")
-    | {provider: .[0], port: (.[1] | tonumber), url: .[2], reach: .[3], dns: (.[4] // "")})
+    | {provider: .[0], port: (.[1] | tonumber), url: .[2], reach: .[3], dns: (.[4] // ""),
+       targetHealthy: (if .[5] == "true" then true elif .[5] == "false" then false else null end)})
     | {ok: true, tunnels: .}'
 }
 

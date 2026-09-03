@@ -400,6 +400,7 @@ Item {
       next[t.provider + ":" + t.port] = {
         provider: t.provider, port: t.port, url: t.url, reach: t.reach,
         dns: t.dns,
+        targetHealthy: t.targetHealthy === true ? true : (t.targetHealthy === false ? false : null),
         // The display identity, derived once for every consumer.
         host: String(t.url).replace(/^[a-z]+:\/\//, "").replace(/:\d+$/, "")
       }
