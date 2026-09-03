@@ -735,8 +735,6 @@ Panel {
             border.width: 1
             border.color: Util.alpha(Color.accent, 0.35)
 
-            HoverHandler { id: stripHover }
-
             Row {
               id: stripRow
               anchors.left: parent.left
@@ -765,7 +763,8 @@ Panel {
                 fontFamily: root.fontFamily
                 fontSize: Style.font.bodySmall
                 width: Math.min(implicitWidth, stripRow.width - stripGlyph.width - stripRow.spacing)
-                hovered: stripHover.hovered
+                // Setup status always animates while truncated: no hover needed.
+                hovered: true
               }
             }
 
