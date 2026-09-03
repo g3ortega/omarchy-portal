@@ -616,8 +616,6 @@ cmd_status() {
       # deleting: an alias registered after this poll's snapshot must not lose
       # its markers to the stale one.
       if (( portless_ok == 0 )) && [[ -z $(portless_route_name "$port") ]]; then
-        # Re-read before deleting: an alias registered after this poll's
-        # snapshot must not lose its markers to the stale one.
         portless_state_load && [[ -z $(portless_route_name "$port") ]] \
           && { state_remove "$STATE_DIR" "$base".{url,name,reach}; continue; }
       fi
