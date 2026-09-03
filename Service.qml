@@ -344,7 +344,10 @@ Item {
       var was = _prevDevPorts[k]
       var wasKey = processKey(was.process)
       var samePort = devPorts.some(function (d) { return d.port === was.port })
-      if ((wasKey && liveProcesses[wasKey]) || (!wasKey && samePort)) continue
+      var sameProcessPort = wasKey && devPorts.some(function (d) {
+        return d.port === was.port && processKey(d.process) === wasKey
+      })
+      if (sameProcessPort || (!wasKey && samePort)) continue
       if (wasKey && _expectedGoneAt[wasKey] && Date.now() - _expectedGoneAt[wasKey] <= expectedGoneMs) {
         consumedExpected[wasKey] = true
         continue

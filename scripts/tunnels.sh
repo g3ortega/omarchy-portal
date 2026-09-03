@@ -70,7 +70,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 url_host() { local h=${1#*://}; h=${h%%/*}; printf '%s' "${h%%:*}"; }
 # Provider output is untrusted: a tunnel log, an agent API, a routes file. A
 # URL is accepted into a row (and later handed to xdg-open) only in this shape.
-valid_url() { (( ${#1} <= 8192 )) && [[ $1 =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]]*)?$ ]]; }
+valid_url() { (( ${#1} <= 8192 )) && [[ $1 =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:][:cntrl:]]*)?$ ]]; }
 valid_identity_line() {
   local pid start extra=""
   IFS=' ' read -r pid start extra <<<"$1"
@@ -264,18 +264,21 @@ portless_tld() {
 # port, and TLD all depend on how the proxy was started, so none can be assumed.
 portless_route_url() { portless_host_url "$1.$(portless_tld)"; }
 
-# ---- commands -----------------------------------------------------------------
-
 cmd_providers() {
-  portless_state_load || die "could not read Portless state safely"
+  local portless_ok=1
+  portless_state_load || portless_ok=0
   local row name label reach status detail fix pair tld clause tsv=""
   for row in "${PROVIDERS[@]}"; do
     IFS=: read -r name label reach <<<"$row"
-    pair=$("${name}_status")
-    IFS='|' read -r status detail fix <<<"$pair"
     tld=""; clause=""
-    [[ $name == portless ]] && tld=$(portless_tld)
-    declare -f "${name}_setup_clause" >/dev/null && clause=$("${name}_setup_clause")
+    if [[ $name == portless ]] && (( portless_ok == 0 )); then
+      status=unavailable; detail="State could not be read safely"; fix=""
+    else
+      pair=$("${name}_status")
+      IFS='|' read -r status detail fix <<<"$pair"
+      [[ $name == portless ]] && tld=$(portless_tld)
+      declare -f "${name}_setup_clause" >/dev/null && clause=$("${name}_setup_clause")
+    fi
     tsv+="$name"$'\t'"$label"$'\t'"$status"$'\t'"$detail"$'\t'"$reach"$'\t'"$tld"$'\t'"$fix"$'\t'"$clause"$'\n'
   done
   printf '%s' "$tsv" | jq -Rsc 'split("\n") | map(select(length > 0) | split("\t")

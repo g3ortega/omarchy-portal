@@ -48,7 +48,7 @@ valid_url "http://acme.localhost:1355/x?y=1" && ok "valid_url accepts port and p
 valid_url "javascript:alert(1)" && bad "valid_url accepted javascript:" || ok "valid_url rejects javascript:"
 valid_url "https://evil.com/x y" && bad "valid_url accepted a space" || ok "valid_url rejects whitespace"
 valid_url "ftp://x" && bad "valid_url accepted ftp" || ok "valid_url rejects other schemes"
-valid_url "https://x$(printf '\033')[1m" && bad "valid_url accepted an escape byte" || ok "valid_url rejects control bytes"
+valid_url "https://x/a$(printf '\037')b" && bad "valid_url accepted a unit separator" || ok "valid_url rejects a unit separator"
 is "url_host strips scheme, port and path" "$(url_host 'https://h.example:8443/p/q')" "h.example"
 valid_port 65535 && ok "valid_port upper bound" || bad "valid_port rejected 65535"
 valid_port 65536 && bad "valid_port accepted 65536" || ok "valid_port rejects 65536"
@@ -781,6 +781,15 @@ is "process identity rejects pid 1" "$rc" "1"
 printf '[]' > "$RB/route-target"; ln -s "$RB/route-target" "$RB/portless/routes.json"
 PORTLESS_STATE_DIR="$RB/portless" PORTAL_STATE_DIR="$RB/runtime" bash -c 'source "'"$S"'/lib/portless.sh"; portless_state_load' >/dev/null 2>&1; rc=$?
 is "a refused Portless route makes the state load fail" "$rc" "1"
+refused_providers=$(PORTLESS_STATE_DIR="$RB/portless" PORTAL_STATE_DIR="$RB/runtime" bash -c '
+  source "'"$S"'/tunnels.sh"
+  cloudflared_status() { printf "ready|Cloudflare ready|"; }
+  ngrok_status() { printf "ready|ngrok ready|"; }
+  cmd_providers
+')
+is "refused Portless state keeps independent public providers available" \
+  "$(jq -c '[.ok, [.providers[]? | select(.reach == "public") | .id], (.providers[]? | select(.id == "portless") | [.status, .detail])]' <<<"$refused_providers")" \
+  '[true,["cloudflared","ngrok"],["unavailable","State could not be read safely"]]'
 
 mkdir -p "$RB/portless-stop" "$RB/portless-stop-state" "$RB/fake-portless"
 printf '[{"port":45882,"hostname":"acme.test"}]' > "$RB/portless-stop/routes.json"

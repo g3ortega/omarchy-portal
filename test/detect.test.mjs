@@ -316,12 +316,13 @@ check("a wildcard bind still opens localhost", e({
 
   const notifyVanishedDev = fn(serviceSrc, "_notifyVanishedDev",
     ["devPorts", "_prevDevPorts", "processKey", "_expectedGoneAt", "expectedGoneMs", "publicTunnelFor", "notify"])
-  const runVanished = (markers, now) => {
+  const runVanished = (markers, now, devPorts = [], previous = [
+    { port: 3000, process: { pid: 10, start: "20" }, label: "Node" }
+  ]) => {
     const notices = [], state = { ...markers }, realNow = Date.now
     Date.now = () => now
     try {
-      notifyVanishedDev([], [{ port: 3000, process: { pid: 10, start: "20" }, label: "Node" }],
-        (p) => p ? `${p.pid}:${p.start}` : "", state, 600000, () => null,
+      notifyVanishedDev(devPorts, previous, (p) => p ? `${p.pid}:${p.start}` : "", state, 600000, () => null,
         (...a) => notices.push(a))
     } finally { Date.now = realNow }
     return { notices, markers: state }
@@ -331,6 +332,14 @@ check("a wildcard bind still opens localhost", e({
     { notices: [], markers: {} })
   eq("an expired expected-stop marker does not suppress a crash",
     runVanished({ "10:20": 700000 - 600001 }, 700000),
+    { notices: [["Port 3000 went quiet", "Node is no longer listening"]], markers: {} })
+  eq("losing one of a process's ports still reports that port",
+    runVanished({}, 700000,
+      [{ port: 3001, process: { pid: 10, start: "20" }, label: "Node" }],
+      [
+        { port: 3000, process: { pid: 10, start: "20" }, label: "Node" },
+        { port: 3001, process: { pid: 10, start: "20" }, label: "Node" }
+      ]),
     { notices: [["Port 3000 went quiet", "Node is no longer listening"]], markers: {} })
   const maxPorts = Number(scanSrc.match(/^MAX_PORTS=([0-9]+)/m)?.[1] ?? 0)
   const argvB64Cutoff = Number(scanSrc.match(/\$\{#argv_b64\} -gt ([0-9]+)/)?.[1] ?? 0)
