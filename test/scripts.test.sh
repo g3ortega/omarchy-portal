@@ -943,6 +943,257 @@ state lock "$RB/lock" nowait .lifecycle.lock -- /usr/bin/true >/dev/null 2>&1; r
 is "a lifecycle lock symlink is refused" "$rc $(cat "$RB/victim")" "1 keep"
 rm "$RB/lock/.lifecycle.lock"
 is "a safe lifecycle lock runs its command" "$(state lock "$RB/lock" nowait .lifecycle.lock -- /usr/bin/printf ran 2>/dev/null)" "ran"
+is "an ordinary lock keeps its stable lock file" "$(test -f "$RB/lock/.lifecycle.lock" && echo kept || echo lost)" "kept"
+
+LOCK_CLEAN="$RB/lock-clean"; mkdir -p "$LOCK_CLEAN/foreign"; printf keep > "$LOCK_CLEAN/foreign/keep"
+state lock-clean "$LOCK_CLEAN/success" nowait .lock -- /usr/bin/true >/dev/null 2>&1; clean_success_rc=$?
+state lock-clean "$LOCK_CLEAN/failure" nowait .lock -- /usr/bin/false >/dev/null 2>&1; clean_failure_rc=$?
+state lock-clean "$LOCK_CLEAN/foreign" nowait .lock -- /usr/bin/true >/dev/null 2>&1; clean_foreign_rc=$?
+is "lock-clean removes its empty root only after child success" \
+  "$clean_success_rc $(test -e "$LOCK_CLEAN/success" && echo present || echo absent)" "0 absent"
+is "lock-clean keeps its lock and root after child failure" \
+  "$clean_failure_rc $(test -f "$LOCK_CLEAN/failure/.lock" && echo kept || echo lost)" "1 kept"
+is "lock-clean removes only its lock from a nonempty root" \
+  "$clean_foreign_rc $(test -e "$LOCK_CLEAN/foreign/.lock" && echo lock || echo no-lock) $(cat "$LOCK_CLEAN/foreign/keep")" \
+  "0 no-lock keep"
+exec 9<"$LOCK_CLEAN"; flock -x 9
+timeout 2 /usr/bin/python3 -I -S "$S/lib/statedir.py" lock "$LOCK_CLEAN/namespace" nowait .lock -- \
+  /usr/bin/touch "$LOCK_CLEAN/entered" >/dev/null 2>&1; namespace_rc=$?
+exec 9>&-
+is "a nowait lock fails fast behind root namespace cleanup" \
+  "$namespace_rc $(test -e "$LOCK_CLEAN/entered" && echo entered || echo clean)" "75 clean"
+state lock-clean "$LOCK_CLEAN/not-ancestor" nowait .lock --prune-to "$LOCK_CLEAN/other" -- \
+  /usr/bin/touch "$LOCK_CLEAN/not-ancestor-entered" >/dev/null 2>&1; nonancestor_rc=$?
+state lock-clean "$LOCK_CLEAN/equal" nowait .lock --prune-to "$LOCK_CLEAN/equal" -- \
+  /usr/bin/touch "$LOCK_CLEAN/equal-entered" >/dev/null 2>&1; equal_rc=$?
+state lock-clean "$LOCK_CLEAN/parent" nowait .lock --prune-to "$LOCK_CLEAN/parent/child" -- \
+  /usr/bin/touch "$LOCK_CLEAN/descendant-entered" >/dev/null 2>&1; descendant_rc=$?
+is "lock-clean rejects invalid prune boundaries before effects" \
+  "$nonancestor_rc $equal_rc $descendant_rc $(find "$LOCK_CLEAN" -name '*-entered' -o -name 'not-ancestor' -o -name equal -o -name parent | wc -l)" \
+  "1 1 1 0"
+
+/usr/bin/python3 -I -S - "$S/lib/statedir.py" "$RB/lock-race" <<'PY'
+import importlib.util
+import fcntl
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
+
+module_path, case = sys.argv[1:]
+case = Path(case)
+case.mkdir()
+root = case / "root"
+locker_script = case / "locker.py"
+owner_entered = case / "owner-entered"
+owner_release = case / "owner-release"
+cleanup_unlinked = case / "cleanup-unlinked"
+cleanup_release = case / "cleanup-release"
+replacement_entered = case / "replacement-entered"
+replacement_release = case / "replacement-release"
+waiter_entered = case / "waiter-entered"
+waiter_release = case / "waiter-release"
+
+locker_script.write_text("""import importlib.util, os, pathlib, subprocess, sys, time
+module_path, verb, root, entered, release, *cleanup = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("statedir", module_path)
+sd = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sd)
+class Result:
+    returncode = 0
+def run(*args, **kwargs):
+    pathlib.Path(entered).touch()
+    while not pathlib.Path(release).exists():
+        time.sleep(0.01)
+    return Result()
+subprocess.run = run
+if cleanup:
+    unlinked, cleanup_release = cleanup
+    real_unlink = sd.os.unlink
+    def unlink_then_wait(*args, **kwargs):
+        real_unlink(*args, **kwargs)
+        pathlib.Path(unlinked).touch()
+        while not pathlib.Path(cleanup_release).exists():
+            time.sleep(0.01)
+    sd.os.unlink = unlink_then_wait
+raise SystemExit(sd.main([verb, root, "wait", ".lock", "--", "/usr/bin/true"]))
+""")
+
+def wait_for(path, timeout=5):
+    until = time.monotonic() + timeout
+    while time.monotonic() < until:
+        if path.exists():
+            return
+        time.sleep(0.01)
+    raise RuntimeError(f"timed out waiting for {path.name}")
+
+def wait_for_one(first, second, timeout=5):
+    until = time.monotonic() + timeout
+    while time.monotonic() < until:
+        if first.exists() or second.exists():
+            return
+        time.sleep(0.01)
+    raise RuntimeError(f"timed out waiting for {first.name} or {second.name}")
+
+def wait_for_fd(pid, identity, timeout=5):
+    until = time.monotonic() + timeout
+    while time.monotonic() < until:
+        try:
+            for entry in Path(f"/proc/{pid}/fd").iterdir():
+                try:
+                    st = entry.stat()
+                except FileNotFoundError:
+                    continue
+                if (st.st_dev, st.st_ino) == identity:
+                    return
+        except FileNotFoundError:
+            break
+        time.sleep(0.01)
+    raise RuntimeError(f"pid {pid} never opened lock inode {identity}")
+
+python = "/usr/bin/python3"
+processes = []
+try:
+    owner = subprocess.Popen([python, "-I", "-S", str(locker_script), module_path, "lock-clean", str(root),
+                              str(owner_entered), str(owner_release),
+                              str(cleanup_unlinked), str(cleanup_release)])
+    processes.append(owner)
+    wait_for(owner_entered)
+    old_root = root.stat()
+    old_root_identity = (old_root.st_dev, old_root.st_ino)
+    old = root.joinpath(".lock").stat()
+    old_identity = (old.st_dev, old.st_ino)
+
+    waiter = subprocess.Popen([python, "-I", "-S", str(locker_script), module_path, "lock", str(root),
+                               str(waiter_entered), str(waiter_release)])
+    processes.append(waiter)
+    wait_for_fd(waiter.pid, old_identity)
+
+    owner_release.touch()
+    wait_for(cleanup_unlinked)
+    replacement = subprocess.Popen([python, "-I", "-S", str(locker_script), module_path, "lock", str(root),
+                                    str(replacement_entered), str(replacement_release)])
+    processes.append(replacement)
+    wait_for_fd(replacement.pid, old_root_identity)
+    if replacement_entered.exists():
+        raise RuntimeError("replacement owner bypassed root cleanup")
+
+    cleanup_release.touch()
+    if owner.wait(timeout=5) != 0:
+        raise RuntimeError("cleanup owner failed")
+    wait_for_one(replacement_entered, waiter_entered)
+    if replacement_entered.exists() and waiter_entered.exists():
+        raise RuntimeError("both rebound owners entered the replacement lock")
+    current = root.joinpath(".lock").stat()
+    current_identity = (current.st_dev, current.st_ino)
+    if current_identity == old_identity:
+        raise RuntimeError("replacement reused the retired lock inode")
+
+    wait_for_fd(waiter.pid, current_identity)
+    if replacement_entered.exists():
+        replacement_release.touch()
+        if replacement.wait(timeout=5) != 0:
+            raise RuntimeError("replacement owner failed")
+        wait_for(waiter_entered)
+        waiter_release.touch()
+        if waiter.wait(timeout=5) != 0:
+            raise RuntimeError("rebound waiter failed")
+    else:
+        waiter_release.touch()
+        if waiter.wait(timeout=5) != 0:
+            raise RuntimeError("rebound waiter failed")
+        wait_for(replacement_entered)
+        replacement_release.touch()
+        if replacement.wait(timeout=5) != 0:
+            raise RuntimeError("replacement owner failed")
+
+    spec = importlib.util.spec_from_file_location("statedir", module_path)
+    statedir = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(statedir)
+    directory_root = case / "directory-race"
+    directory_root.mkdir()
+    dirfd = statedir.open_dir(str(directory_root))
+    lockfd = statedir.open_lock(dirfd, ".lock")
+    fcntl.flock(lockfd, fcntl.LOCK_EX)
+    real_rmdir = statedir.os.rmdir
+    actor = []
+
+    def race_rmdir(*args, **kwargs):
+        actorfd = os.open(case, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            try:
+                fcntl.flock(actorfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                actor.append("blocked")
+            else:
+                actor.append("entered")
+                real_rmdir(directory_root)
+                directory_root.mkdir()
+        finally:
+            os.close(actorfd)
+        return real_rmdir(*args, **kwargs)
+
+    statedir.os.rmdir = race_rmdir
+    try:
+        statedir.cleanup_lock(str(directory_root), "wait", ".lock", dirfd, lockfd)
+    finally:
+        statedir.os.rmdir = real_rmdir
+        os.close(dirfd)
+        os.close(lockfd)
+    if actor != ["blocked"]:
+        raise RuntimeError(f"directory replacement actor was not serialized: {actor}")
+
+    contended_root = case / "cleanup-contention"
+    contended_root.mkdir()
+    dirfd = statedir.open_dir(str(contended_root))
+    lockfd = statedir.open_lock(dirfd, ".lock")
+    fcntl.flock(lockfd, fcntl.LOCK_EX)
+    actorfd = os.open(case, os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(actorfd, fcntl.LOCK_EX)
+
+    def release_namespace():
+        time.sleep(0.1)
+        fcntl.flock(actorfd, fcntl.LOCK_UN)
+
+    release_thread = threading.Thread(target=release_namespace)
+    release_thread.start()
+    started = time.monotonic()
+    try:
+        statedir.cleanup_lock(str(contended_root), "nowait", ".lock", dirfd, lockfd)
+    finally:
+        release_thread.join()
+        os.close(actorfd)
+        os.close(dirfd)
+        os.close(lockfd)
+    elapsed = time.monotonic() - started
+    if elapsed < 0.08 or elapsed > 2 or contended_root.exists():
+        raise RuntimeError(f"cleanup did not survive brief namespace contention: {elapsed:.3f}s")
+finally:
+    owner_release.touch()
+    cleanup_release.touch()
+    replacement_release.touch()
+    waiter_release.touch()
+    timed_out = []
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                timed_out.append(process)
+    for process in timed_out:
+        process.terminate()
+    for process in timed_out:
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+PY
+race_rc=$?
+is "a stale waiter reopens the replacement lock before entering" "$race_rc" "0"
+
 exec 5>"$RB/lock/.lifecycle.lock"; flock -x 5
 PORTAL_STATE_DIR="$RB/lock" timeout 2 "$S/tunnels.sh" stop cloudflared 6000 >/dev/null 2>&1; rc=$?
 exec 5>&-
@@ -956,6 +1207,74 @@ PATH="$RB/uninstall-bin:$PATH" PORTAL_METRICS_DIR="$RB/uninstall-state" PORTAL_S
   timeout 2 "$S/uninstall.sh" >/dev/null 2>&1; rc=$?
 exec 5>&-
 is "uninstall fails before effects when metrics are being updated" "$rc $(test -e "$RB/uninstall-called" && echo called || echo clean)" "75 clean"
+
+CLEAN_UNINSTALL="$RB/uninstall-clean"; mkdir -p "$CLEAN_UNINSTALL/home" "$CLEAN_UNINSTALL/bin"
+printf '#!/bin/sh\n[ "$*" = "plugin list --json" ] && { printf "[]\\n"; exit 0; }\nexit 99\n' > "$CLEAN_UNINSTALL/bin/omarchy"
+chmod 700 "$CLEAN_UNINSTALL/bin/omarchy"
+PATH="$CLEAN_UNINSTALL/bin:/usr/bin:/bin" HOME="$CLEAN_UNINSTALL/home" \
+  PORTAL_STATE_DIR="$CLEAN_UNINSTALL/runtime" PORTAL_METRICS_DIR="$CLEAN_UNINSTALL/state" \
+  PORTLESS_STATE_DIR="$CLEAN_UNINSTALL/portless" "$S/uninstall.sh" > "$CLEAN_UNINSTALL/out" 2>&1; clean_uninstall_rc=$?
+is "successful uninstall restores initially absent state roots" \
+  "$clean_uninstall_rc $(test -e "$CLEAN_UNINSTALL/runtime" && echo present || echo absent) $(test -e "$CLEAN_UNINSTALL/state" && echo present || echo absent) $(grep -c 'holds files that are not Portal' "$CLEAN_UNINSTALL/out" || true)" \
+  "0 absent absent 0"
+
+SHARED_UNINSTALL="$RB/uninstall-shared"; mkdir -p "$SHARED_UNINSTALL/home"
+PATH="$CLEAN_UNINSTALL/bin:/usr/bin:/bin" HOME="$SHARED_UNINSTALL/home" \
+  PORTAL_STATE_DIR="$SHARED_UNINSTALL/state" PORTAL_METRICS_DIR="$SHARED_UNINSTALL/state" \
+  PORTLESS_STATE_DIR="$SHARED_UNINSTALL/portless" "$S/uninstall.sh" > "$SHARED_UNINSTALL/out" 2>&1; shared_uninstall_rc=$?
+is "successful uninstall removes a shared lock-only state root" \
+  "$shared_uninstall_rc $(test -e "$SHARED_UNINSTALL/state" && echo present || echo absent) $(grep -c 'holds files that are not Portal' "$SHARED_UNINSTALL/out" || true)" \
+  "0 absent 0"
+
+NESTED_UNINSTALL="$RB/uninstall-nested"; mkdir -p "$NESTED_UNINSTALL/home"
+PATH="$CLEAN_UNINSTALL/bin:/usr/bin:/bin" HOME="$NESTED_UNINSTALL/home" \
+  PORTAL_STATE_DIR="$NESTED_UNINSTALL/state/runtime" PORTAL_METRICS_DIR="$NESTED_UNINSTALL/state" \
+  PORTLESS_STATE_DIR="$NESTED_UNINSTALL/portless" "$S/uninstall.sh" > "$NESTED_UNINSTALL/out" 2>&1; nested_uninstall_rc=$?
+is "successful uninstall removes a runtime root nested directly under state" \
+  "$nested_uninstall_rc $(test -e "$NESTED_UNINSTALL/state" && echo present || echo absent) $(grep -c 'holds files that are not Portal' "$NESTED_UNINSTALL/out" || true)" \
+  "0 absent 0"
+
+REVERSE_UNINSTALL="$RB/uninstall-reverse-nested"; mkdir -p "$REVERSE_UNINSTALL/home"
+PATH="$CLEAN_UNINSTALL/bin:/usr/bin:/bin" HOME="$REVERSE_UNINSTALL/home" \
+  PORTAL_STATE_DIR="$REVERSE_UNINSTALL/state" PORTAL_METRICS_DIR="$REVERSE_UNINSTALL/state/metrics-state" \
+  PORTLESS_STATE_DIR="$REVERSE_UNINSTALL/portless" "$S/uninstall.sh" > "$REVERSE_UNINSTALL/out" 2>&1; reverse_uninstall_rc=$?
+is "successful uninstall removes state nested directly under runtime" \
+  "$reverse_uninstall_rc $(test -e "$REVERSE_UNINSTALL/state" && echo present || echo absent) $(grep -c 'holds files that are not Portal' "$REVERSE_UNINSTALL/out" || true)" \
+  "0 absent 0"
+
+DEEP_UNINSTALL="$RB/uninstall-deep"; mkdir -p "$DEEP_UNINSTALL/home"
+PATH="$CLEAN_UNINSTALL/bin:/usr/bin:/bin" HOME="$DEEP_UNINSTALL/home" \
+  PORTAL_STATE_DIR="$DEEP_UNINSTALL/state/a/runtime" PORTAL_METRICS_DIR="$DEEP_UNINSTALL/state" \
+  PORTLESS_STATE_DIR="$DEEP_UNINSTALL/portless" "$S/uninstall.sh" > "$DEEP_UNINSTALL/out" 2>&1; deep_uninstall_rc=$?
+is "successful uninstall removes a deeply nested runtime root" \
+  "$deep_uninstall_rc $(test -e "$DEEP_UNINSTALL/state" && echo present || echo absent) $(grep -c 'holds files that are not Portal' "$DEEP_UNINSTALL/out" || true)" \
+  "0 absent 0"
+
+REVERSE_DEEP="$RB/uninstall-reverse-deep"; mkdir -p "$REVERSE_DEEP/home"
+PATH="$CLEAN_UNINSTALL/bin:/usr/bin:/bin" HOME="$REVERSE_DEEP/home" \
+  PORTAL_STATE_DIR="$REVERSE_DEEP/state" PORTAL_METRICS_DIR="$REVERSE_DEEP/state/a/metrics-state" \
+  PORTLESS_STATE_DIR="$REVERSE_DEEP/portless" "$S/uninstall.sh" > "$REVERSE_DEEP/out" 2>&1; reverse_deep_rc=$?
+is "successful uninstall removes deeply nested metrics state" \
+  "$reverse_deep_rc $(test -e "$REVERSE_DEEP/state" && echo present || echo absent) $(grep -c 'holds files that are not Portal' "$REVERSE_DEEP/out" || true)" \
+  "0 absent 0"
+
+FOREIGN_DEEP="$RB/uninstall-foreign-deep"; mkdir -p "$FOREIGN_DEEP/home" "$FOREIGN_DEEP/state/a"
+printf keep > "$FOREIGN_DEEP/state/a/foreign"
+PATH="$CLEAN_UNINSTALL/bin:/usr/bin:/bin" HOME="$FOREIGN_DEEP/home" \
+  PORTAL_STATE_DIR="$FOREIGN_DEEP/state/a/runtime" PORTAL_METRICS_DIR="$FOREIGN_DEEP/state" \
+  PORTLESS_STATE_DIR="$FOREIGN_DEEP/portless" "$S/uninstall.sh" > "$FOREIGN_DEEP/out" 2>&1; foreign_deep_rc=$?
+is "uninstall preserves and reports a foreign nested runtime parent" \
+  "$foreign_deep_rc $(cat "$FOREIGN_DEEP/state/a/foreign") $(grep -c 'holds files that are not Portal' "$FOREIGN_DEEP/out" || true)" \
+  "0 keep 1"
+
+REVERSE_FOREIGN="$RB/uninstall-reverse-foreign"; mkdir -p "$REVERSE_FOREIGN/home" "$REVERSE_FOREIGN/state/a"
+printf keep > "$REVERSE_FOREIGN/state/a/foreign"
+PATH="$CLEAN_UNINSTALL/bin:/usr/bin:/bin" HOME="$REVERSE_FOREIGN/home" \
+  PORTAL_STATE_DIR="$REVERSE_FOREIGN/state" PORTAL_METRICS_DIR="$REVERSE_FOREIGN/state/a/metrics-state" \
+  PORTLESS_STATE_DIR="$REVERSE_FOREIGN/portless" "$S/uninstall.sh" > "$REVERSE_FOREIGN/out" 2>&1; reverse_foreign_rc=$?
+is "uninstall preserves and reports a foreign nested metrics parent" \
+  "$reverse_foreign_rc $(cat "$REVERSE_FOREIGN/state/a/foreign") $(grep -c 'holds files that are not Portal' "$REVERSE_FOREIGN/out" || true)" \
+  "0 keep 1"
 
 exec 7<"$RB/append"; flock -x 7
 printf 'x\n' | timeout 2 /usr/bin/python3 -I -S "$S/lib/statedir.py" append "$RB/append/sample" 10 1024 >/dev/null 2>&1; rc=$?

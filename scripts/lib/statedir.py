@@ -22,6 +22,7 @@ and truncation go through the validated descriptor, never the path again.
   remove-digest <dir> <name> <sha256> <maxbytes>  remove only the bound matching file
   truncate <path> <maxbytes>              empty the file once it is past the cap
   lock     <dir> <nowait|wait> <name> -- <argv...>  run argv under a stable lock
+  lock-clean <dir> <nowait|wait> <name> [--prune-to <dir>] -- <argv...> run argv; remove empty lock roots after success
   launch   <dir> <logname> -- <argv...>   daemonize argv with the log as stdio;
                                            prints "pid starttime". The executable
                                            is walked to by descriptor (every
@@ -34,7 +35,7 @@ and truncation go through the validated descriptor, never the path again.
                                            /dev/null and no log leaf is created
 
 Most commands exit 0 on success, 1 when refused, and 2 on top-level usage.
-Lock returns 75 on nowait contention and otherwise returns its child's status.
+Lock commands return 75 on nowait contention and otherwise return their child's status.
 Every refusal fails closed. Runs under the caller's timeout.
 """
 import errno
@@ -43,6 +44,7 @@ import hashlib
 import os
 import stat
 import sys
+import time
 
 UID = os.getuid()
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -143,6 +145,73 @@ def open_lock(dirfd, name):
         os.close(fd)
         raise Refused(f"refused {name}: not a stable plain owned lock file")
     return fd
+
+
+def lock_entry_current(dirfd, name, lockfd):
+    held = os.fstat(lockfd)
+    if held.st_nlink == 0:
+        return False
+    if (not stat.S_ISREG(held.st_mode) or held.st_uid != UID
+            or (held.st_mode & 0o022) or held.st_nlink != 1):
+        raise Refused(f"refused {name}: not a stable plain owned lock file")
+    try:
+        current = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        raise Refused(f"refused {name}: {e.strerror}")
+    if (not stat.S_ISREG(current.st_mode) or current.st_uid != UID
+            or (current.st_mode & 0o022) or current.st_nlink != 1):
+        raise Refused(f"refused {name}: not a stable plain owned lock file")
+    return (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino)
+
+
+def open_lock_parent(path, dirfd):
+    dirname = os.path.basename(os.path.abspath(path))
+    if not dirname:
+        raise Refused("refused lock at filesystem root")
+    try:
+        parentfd = os.open("..", DIR_FLAGS, dir_fd=dirfd)
+    except OSError as e:
+        raise Refused(f"could not bind the lock directory parent: {e.strerror}")
+    if swappable(os.fstat(parentfd)):
+        os.close(parentfd)
+        raise Refused("refused lock through a swappable parent")
+    return parentfd, dirname
+
+
+def lock_root_current(parentfd, dirname, dirfd):
+    bound = os.fstat(dirfd)
+    if bound.st_nlink == 0:
+        return False
+    if (not stat.S_ISDIR(bound.st_mode) or bound.st_uid != UID
+            or (bound.st_mode & 0o022)):
+        raise Refused("refused lock for a non-private directory")
+    try:
+        current = os.stat(dirname, dir_fd=parentfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        raise Refused(f"could not verify the lock directory: {e.strerror}")
+    if (not stat.S_ISDIR(current.st_mode) or current.st_uid != UID
+            or (current.st_mode & 0o022)):
+        raise Refused("refused lock for a non-private directory")
+    return (bound.st_dev, bound.st_ino) == (current.st_dev, current.st_ino)
+
+
+def lock_namespace(dirfd, mode, cleanup=False):
+    if mode == "wait":
+        fcntl.flock(dirfd, fcntl.LOCK_EX)
+        return True
+    attempts = 100 if cleanup else 1
+    for attempt in range(attempts):
+        try:
+            fcntl.flock(dirfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if attempt + 1 < attempts:
+                time.sleep(0.01)
+    return False
 
 
 def read_leaf(dirfd, name, cap):
@@ -353,31 +422,178 @@ def cmd_create(a):
         os.close(dirfd)
 
 
-def cmd_lock(a):
-    if len(a) < 5 or a[1] not in ("nowait", "wait") or a[3] != "--":
-        raise Refused("usage: lock <dir> <nowait|wait> <name> -- <argv...>")
-    argv = a[4:]
+def acquire_lock(path, mode, name):
+    flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if mode == "nowait" else 0)
+    # A cleanup owner can retire a lock while a waiter still has that inode
+    # open. Only the current root and lock entries serialize new callers.
+    for _ in range(16):
+        dirfd = open_dir(path, create=True)
+        lockfd = None
+        keep = False
+        try:
+            parentfd, dirname = open_lock_parent(path, dirfd)
+            try:
+                if not lock_namespace(parentfd, mode):
+                    return None
+                if not lock_root_current(parentfd, dirname, dirfd):
+                    continue
+                lockfd = open_lock(dirfd, name)
+            finally:
+                os.close(parentfd)
+            try:
+                fcntl.flock(lockfd, flags)
+            except BlockingIOError:
+                return None
+            parentfd, dirname = open_lock_parent(path, dirfd)
+            try:
+                if not lock_namespace(parentfd, mode):
+                    return None
+                current = (lock_root_current(parentfd, dirname, dirfd)
+                           and lock_entry_current(dirfd, name, lockfd))
+            finally:
+                os.close(parentfd)
+            if current:
+                keep = True
+                return dirfd, lockfd
+        finally:
+            if not keep:
+                if lockfd is not None:
+                    os.close(lockfd)
+                os.close(dirfd)
+    raise Refused(f"refused {name}: lock namespace did not stabilize")
+
+
+def lock_prune_intermediates(path, prune_to):
+    path = os.path.abspath(path)
+    prune_to = os.path.abspath(prune_to)
+    if path == prune_to or not path.startswith(prune_to.rstrip(os.sep) + os.sep):
+        raise Refused("lock cleanup boundary is not an ancestor")
+    return os.path.relpath(path, prune_to).split(os.sep)[:-1]
+
+
+def prune_lock_parents(intermediates, parentfd, mode):
+    currentfd = os.dup(parentfd)
+    grandfd = None
+    try:
+        for dirname in reversed(intermediates):
+            try:
+                grandfd = os.open("..", DIR_FLAGS, dir_fd=currentfd)
+            except OSError as e:
+                raise Refused(f"could not bind a nested state parent: {e.strerror}")
+            locked = False
+            try:
+                if swappable(os.fstat(grandfd)):
+                    raise Refused("refused nested state cleanup through a swappable parent")
+                if not lock_namespace(grandfd, mode, cleanup=True):
+                    raise Refused("nested state directory namespace is busy")
+                locked = True
+                if not lock_root_current(grandfd, dirname, currentfd):
+                    raise Refused("nested state directory changed before cleanup")
+                try:
+                    os.rmdir(dirname, dir_fd=grandfd)
+                except OSError as e:
+                    if e.errno == errno.ENOENT and os.fstat(currentfd).st_nlink == 0:
+                        pass
+                    elif e.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                        return
+                    else:
+                        raise Refused(f"could not remove empty nested state directory {dirname}: {e.strerror}")
+                if os.fstat(currentfd).st_nlink != 0:
+                    raise Refused(f"could not verify removal of nested state directory {dirname}")
+                try:
+                    os.fsync(grandfd)
+                except OSError as e:
+                    raise Refused(f"could not sync nested state cleanup: {e.strerror}")
+            finally:
+                if locked:
+                    fcntl.flock(grandfd, fcntl.LOCK_UN)
+            os.close(currentfd)
+            currentfd = grandfd
+            grandfd = None
+    finally:
+        if grandfd is not None:
+            os.close(grandfd)
+        os.close(currentfd)
+
+
+def cleanup_lock(path, mode, name, dirfd, lockfd, intermediates=None):
+    parentfd, dirname = open_lock_parent(path, dirfd)
+    try:
+        if not lock_namespace(parentfd, mode, cleanup=True):
+            raise Refused("lock directory namespace is busy")
+        if not lock_root_current(parentfd, dirname, dirfd):
+            raise Refused("lock directory changed before cleanup")
+        if not lock_entry_current(dirfd, name, lockfd):
+            raise Refused(f"refused {name}: lock changed before cleanup")
+        try:
+            os.unlink(name, dir_fd=dirfd)
+        except OSError as e:
+            raise Refused(f"could not remove {name}: {e.strerror}")
+        if os.fstat(lockfd).st_nlink != 0:
+            raise Refused(f"could not verify removal of {name}")
+        try:
+            os.fsync(dirfd)
+        except OSError as e:
+            raise Refused(f"could not sync lock removal: {e.strerror}")
+        if not lock_root_current(parentfd, dirname, dirfd):
+            raise Refused("lock directory changed during cleanup")
+        try:
+            os.rmdir(dirname, dir_fd=parentfd)
+        except OSError as e:
+            if e.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                return
+            raise Refused(f"could not remove the empty lock directory: {e.strerror}")
+        if os.fstat(dirfd).st_nlink != 0:
+            raise Refused("could not verify removal of the lock directory")
+        try:
+            os.fsync(parentfd)
+        except OSError as e:
+            raise Refused(f"could not sync lock directory removal: {e.strerror}")
+        if intermediates is not None:
+            fcntl.flock(parentfd, fcntl.LOCK_UN)
+            prune_lock_parents(intermediates, parentfd, mode)
+    finally:
+        os.close(parentfd)
+
+
+def run_locked(a, clean):
+    prune_to = None
+    if len(a) >= 5 and a[1] in ("nowait", "wait") and a[3] == "--":
+        argv = a[4:]
+    elif clean and len(a) >= 7 and a[1] in ("nowait", "wait") and a[3] == "--prune-to" and a[5] == "--":
+        prune_to = a[4]
+        argv = a[6:]
+    else:
+        verb = "lock-clean <dir> <nowait|wait> <name> [--prune-to <dir>]" if clean else "lock <dir> <nowait|wait> <name>"
+        raise Refused(f"usage: {verb} -- <argv...>")
     if not os.path.isabs(argv[0]):
         raise Refused("lock needs an absolute command path")
-    dirfd = open_dir(a[0], create=True)
-    lockfd = None
+    intermediates = lock_prune_intermediates(a[0], prune_to) if prune_to is not None else None
+    held = acquire_lock(a[0], a[1], a[2])
+    if held is None:
+        return 75
+    dirfd, lockfd = held
     try:
-        lockfd = open_lock(dirfd, a[2])
-        flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if a[1] == "nowait" else 0)
-        try:
-            fcntl.flock(lockfd, flags)
-        except BlockingIOError:
-            return 75
         import subprocess
         try:
             result = subprocess.run(argv, close_fds=True)
         except OSError as e:
             raise Refused(f"could not run {argv[0]}: {e.strerror}")
-        return result.returncode if result.returncode >= 0 else 128 - result.returncode
+        code = result.returncode if result.returncode >= 0 else 128 - result.returncode
+        if clean and code == 0:
+            cleanup_lock(a[0], a[1], a[2], dirfd, lockfd, intermediates)
+        return code
     finally:
-        if lockfd is not None:
-            os.close(lockfd)
         os.close(dirfd)
+        os.close(lockfd)
+
+
+def cmd_lock(a):
+    return run_locked(a, False)
+
+
+def cmd_lock_clean(a):
+    return run_locked(a, True)
 
 
 def append_one(dirfd, name, data, maxlines, cap):
@@ -689,6 +905,7 @@ COMMANDS = {
     "create": (cmd_create, 1),
     "append": (cmd_append, 2), "append-many": (cmd_append_many, 3), "remove": (cmd_remove, 2),
     "remove-digest": (cmd_remove_digest, 4), "truncate": (cmd_truncate, 2), "lock": (cmd_lock, 5),
+    "lock-clean": (cmd_lock_clean, 5),
     "launch": (cmd_launch, 4), "launch-tracked": (cmd_launch_tracked, 5),
 }
 
