@@ -37,9 +37,17 @@ case "$(portless_fix_cmd evict)" in
   "sudo fuser -k 443/tcp; sleep 1; PORTLESS_STATE_DIR=\"\$HOME/.portless\" portless proxy start -p 443 --tld test,localhost") ok "fix command composes from validated parts" ;;
   *) bad "fix command: $(portless_fix_cmd evict)" ;;
 esac
-printf '[{"port":3000,"hostname":"acme.localhost"},{"port":5173,"hostname":"dash.test"}]' > "$PORTLESS_STATE_DIR/routes.json"
+printf '[{"port":3000,"hostname":"acme.localhost","pid":0},{"port":5173,"hostname":"dash.test","pid":0}]' > "$PORTLESS_STATE_DIR/routes.json"
 is "route_name strips the TLD" "$(portless_route_name 5173)" "dash"
 is "route_name is empty for an unknown port" "$(portless_route_name 9)" ""
+BAD_ROUTES="$T/bad-routes"; mkdir -p "$BAD_ROUTES"
+printf '["bad",{"port":3000,"hostname":"app.localhost","pid":0}]' > "$BAD_ROUTES/routes.json"
+bad_routes=$(PORTLESS_STATE_DIR="$BAD_ROUTES" bash -c '
+  source "'"$S"'/lib/portless.sh"
+  portless_state_load
+  printf "%s|%s" "$?" "$PORTLESS_STATE_ERROR"
+')
+is "a malformed Portless entry rejects the route snapshot" "$bad_routes" "1|routes.json is malformed"
 
 # ---- tunnels.sh validators -------------------------------------------------
 me=$(< /proc/$$/comm)
@@ -243,6 +251,41 @@ log_cap_result=$(PORTAL_STATE_DIR="$LOG_STATE" PORTLESS_STATE_DIR="$PORTLESS_STA
 ')
 is "status truncates an oversized provider log without treating it as ownership state" \
   "$log_cap_result" "true 0 0"
+DNS_STATE="$T/status-dns-budget"; mkdir -p "$DNS_STATE"; : > "$T/status-dns-calls"; : > "$T/status-dns-effects"
+for i in $(seq 1 7); do
+  port=$((4100 + i))
+  printf 'https://pending-%s.trycloudflare.com' "$i" > "$DNS_STATE/cloudflared-$port.url"
+  printf 'public' > "$DNS_STATE/cloudflared-$port.reach"
+  printf '999999 1' > "$DNS_STATE/cloudflared-$port.pid"
+  : > "$DNS_STATE/cloudflared-$port.dns"
+done
+dns_budget_result=$(PORTAL_STATE_DIR="$DNS_STATE" PORTLESS_STATE_DIR="$PORTLESS_STATE_DIR" \
+  CALLS="$T/status-dns-calls" EFFECTS="$T/status-dns-effects" S="$S" bash -c '
+  source "$S/tunnels.sh"
+  ss() { return 0; }
+  portless_state_load() { return 0; }
+  alive_line() { return 0; }
+  reconcile_idle() { return 0; }
+  cloudflared_adopt() { :; }
+  ngrok_adopt() { :; }
+  portless_adopt() { :; }
+  dns_published() {
+    local step=${2:-3}
+    printf "%s\n" "$step" >> "$CALLS"
+    SECONDS=$((SECONDS + step))
+    return 1
+  }
+  dns_resolves_here() { printf "network\n" >> "$EFFECTS"; return 1; }
+  kill() { printf "kill\n" >> "$EFFECTS"; return 1; }
+  proc() { printf "proc\n" >> "$EFFECTS"; return 1; }
+  out=$(cmd_status)
+  printf "%s %s %s %s %s" "$(jq -r .ok <<<"$out")" \
+    "$(jq -r ".tunnels | length" <<<"$out")" \
+    "$(jq -r "[.tunnels[]? | select(.dns == \"pending\")] | length" <<<"$out")" \
+    "$(wc -l < "$CALLS")" "$(wc -l < "$EFFECTS")"
+')
+is "status shares one DNS deadline and still returns every pending row" \
+  "$dns_budget_result" "true 7 7 2 0"
 crowd=$(mktemp -d); for i in $(seq 1 600); do : > "$crowd/f$i"; done
 is "a state directory with too many entries dumps nothing" "$(state_dump "$crowd" | jq -c '.files|length')" "0"
 rm -rf "$crowd"
@@ -375,11 +418,28 @@ is "stop-all fails instead of claiming success when the state cannot be listed" 
 # Rows are capped like the scanner's ports: past the cap, an error, not a document.
 RC="$T/rows"; mkdir -p "$RC"; for i in $(seq 1 520); do printf 'https://a-b-%s.trycloudflare.com' "$i" > "$RC/cloudflared-$((10000 + i)).url"; printf '999999 1' > "$RC/cloudflared-$((10000 + i)).pid"; done
 is "status reports an error past the row cap" "$(PORTAL_STATE_DIR="$RC" bash -c 'source "'"$S"'/tunnels.sh"; alive_line() { return 0; }; portless_state_load; cmd_status' | jq -r .error)" "more than 512 tunnels"
-# When the Portless directory is over its cap, status keeps the portless markers
-# rather than reading the refused dump as "the route vanished".
+# When the Portless directory is over its cap, status keeps the local markers
+# and returns independent public rows rather than treating routes as vanished.
 PS="$T/pstate"; mkdir -p "$PS"; for i in $(seq 1 520); do : > "$PS/j$i"; done
 PD="$T/prt"; mkdir -p "$PD"; printf 'https://acme.localhost' > "$PD/portless-3000.url"; printf 'acme' > "$PD/portless-3000.name"; printf 'local' > "$PD/portless-3000.reach"
-PORTLESS_STATE_DIR="$PS" PORTAL_STATE_DIR="$PD" bash -c 'source "'"$S"'/tunnels.sh"; cmd_status >/dev/null'
+printf 'https://one-two.trycloudflare.com' > "$PD/cloudflared-3001.url"; printf '999999 1' > "$PD/cloudflared-3001.pid"; printf 'public' > "$PD/cloudflared-3001.reach"
+printf 'https://unit.ngrok.app' > "$PD/ngrok-3002.url"; printf '999999 1' > "$PD/ngrok-3002.pid"; printf 'public' > "$PD/ngrok-3002.reach"
+: > "$T/pstate-effects"
+portless_status=$(PORTLESS_STATE_DIR="$PS" PORTAL_STATE_DIR="$PD" EFFECTS="$T/pstate-effects" S="$S" bash -c '
+  source "$S/tunnels.sh"
+  ss() { return 0; }
+  alive_line() { return 0; }
+  reconcile_idle() { return 0; }
+  cloudflared_adopt() { :; }
+  ngrok_adopt() { :; }
+  portless_adopt() { printf "portless-adopt\n" >> "$EFFECTS"; }
+  kill() { printf "kill\n" >> "$EFFECTS"; return 1; }
+  proc() { printf "proc\n" >> "$EFFECTS"; return 1; }
+  cmd_status
+')
+is "unreadable Portless state keeps public and tracked local status rows" \
+  "$(jq -c '[.ok, ([.tunnels[]? | select(.reach == "public") | .provider] | sort), [.tunnels[]? | select(.provider == "portless") | .port]]' <<<"$portless_status") $(wc -l < "$T/pstate-effects")" \
+  '[true,["cloudflared","ngrok"],[3000]] 0'
 is "status keeps portless markers when the Portless state is unreadable" "$(ls "$PD" | grep -c '^portless-3000\.')" "3"
 rm -f "$R1"/crowd-*
 is "stop-own stops what it can list" "$(PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$R1" "$S/tunnels.sh" stop-own | jq -c .ok)" "true"
@@ -846,7 +906,7 @@ is "refused Portless state keeps independent public providers available" \
   '[true,["cloudflared","ngrok"],["unavailable","State could not be read safely"]]'
 
 mkdir -p "$RB/portless-stop" "$RB/portless-stop-state" "$RB/fake-portless"
-printf '[{"port":45882,"hostname":"acme.test"}]' > "$RB/portless-stop/routes.json"
+printf '[{"port":45882,"hostname":"acme.test","pid":0}]' > "$RB/portless-stop/routes.json"
 printf 'acme' > "$RB/portless-stop-state/portless-45882.name"
 printf 'https://acme.test' > "$RB/portless-stop-state/portless-45882.url"
 printf '#!/bin/sh\nexit 0\n' > "$RB/fake-portless/portless"; chmod 755 "$RB/fake-portless/portless"

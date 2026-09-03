@@ -379,7 +379,11 @@ target_owns_port() {  # <"pid start"> <port>, using the attributed status snapsh
 # TTL, the system's upstream included, so the record is confirmed through a
 # resolver OUTSIDE the system's path before the system path is ever asked.
 DOH_URL=""
-dns_published() {  # <host>
+DNS_QUERY_TIMEOUT=3
+STATUS_DNS_BUDGET=6
+dns_published() {  # <host> [timeout]
+  local max_time="${2:-$DNS_QUERY_TIMEOUT}"
+  (( max_time > 0 )) || return 1
   if [[ -z $DOH_URL ]]; then
     if resolvectl status 2>/dev/null | grep -qE '8\.8\.8\.8|8\.8\.4\.4|dns\.google'; then
       DOH_URL='https://1.1.1.1/dns-query'
@@ -387,7 +391,7 @@ dns_published() {  # <host>
       DOH_URL='https://dns.google/resolve'
     fi
   fi
-  curl -q -sf --max-time 3 --proto =https --max-redirs 0 --max-filesize 16384 \
+  curl -q -sf --max-time "$max_time" --proto =https --max-redirs 0 --max-filesize 16384 \
     "$DOH_URL?name=$1&type=A" -H 'accept: application/dns-json' 2>/dev/null \
     | head -c 16384 | jq -e '(.Answer // []) | length > 0' >/dev/null 2>&1
 }
@@ -784,6 +788,7 @@ reconcile_idle() {  # <provider> <port> <idle> <healthy:0|1> <now>
 }
 
 cmd_status() {
+  local dns_until=$((SECONDS + STATUS_DNS_BUDGET))
   # Runs every poll. State files first — one descriptor-relative dump of the
   # state directory, no PATH work, no provider binaries — then each provider's
   # _adopt, which is responsible for its own cheap bail.
@@ -800,14 +805,17 @@ cmd_status() {
     case ${_l%:*} in 127.*|'*'|0.0.0.0|'[::]'|'[::1]'|'[::ffff:127.'*|::|::1) LIVE_PORTS+="${_l##*:} " ;; esac
   done <<<"$ss_raw"
 
-  portless_state_load || die "could not read Portless state safely"
+  local portless_ok=1
+  portless_state_load || portless_ok=0
   local dump tsv="" listed=" " now; printf -v now '%(%s)T' -1
   # An unreadable state directory is not an empty one: a tunnel that cannot be
   # listed cannot be cleaned up either, so the caller keeps its last snapshot.
   dump=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null) || die "could not list Portal's state"
-  local refused idle_refused
-  refused=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.(pid|url|reach|dns|target)$|^portless-[0-9]+\\.(url|reach|name)$"))' <<<"$dump" 2>/dev/null)
+  local refused idle_refused portless_refused
+  refused=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.(pid|url|reach|dns|target)$"))' <<<"$dump" 2>/dev/null)
   idle_refused=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.idle$"))' <<<"$dump" 2>/dev/null)
+  portless_refused=$(jq -r '.refused[]? | select(test("^portless-[0-9]+\\.(url|reach|name)$"))' <<<"$dump" 2>/dev/null)
+  [[ -z $portless_refused ]] || portless_ok=0
   [[ -z $refused ]] \
     || die "could not read Portal ownership state safely: $(tr '\n' ' ' <<<"$refused")"
   local partial_provider partial_port partial_out
@@ -822,7 +830,7 @@ cmd_status() {
     | select($f[$base + ".url"] == null) | $base' <<<"$dump" | sort -u | tr '-' '\t')
   # Fields are joined with a unit separator: a tab is IFS whitespace, so an
   # empty field between tabs would vanish and shift the ones after it.
-  local provider port url reach pidline dns idle target target_present base target_rc healthy leader
+  local provider port url reach pidline dns idle target target_present base target_rc healthy leader dns_left
   while IFS=$'\x1f' read -r provider port url reach pidline dns idle target target_present; do
     valid_port "$port" && known_provider "$provider" || continue
     valid_url "$url" || die "$provider on port $port has a malformed URL record; its records were kept"
@@ -834,9 +842,10 @@ cmd_status() {
       # mean the name is gone; a refused read keeps the markers. Re-read before
       # deleting: an alias registered after this poll's snapshot must not lose
       # its markers to the stale one.
-      if [[ -z $(portless_route_name "$port") ]]; then
-        portless_state_load || die "could not re-read Portless state safely"
-        if [[ -z $(portless_route_name "$port") ]]; then
+      if (( portless_ok )) && [[ -z $(portless_route_name "$port") ]]; then
+        if ! portless_state_load; then
+          portless_ok=0
+        elif [[ -z $(portless_route_name "$port") ]]; then
           state_remove "$STATE_DIR" "$base".{url,reach,name} \
             || die "could not clear stale Portless records for port $port"
           continue
@@ -888,7 +897,10 @@ cmd_status() {
     # A share whose DNS was still pending at start is re-checked each poll,
     # off-path first, and stops being pending the moment the system resolves it.
     if [[ $dns == pending ]]; then
-      if dns_published "$(url_host "$url")" && dns_resolves_here "$(url_host "$url")"; then
+      dns_left=$((dns_until - SECONDS))
+      (( dns_left > DNS_QUERY_TIMEOUT )) && dns_left=$DNS_QUERY_TIMEOUT
+      if (( dns_left > 0 )) && dns_published "$(url_host "$url")" "$dns_left" \
+          && dns_resolves_here "$(url_host "$url")"; then
         state_remove "$STATE_DIR" "$base.dns" || die "could not clear pending DNS state for $provider on port $port"
         dns=""
       fi
@@ -916,6 +928,7 @@ cmd_status() {
   local row name aport aurl areach
   for row in "${PROVIDERS[@]}"; do
     name="${row%%:*}"; areach="${row##*:}"
+    if [[ $name == portless ]] && (( portless_ok == 0 )); then continue; fi
     declare -f "${name}_adopt" >/dev/null || continue
     while IFS=$'\t' read -r aport aurl; do
       valid_port "$aport" && valid_url "$aurl" || continue

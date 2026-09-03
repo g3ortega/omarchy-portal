@@ -38,7 +38,10 @@ portless_state_load() {
   jq -e '(.files | type == "object") and ((.refused // []) | length == 0)' <<<"$PORTLESS_STATE" >/dev/null 2>&1 \
     || { PORTLESS_STATE_ERROR="requested state leaf refused"; return 1; }
   if jq -e '.files | has("routes.json")' <<<"$PORTLESS_STATE" >/dev/null 2>&1; then
-    jq -er '.files["routes.json"]' <<<"$PORTLESS_STATE" | jq -e 'type == "array"' >/dev/null 2>&1 \
+    jq -er '.files["routes.json"]' <<<"$PORTLESS_STATE" \
+      | jq -e 'type == "array" and all(.[];
+          (type == "object") and (.hostname | type == "string")
+          and (.port | type == "number") and (.pid | type == "number"))' >/dev/null 2>&1 \
       || { PORTLESS_STATE_ERROR="routes.json is malformed"; return 1; }
   fi
   return 0
