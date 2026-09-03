@@ -75,7 +75,7 @@ Item {
       property: "x"
       from: 0
       to: -ticker.loopWidth
-      duration: Math.max(1, Math.round(ticker.loopWidth / ticker.pace * 1000))
+      duration: Math.round(ticker.loopWidth / ticker.pace * 1000)
       loops: Animation.Infinite
       running: ticker.sliding
     }
