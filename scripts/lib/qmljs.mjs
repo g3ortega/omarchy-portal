@@ -36,5 +36,10 @@ if (mode === "icons") {
 } else if (mode === "decorate") {
   const { decorate } = loadQmlJs(detectPath)
   const scan = JSON.parse(execFileSync(process.argv[3]).toString())
-  console.log(JSON.stringify(scan.ports.map(decorate)))
+  if (scan.error) {
+    console.error(`portal: ${String(scan.error)}`)
+    process.exitCode = 1
+  } else {
+    console.log(JSON.stringify(scan.ports.map(decorate)))
+  }
 }

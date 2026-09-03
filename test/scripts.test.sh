@@ -5,6 +5,7 @@
 set -o pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 S="$(cd "$HERE/../scripts" && pwd)"
+PR="$S/lib/proc.py"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  ok   $1"; }
@@ -234,6 +235,44 @@ is "stop-own returns ok" "$(cmd_stop_own)" '{"ok":true}'
 [[ -e $STATE_DIR/cloudflared-4447.url ]] && bad "stop-own left a created share" || ok "stop-own cleared the created share"
 [[ -e $STATE_DIR/ngrok-4448.pid ]] && bad "stop-own skipped a tunnel still minting its URL" || ok "stop-own covers a tunnel that has a pidfile but no url yet"
 
+restart_stop_own() {
+  PORTAL_STATE_DIR="$1" GROUP_PRESENT="$2" EFFECTS="$3" LEADER_PRESENT="${4:-0}" S="$S" bash -c '
+    source "$S/tunnels.sh"
+    proc() { printf "proc %s\n" "$*" >> "$EFFECTS"; [[ $LEADER_PRESENT == 1 ]]; }
+    kill() {
+      printf "kill %s\n" "$*" >> "$EFFECTS"
+      [[ $GROUP_PRESENT == 1 && $* == "-0 -- -999999" ]]
+    }
+    cmd_stop_own
+  '
+}
+RESTART_OWN="$T/restart-stop-own"; mkdir -p "$RESTART_OWN/dead" "$RESTART_OWN/group" "$RESTART_OWN/live" "$RESTART_OWN/bad" "$RESTART_OWN/refused"
+: > "$RESTART_OWN/effects"
+printf '999999 1' > "$RESTART_OWN/dead/.restart-4497.pid"
+dead_restart=$(restart_stop_own "$RESTART_OWN/dead" 0 "$RESTART_OWN/effects")
+is "stop-own removes a restart record only after its group is gone" \
+  "$(jq -r .ok <<<"$dead_restart") $(test -e "$RESTART_OWN/dead/.restart-4497.pid" && echo kept || echo gone)" "true gone"
+printf '999999 1' > "$RESTART_OWN/group/.restart-4498.pid"
+group_restart=$(restart_stop_own "$RESTART_OWN/group" 1 "$RESTART_OWN/effects")
+is "stop-own keeps a restart record while its group survives" \
+  "$(jq -r .ok <<<"$group_restart") $(test -e "$RESTART_OWN/group/.restart-4498.pid" && echo kept || echo gone)" "false kept"
+printf '999999 1' > "$RESTART_OWN/live/.restart-4496.pid"
+live_restart=$(restart_stop_own "$RESTART_OWN/live" 0 "$RESTART_OWN/effects" 1)
+is "stop-own keeps a restart record while its exact leader survives" \
+  "$(jq -r .ok <<<"$live_restart") $(test -e "$RESTART_OWN/live/.restart-4496.pid" && echo kept || echo gone)" "false kept"
+printf 'bad identity' > "$RESTART_OWN/bad/.restart-4499.pid"
+bad_restart=$(restart_stop_own "$RESTART_OWN/bad" 0 "$RESTART_OWN/effects")
+is "stop-own rejects a malformed restart record before a process probe" \
+  "$(jq -r .ok <<<"$bad_restart") $(test -e "$RESTART_OWN/bad/.restart-4499.pid" && echo kept || echo gone) $(grep -c '^proc ' "$RESTART_OWN/effects")" \
+  "false kept 3"
+ln -s /etc/hostname "$RESTART_OWN/refused/.restart-4495.pid"
+refused_restart=$(restart_stop_own "$RESTART_OWN/refused" 0 "$RESTART_OWN/effects")
+is "stop-own rejects a refused restart record before a process probe" \
+  "$(jq -r .ok <<<"$refused_restart") $(test -L "$RESTART_OWN/refused/.restart-4495.pid" && echo kept || echo gone) $(grep -c '^proc ' "$RESTART_OWN/effects")" \
+  "false kept 3"
+is "restart cleanup only sends guarded group probes" \
+  "$(grep -c '^kill -0 -- -999999$' "$RESTART_OWN/effects") $(grep -Ec ' -- -(0|1)$|^kill -(TERM|KILL)' "$RESTART_OWN/effects" || true)" "2 0"
+
 # The pidfile binds pid and kernel start time; a matching comm is not enough.
 mystart=$(proc_start "$$")
 owned_pid "$$" "$me" "$mystart" && ok "owned_pid accepts the true start time" || bad "owned_pid rejected the true start time"
@@ -401,6 +440,70 @@ else
   cancel_state=gone
 fi
 is "cancelling a public start ends its detached provider" "$((cancel_rc != 0)) $cancel_state" "1 gone"
+
+PORTLESS_CANCEL="$T/cancel-portless"; mkdir -p "$PORTLESS_CANCEL/bin"
+cat > "$PORTLESS_CANCEL/bin/portless" <<'SH'
+#!/bin/bash
+routes=$PORTLESS_STATE_DIR/routes.json
+pause() {
+  [[ $PORTLESS_TEST_PAUSE == "$1" && ! -e $PORTLESS_TEST_SYNC.used ]] || return 0
+  : > "$PORTLESS_TEST_SYNC.used"
+  printf '%s' "$1" > "$PORTLESS_TEST_SYNC"
+  trap 'exit 143' TERM INT HUP
+  while :; do sleep 1; done
+}
+[[ ${1:-} == alias ]] || exit 2
+if [[ ${2:-} == --remove ]]; then
+  pause before-remove
+  jq --arg n "$3" 'map(select((.hostname | split(".")[0]) != $n))' "$routes" > "$routes.tmp.$$" || exit 1
+  mv "$routes.tmp.$$" "$routes"
+  exit 0
+fi
+name=$2 port=$3
+jq --arg n "$name" --argjson p "$port" '
+  map(select((.hostname | split(".")[0]) != $n))
+  + [{hostname:($n + ".localhost"), port:$p, pid:0}]
+' "$routes" > "$routes.tmp.$$" || exit 1
+mv "$routes.tmp.$$" "$routes"
+pause after-add
+SH
+chmod 700 "$PORTLESS_CANCEL/bin/portless"
+portless_cancel_case() {
+  local ownership="$1" pause_at="$2" root="$PORTLESS_CANCEL/$1-$2" wrapper wrapper_start rc route marker=absent state
+  mkdir -p "$root/home" "$root/portal" "$root/portless"
+  jq -nc '[{hostname:"old.localhost",port:45882,pid:0}]' > "$root/portless/routes.json"
+  if [[ $ownership == owned ]]; then
+    printf old > "$root/portal/portless-45882.name"
+    printf https://old.localhost > "$root/portal/portless-45882.url"
+    printf local > "$root/portal/portless-45882.reach"
+  fi
+  : > "$root/sync"
+  HOME="$root/home" PATH="$PORTLESS_CANCEL/bin:/usr/bin:/bin" \
+    PORTAL_STATE_DIR="$root/portal" PORTLESS_STATE_DIR="$root/portless" \
+    PORTLESS_TEST_SYNC="$root/sync" PORTLESS_TEST_PAUSE="$pause_at" \
+    /usr/bin/python3 -I -S "$PR" run 1048576 10 -- \
+      /usr/bin/bash "$S/tunnels.sh" start portless 45882 new > "$root/out" 2>&1 &
+  wrapper=$!
+  wrapper_start=$(proc_start "$wrapper")
+  for _ in $(seq 1 400); do [[ -s $root/sync ]] && break; sleep 0.01; done
+  if (( wrapper > 1 )) && proc check "$wrapper" "$wrapper_start" >/dev/null 2>&1; then
+    kill -TERM "$wrapper" 2>/dev/null
+  fi
+  wait "$wrapper" 2>/dev/null; rc=$?
+  route=$(jq -r 'first(.[] | select(.port == 45882) | .hostname) // "absent"' "$root/portless/routes.json")
+  [[ -e $root/portal/portless-45882.name ]] && marker=$(cat "$root/portal/portless-45882.name")
+  proc check "$wrapper" "$wrapper_start" >/dev/null 2>&1 && state=alive || state=gone
+  printf '%s/%s:%s:%s:%s:%s ' "$ownership" "$pause_at" "$rc" "$route" "$marker" "$state"
+}
+portless_cancelled=""
+for ownership in owned unowned; do
+  for pause_at in before-remove after-add; do
+    portless_cancelled+=$(portless_cancel_case "$ownership" "$pause_at")
+  done
+done
+is "cancelling a Portless rename restores its route and ownership" "$portless_cancelled" \
+  "owned/before-remove:143:old.localhost:old:gone owned/after-add:143:old.localhost:old:gone unowned/before-remove:143:old.localhost:absent:gone unowned/after-add:143:old.localhost:absent:gone "
+
 INCOMPLETE="$T/incomplete-start"; mkdir -p "$INCOMPLETE"
 state launch-tracked "$INCOMPLETE" cloudflared-4489.log cloudflared-4489.pid -- "$T/prov/cloudflared" 300 >/dev/null
 printf '999999 1' > "$INCOMPLETE/cloudflared-4489.target"
@@ -642,7 +745,6 @@ is "and its output goes to /dev/null" "$(readlink "/proc/$dpid/fd/1" 2>/dev/null
 proc signal "$dpid" "$dstart" KILL >/dev/null 2>&1
 
 # ---- proc.py: capped runs, and signals bound to one process -----------------
-PR="$S/lib/proc.py"
 is "run passes output and exit status through" "$(/usr/bin/python3 -I -S "$PR" run 1000 5 -- bash -c 'echo hello; exit 3'; echo "rc=$?")" "hello
 rc=3"
 out=$(/usr/bin/python3 -I -S "$PR" run 100 5 -- bash -c 'sleep 40 & yes | head -c 5000; wait' 2>/dev/null); rc=$?
@@ -1334,6 +1436,11 @@ is "provider resolution prefers a concrete version-manager binary over its shim"
 printf '#!/bin/bash\nexit 1\n' > "$RB/fake/ss"; chmod 755 "$RB/fake/ss"
 scan_fail=$(PATH="$RB/fake:/usr/bin:/bin" "$S/scan-ports.sh")
 is "a failed socket listing is an explicit scan error" "$(jq -r '.error // empty' <<<"$scan_fail")" "could not query listening sockets"
+printf '#!/bin/sh\nprintf "%%s\\n" '\''{"version":1,"error":"more than 512 listening ports","ports":[]}'\''\n' > "$RB/scan-error"
+chmod 700 "$RB/scan-error"
+qmljs_scan_error=$(node "$S/lib/qmljs.mjs" decorate "$RB/scan-error" 2>&1); qmljs_scan_rc=$?
+is "offline decoration propagates a scan error" \
+  "$qmljs_scan_rc $(grep -c 'more than 512 listening ports' <<<"$qmljs_scan_error")" "1 1"
 
 mkdir -p "$RB/shared/metrics" "$RB/shared-runtime"
 : > "$RB/shared-runtime/server-3000.log"; : > "$RB/shared-runtime/.foreign.tmp"; : > "$RB/shared-runtime/ngrok.ok"

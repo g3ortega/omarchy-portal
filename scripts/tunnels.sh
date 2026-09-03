@@ -423,9 +423,16 @@ finish_start() {  # <provider> <port> <url> [hint]
 
 rollback_portless() {  # <port> <new name> <old name> <old marker: 0|1> <bin>
   local port="$1" new="$2" old="$3" old_owned="$4" bin="$5" current
-  if [[ $new != "$old" ]]; then
-    "$bin" alias --remove "$new" >/dev/null 2>&1 || true
-    [[ -z $old ]] || "$bin" alias "$old" "$port" --force >/dev/null 2>&1 || return 1
+  portless_state_load || return 1
+  current=$(portless_route_name "$port")
+  if [[ $current == "$new" && $new != "$old" ]]; then
+    "$bin" alias --remove "$new" >/dev/null 2>&1 || return 1
+    current=""
+  elif [[ $current != "$old" && -n $current ]]; then
+    return 1
+  fi
+  if [[ -z $current && -n $old ]]; then
+    "$bin" alias "$old" "$port" --force >/dev/null 2>&1 || return 1
   fi
   portless_state_load || return 1
   current=$(portless_route_name "$port")
@@ -457,6 +464,14 @@ cancel_public_start() {  # <provider> <port> <pidline> <exit status>
   exit "$4"
 }
 
+cancel_portless_start() {  # <port> <new name> <old name> <old marker: 0|1> <bin> <exit status>
+  local marker
+  trap - TERM INT HUP
+  marker=$(cat_own "$(namefile portless "$1")" 256) || exit "$6"
+  [[ $marker == "$2" ]] && rollback_portless "$1" "$2" "$3" "$4" "$5" >/dev/null 2>&1
+  exit "$6"
+}
+
 cmd_start_portless() {  # <port> <name>
   local port="$1" name="$2" out bin old old_owned=0
   bin=$(provider_bin portless) || die "portless is not installed as a trusted executable"
@@ -473,6 +488,9 @@ cmd_start_portless() {  # <port> <name>
     # A route this plugin did not create (portless run / CLI) still renames.
     old=$(portless_route_name "$port")
   fi
+  trap 'cancel_portless_start "$port" "$n" "$old" "$old_owned" "$bin" 143' TERM
+  trap 'cancel_portless_start "$port" "$n" "$old" "$old_owned" "$bin" 130' INT
+  trap 'cancel_portless_start "$port" "$n" "$old" "$old_owned" "$bin" 129' HUP
   write_own "$(namefile portless "$port")" "$n" || die "could not record the Portless name before creating it"
   if [[ -n $old && $old != "$n" ]] && ! "$bin" alias --remove "$old" >/dev/null 2>&1; then
     if (( old_owned )); then
@@ -518,6 +536,7 @@ cmd_start_portless() {  # <port> <name>
       && die "could not record the Portless URL; the name was rolled back"
     die "could not record the Portless URL, and rollback could not be verified; the name record was kept"
   }
+  trap - TERM INT HUP
 }
 
 cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
@@ -973,12 +992,27 @@ cmd_stop_own() {
   # still minting its URL). Adopted names and tunnels belong to whoever
   # started them and have neither. A stop that fails keeps its records and
   # is reported, so a caller can retry.
-  local provider port out rows failed=() bad_markers
+  local provider port out rows failed=() bad_markers restart_markers=() marker line pid start
   rows=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null) || die "could not list Portal's state; nothing was stopped"
-  bad_markers=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.(url|pid|target)$|^portless-[0-9]+\\.(url|name)$"))' <<<"$rows" 2>/dev/null)
+  bad_markers=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.(url|pid|target)$|^portless-[0-9]+\\.(url|name)$|^\\.restart-[0-9]+\\.pid$"))' <<<"$rows" 2>/dev/null)
   if [[ -n $bad_markers ]]; then
     die "cannot stop safely: ownership markers could not be read safely: $(tr '\n' ' ' <<<"$bad_markers")"
   fi
+  mapfile -t restart_markers < <(jq -r '.files | keys[] | select(test("^\\.restart-[0-9]+\\.pid$"))' <<<"$rows")
+  for marker in "${restart_markers[@]}"; do
+    port=${marker#.restart-}; port=${port%.pid}
+    valid_port "$port" || die "cannot stop safely: malformed restart record name $marker"
+    line=$(jq -er --arg marker "$marker" '.files[$marker]' <<<"$rows" 2>/dev/null) \
+      || die "cannot stop safely: restart record $marker could not be read"
+    valid_identity_line "$line" || die "cannot stop safely: restart record $marker is malformed"
+    read -r pid start <<<"$line"
+    proc check "$pid" "$start" >/dev/null 2>&1 \
+      && die "cannot stop safely: replacement process $pid for port $port is still running"
+    group_alive "$pid" \
+      && die "cannot stop safely: replacement process group $pid for port $port is still running"
+    state_remove "$STATE_DIR" "$marker" \
+      || die "cannot stop safely: stale restart record $marker could not be removed"
+  done
   while IFS=$'\t' read -r provider port; do
     out=$(cmd_stop "$provider" "$port")
     jq -e .ok <<<"$out" >/dev/null 2>&1 || failed+=("$provider:$port $(jq -r .error <<<"$out")")
