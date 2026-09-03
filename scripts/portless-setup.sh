@@ -133,7 +133,7 @@ report() {
   if [[ $proxy == wrong-tld ]]; then
     remaining+=("restart the proxy so it serves .$(configured_tld) too"$'\x1f'"$(portless_fix_cmd)")
   elif [[ $proxy != ok ]]; then
-    remaining+=("start the proxy on 443 (needs sudo once)"$'\x1f'"$(portless_fix_cmd "$([[ $proxy == foreign ]] && echo evict)")")
+    remaining+=("Start the proxy on 443 · one sudo command"$'\x1f'"$(portless_fix_cmd "$([[ $proxy == foreign ]] && echo evict)")")
   fi
   $ca || remaining+=("CA appears after the first proxy start")
   $tldok || remaining+=("wildcard-resolve .$(configured_tld) once (root, replaces per-name hosts syncs)"$'\x1f'"$(tld_fix_cmd)")

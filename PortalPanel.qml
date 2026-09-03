@@ -826,53 +826,42 @@ Panel {
             }
           }
 
-          // ---- setup card -----------------------------------------------------
-          // A hint carrying a command: the title, the command as its own block,
-          // and a button that copies it. Persistent like hint toasts; Esc clears.
-          Rectangle {
+          // ---- setup next step ------------------------------------------------
+          // One quiet row under the strip: what finishes setup, and the copy
+          // that hands it over. The command stays off-screen until pasted.
+          Row {
             visible: root.toastCopy !== ""
             width: parent.width
-            implicitHeight: cardColumn.implicitHeight + Style.spacing.lg
-            radius: Style.cornerRadius
-            color: Util.alpha(Color.accent, 0.08)
-            border.width: 1
-            border.color: Util.alpha(Color.accent, 0.35)
+            spacing: Style.spacing.sm
 
-            Column {
-              id: cardColumn
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.leftMargin: Style.spacing.lg
-              anchors.rightMargin: Style.spacing.lg
+            OpticalGlyph {
+              id: stepGlyph
               anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.spacing.xs
+              width: Style.font.caption + Style.spacing.xs
+              height: Style.font.caption
+              text: Icons.g("localRoute")
+              fontSize: Style.font.caption
+              color: Util.alpha(Color.accent, 0.7)
+            }
 
-              Text {
-                width: parent.width
-                textFormat: Text.PlainText
-                text: root.toast
-                color: Color.accent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - stepGlyph.width - stepCopy.implicitWidth - 2 * parent.spacing
+              textFormat: Text.PlainText
+              text: root.toast
+              color: Util.alpha(root.panelText, 0.75)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
 
-              Text {
-                width: parent.width
-                textFormat: Text.PlainText
-                text: root.toastCopy
-                color: root.panelText
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WrapAnywhere
-              }
-
-              LinkText {
-                text: "Copy command"
-                color: Color.accent
-                font.pixelSize: Style.font.bodySmall
-                onClicked: if (root.service) root.service.copyText(root.toastCopy)
-              }
+            LinkText {
+              id: stepCopy
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Copy"
+              color: Color.accent
+              font.pixelSize: Style.font.bodySmall
+              onClicked: if (root.service) root.service.copyText(root.toastCopy)
             }
           }
 
