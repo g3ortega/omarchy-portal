@@ -826,6 +826,56 @@ Panel {
             }
           }
 
+          // ---- setup card -----------------------------------------------------
+          // A hint carrying a command: the title, the command as its own block,
+          // and a button that copies it. Persistent like hint toasts; Esc clears.
+          Rectangle {
+            visible: root.toastCopy !== ""
+            width: parent.width
+            implicitHeight: cardColumn.implicitHeight + Style.spacing.lg
+            radius: Style.cornerRadius
+            color: Util.alpha(Color.accent, 0.08)
+            border.width: 1
+            border.color: Util.alpha(Color.accent, 0.35)
+
+            Column {
+              id: cardColumn
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.leftMargin: Style.spacing.lg
+              anchors.rightMargin: Style.spacing.lg
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.spacing.xs
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: root.toast
+                color: Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: root.toastCopy
+                color: root.panelText
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WrapAnywhere
+              }
+
+              LinkText {
+                text: "Copy command"
+                color: Color.accent
+                font.pixelSize: Style.font.bodySmall
+                onClicked: if (root.service) root.service.copyText(root.toastCopy)
+              }
+            }
+          }
+
           // ---- list -----------------------------------------------------------
           Flickable {
             id: listView
@@ -1153,7 +1203,7 @@ Panel {
         // ---- error / toast --------------------------------------------------
         Text {
           width: parent.width
-          visible: text.length > 0 && root.toastCopy === ""
+          visible: text.length > 0 && (root.toastCopy === "" || !root.toastIsHint)
           textFormat: Text.PlainText
           text: root.toast || (root.service ? root.service.lastError : "")
           // A hint is guidance, not an alarm.
@@ -1161,56 +1211,6 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
-        }
-
-        // ---- setup card -----------------------------------------------------
-        // A hint carrying a command: the title, the command as its own block,
-        // and a button that copies it. Persistent like hint toasts; Esc clears.
-        Rectangle {
-          visible: root.toastCopy !== ""
-          width: parent.width
-          implicitHeight: cardColumn.implicitHeight + Style.spacing.lg
-          radius: Style.cornerRadius
-          color: Util.alpha(Color.accent, 0.08)
-          border.width: 1
-          border.color: Util.alpha(Color.accent, 0.35)
-
-          Column {
-            id: cardColumn
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.leftMargin: Style.spacing.lg
-            anchors.rightMargin: Style.spacing.lg
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.spacing.xs
-
-            Text {
-              width: parent.width
-              textFormat: Text.PlainText
-              text: root.toast
-              color: Color.accent
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-
-            Text {
-              width: parent.width
-              textFormat: Text.PlainText
-              text: root.toastCopy
-              color: root.panelText
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WrapAnywhere
-            }
-
-            LinkText {
-              text: "Copy command"
-              color: Color.accent
-              font.pixelSize: Style.font.bodySmall
-              onClicked: if (root.service) root.service.copyText(root.toastCopy)
-            }
-          }
         }
 
         // One quiet line keeps the keys discoverable without a manual.
