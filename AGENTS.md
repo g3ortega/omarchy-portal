@@ -140,3 +140,13 @@ dev/portal.sh status|sync|reload [--hard]|restart-shell
   Portal's own filenames (see uninstall tests).
 - This machine's node/redis/mysql come from mise; `ss`, `jq`, `flock`,
   `certutil` are assumed present with graceful degradation where noted.
+
+## Workflow (hard rule: e2e before push)
+
+- Never commit or push UI/behavior changes before proving them on the local
+  install. Order: implement → sync the install → shell restart (only
+  trustworthy rebuild) → drive the real path headlessly (temporary IPC verbs
+  in the installed copy only, reverted afterwards) → screenshot and read the
+  pixels → revert probes → restart again → verify parity → then commit/push.
+- Temporary probes live in the installed clone only, never in a commit.
+  Installed dir must end every session `git status` clean.
