@@ -426,7 +426,7 @@ real_stub_env() {
     dns_gate() { return 0; }; portless_state_load; '"$2"
 }
 CANCEL="$T/cancel-start"; mkdir -p "$CANCEL"
-PORTAL_STATE_DIR="$CANCEL" /usr/bin/python3 -I -S "$PR" run 1000 60 -- bash -c 'source "'"$S"'/tunnels.sh"
+PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$CANCEL" /usr/bin/python3 -I -S "$PR" run 1000 60 -- bash -c 'source "'"$S"'/tunnels.sh"
   cloudflared_argv() { echo 300; }; cloudflared_url_from_log() { return 1; }
   listener_identity() { echo "999999 1"; }; target_owns_port() { return 0; }
   dns_gate() { return 0; }; cmd_start cloudflared 4488' \
