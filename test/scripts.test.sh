@@ -408,8 +408,10 @@ competitor_start=$(proc_start "$competitor")
 restart_result=$("$S/lifecycle.sh" restart "$old_server" "$old_start" 4496 "$COMP" '["/usr/bin/true"]')
 is "restart rejects an unrelated same-directory listener" "$(jq -c '[.ok,.effect]' <<<"$restart_result")" '[false,"stopped"]'
 proc signal "$competitor" "$competitor_start" TERM >/dev/null 2>&1 || true
-scan=$("$S/scan-ports.sh")
-is "the scan carries a numeric start time for every attributed port" "$(jq -c '[.ports[] | select(.pid != null)] as $rows | ($rows | length > 0) and ($rows | all(.start | type == "number"))' <<<"$scan")" "true"
+python3 -m http.server 4497 --bind 127.0.0.1 >/dev/null 2>&1 & scan_server=$!; sleep 0.4
+scan_start=$(proc_start "$scan_server"); scan=$("$S/scan-ports.sh")
+is "the scan carries the owned listener's kernel start time" "$(jq -r '.ports[] | select(.port == 4497) | "\(.pid) \(.start)"' <<<"$scan")" "$scan_server $scan_start"
+proc signal "$scan_server" "$scan_start" TERM >/dev/null 2>&1
 
 # ---- statedir.py: a short write is completed, never reported as done --------
 SW=$(mktemp -d); /usr/bin/python3 - "$SW" "$S/lib/statedir.py" <<'PY'
