@@ -152,9 +152,7 @@ Item {
   // may say and a deadline, past either of which its whole process group is
   // ended and nothing is passed on (so no document is ever parsed cut short).
   readonly property var deadlines: ({ scan: 20, poll: 20, action: 330, quick: 15 })
-  // Scan covers 512 ports with 8 KiB argv. Poll covers 512 tunnel rows with
-  // 8 KiB URLs plus JSON escaping. Both valid producer maxima fit under 16 MiB.
-  readonly property var outputCaps: ({ scan: 16777216, poll: 16777216, action: 1048576, quick: 4194304 })
+  readonly property var outputCaps: ({ scan: 67108864, poll: 16777216, action: 1048576, quick: 4194304 })
   function runScript(proc, script, args, kind) {
     if (!alive || !pluginDir || proc.running) return false
     var k = kind || "quick"
@@ -262,7 +260,8 @@ Item {
       if (watchedPorts.indexOf(e.port) !== -1) watchedBatch[e.port] = sample
       seenPorts[e.port] = true
       identity.push([e.port, e.addresses, e.pid, e.start, e.comm, e.cmdline, e.argv,
-                     e.argvTruncated, e.cwd, e.projectRoot, e.projectName, e.markers, e.deps])
+                     e.argvTruncated, e.cwd, e.projectRoot, e.projectName, e.markers, e.deps,
+                     e.exclusiveOwner])
     }
     _cpuPrev = nextCpu
     stats = nextStats

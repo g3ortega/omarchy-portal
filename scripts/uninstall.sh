@@ -83,7 +83,7 @@ remove_known() {  # <dir> <name regex> [retained lock]
   local dir="$1" pattern="$2" retained="${3:-}"
   [[ -d $dir && ! -L $dir && -O $dir ]] || return 0
   local names=() remaining=()
-  mapfile -t names < <(find "$dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | grep -E -- "$pattern")
+  mapfile -t names < <(find "$dir" -mindepth 1 -maxdepth 1 ! -type d -printf '%f\n' 2>/dev/null | grep -E -- "$pattern")
   if (( ${#names[@]} )); then
     run state_remove "$dir" "${names[@]}" || return 1
   fi

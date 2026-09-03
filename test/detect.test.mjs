@@ -25,7 +25,7 @@ function check(name, entry, expect) {
   }
 }
 
-const base = { addresses: ["127.0.0.1"], scope: "local", markers: [], deps: [], cmdline: "", comm: "", cwd: "", projectRoot: "", projectName: "" }
+const base = { addresses: ["127.0.0.1"], scope: "local", markers: [], deps: [], cmdline: "", comm: "", cwd: "", projectRoot: "", projectName: "", exclusiveOwner: true }
 const e = (o) => ({ ...base, ...o })
 
 console.log("Detect.js")
@@ -128,6 +128,10 @@ check("443 uses https", e({ port: 443, comm: "caddy" }), { url: "https://localho
 check("all-interfaces scope preserved", e({
   port: 8000, comm: "java", addresses: ["*"], scope: "all"
 }), { scope: "all" })
+
+check("a shared listener keeps identity without process authority", e({
+  port: 8000, pid: 10, start: 20, exclusiveOwner: false
+}), { pid: 10, start: 20, process: null })
 
 // --- displayName fallback chain lives in Detect.js, not the scanner
 check("directory basename names the row when package.json has no name", e({
@@ -242,6 +246,7 @@ check("a wildcard bind still opens localhost", e({
 {
   const panelSrc = readFileSync(join(here, "..", "PortalPanel.qml"), "utf8")
   const serviceSrc = readFileSync(join(here, "..", "Service.qml"), "utf8")
+  const scanSrc = readFileSync(join(here, "..", "scripts", "scan-ports.sh"), "utf8")
   const fn = (src, name, params) => {
     const m = src.match(new RegExp("\\n  function " + name + "\\([^)]*\\) \\{\\n([\\s\\S]*?)\\n  \\}\\n"))
     if (!m) throw new Error(`no function ${name}`)
@@ -306,8 +311,14 @@ check("a wildcard bind still opens localhost", e({
     bad.push("failed lifecycle actions do not clear disappearance state")
 
   const scanKeyFields = serviceSrc.match(/identity\.push\(\[([\s\S]*?)\]\)/)?.[1] ?? ""
-  for (const field of ["e.start", "e.argv", "e.argvTruncated"])
+  for (const field of ["e.start", "e.argv", "e.argvTruncated", "e.exclusiveOwner"])
     if (!scanKeyFields.includes(field)) bad.push(`scan identity omits ${field}`)
+  const maxPorts = Number(scanSrc.match(/^MAX_PORTS=([0-9]+)/m)?.[1] ?? 0)
+  const argvB64Cutoff = Number(scanSrc.match(/\$\{#argv_b64\} -gt ([0-9]+)/)?.[1] ?? 0)
+  const scanCap = Number(serviceSrc.match(/outputCaps:[^\n]*scan:\s*([0-9]+)/)?.[1] ?? 0)
+  const maxArgvValue = "\u0001".repeat(Math.floor(argvB64Cutoff * 3 / 4) - 1)
+  const maximalArgvDocument = { version: 1, ports: Array.from({ length: maxPorts }, () => ({ argv: [maxArgvValue] })) }
+  eq(`scan cap holds ${maxPorts} maximally JSON-escaped argv values`, Buffer.byteLength(JSON.stringify(maximalArgvDocument)) <= scanCap, true)
   const tunnelCap = Number(serviceSrc.match(/outputCaps:[^\n]*poll:\s*([0-9]+)/)?.[1] ?? 0)
   if (tunnelCap < 8 * 1024 * 1024) bad.push(`tunnel poll cap is only ${tunnelCap} bytes`)
 

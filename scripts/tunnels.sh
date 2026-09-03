@@ -306,9 +306,10 @@ STOP_KILL_WAIT=20
 stop_line() {   # <"pid start"> <comm>: end the whole session the launcher created, not just its leader
   local pid start i sig; read -r pid start <<<"$1"
   valid_identity_line "$1" || return 2
-  # If the leader is not ours to begin with (reused pid, mock test pid, already dead),
-  # there is nothing to signal.
-  alive_line "$1" "$2" || return 0
+  if ! alive_line "$1" "$2"; then
+    group_alive "$pid" && return 1
+    return 0
+  fi
   # Gone only when both hold: the leader we launched is gone (by identity) and
   # its process group holds no members. A descendant that inherited the session
   # and ignores TERM keeps the group alive, so the leader's exit alone is not
@@ -552,6 +553,9 @@ cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
         return
       fi
       stop_line "$pidline" "$provider" || die "$provider on port $port has an incomplete start that did not stop; its records are kept"
+    else
+      stop_line "$pidline" "$provider" \
+        || die "$provider on port $port has a dead leader but its process group remains; its records are kept"
     fi
   fi
 
@@ -815,7 +819,7 @@ cmd_status() {
     | select($f[$base + ".url"] == null) | $base' <<<"$dump" | sort -u | tr '-' '\t')
   # Fields are joined with a unit separator: a tab is IFS whitespace, so an
   # empty field between tabs would vanish and shift the ones after it.
-  local provider port url reach pidline dns idle target target_present base target_rc healthy
+  local provider port url reach pidline dns idle target target_present base target_rc healthy leader
   while IFS=$'\x1f' read -r provider port url reach pidline dns idle target target_present; do
     valid_port "$port" && known_provider "$provider" || continue
     valid_url "$url" || die "$provider on port $port has a malformed URL record; its records were kept"
@@ -840,12 +844,12 @@ cmd_status() {
         || die "$provider on port $port has a malformed pid record; its records were kept"
       alive_line "$pidline" "$provider" || {
         # Only this snapshot's records go: a start since then has written new ones.
-        # An unreadable pidfile is not proof of death — a stop fails on those
-        # instead of clearing — so only a readable record is ever removed here.
-        if snapshot_current "$provider" "$port" "$pidline"; then
-          clear_share "$provider" "$port" \
-            || die "could not clear stale $provider records for port $port"
-        fi
+        snapshot_current "$provider" "$port" "$pidline" || continue
+        leader="${pidline%% *}"
+        group_alive "$leader" \
+          && die "$provider on port $port has a dead leader but its process group remains; its records were kept"
+        clear_share "$provider" "$port" \
+          || die "could not clear stale $provider records for port $port"
         continue
       }
       if grep -qxF "$base.idle" <<<"$idle_refused"; then

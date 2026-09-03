@@ -152,7 +152,7 @@ CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
 PAGE_KB=$(( $(getconf PAGESIZE 2>/dev/null || echo 4096) / 1024 ))
 read -r UPTIME_NOW _ < /proc/uptime
 
-declare -A PORT_ADDRS PORT_PID
+declare -A PORT_ADDRS PORT_PID PORT_AMBIGUOUS
 while read -r _state _rq _sq local_addr _peer procinfo; do
   [[ -n $local_addr ]] || continue
   port="${local_addr##*:}"
@@ -165,11 +165,20 @@ while read -r _state _rq _sq local_addr _peer procinfo; do
   addr="${addr#[}"; addr="${addr%]}"
   addr="${addr#::ffff:}"      # v4-mapped
 
-  pid=""
-  [[ $procinfo =~ pid=([0-9]+) ]] && pid="${BASH_REMATCH[1]}"
-
   PORT_ADDRS[$port]="${PORT_ADDRS[$port]}${PORT_ADDRS[$port]:+ }$addr"
-  [[ -z ${PORT_PID[$port]} && -n $pid ]] && PORT_PID[$port]="$pid"
+  row_attributed=0
+  proc_rest="$procinfo"
+  while [[ $proc_rest =~ pid=([0-9]+) ]]; do
+    pid="${BASH_REMATCH[1]}"
+    proc_rest="${proc_rest#*"${BASH_REMATCH[0]}"}"
+    row_attributed=1
+    if [[ -z ${PORT_PID[$port]} ]]; then
+      PORT_PID[$port]="$pid"
+    elif [[ ${PORT_PID[$port]} != "$pid" ]]; then
+      PORT_AMBIGUOUS[$port]=1
+    fi
+  done
+  (( row_attributed )) || PORT_AMBIGUOUS[$port]=1
 done <<<"$raw"
 
 # ---- emit one tab-separated record per port, assemble with ONE jq -------------
@@ -180,7 +189,7 @@ done <<<"$raw"
 emit() {
   local port
   for port in "${!PORT_ADDRS[@]}"; do
-    local pid="${PORT_PID[$port]}" comm="" cmdline="" cwd="" root=""
+    local pid="${PORT_PID[$port]}" comm="" cmdline="" cwd="" root="" exclusive_owner=false
     local argv_b64="" argv_cut="" cpu_ticks="" rss_kb="" up_sec="" pstate="" st=()
     local lat_ms="" http_code=""
     if [[ -n $PROBE_DIR && -f "$PROBE_DIR/$port" ]]; then
@@ -215,12 +224,13 @@ emit() {
     fi
     [[ -n $cwd && -d $cwd ]] && root=$(find_project_root "$cwd")
     project_info "$root"
+    [[ -n $pid && -z ${PORT_AMBIGUOUS[$port]} ]] && exclusive_owner=true
 
     local f joined=""
     for f in "$port" "${PORT_ADDRS[$port]}" "$pid" "$comm" "$cmdline" "$cwd" \
              "$root" "$PROJ_NAME" "$PROJ_MARKERS" "$PROJ_DEPS" \
              "${PORT_CONNS[$port]:-0}" "$cpu_ticks" "$rss_kb" "$up_sec" "$pstate" "$argv_b64" \
-             "$lat_ms" "$http_code" "$argv_cut" "${st[19]}"; do
+             "$lat_ms" "$http_code" "$argv_cut" "${st[19]}" "$exclusive_owner"; do
       f="${f//$'\t'/ }"; f="${f//$'\n'/ }"
       f="${f//[$'\x01'-$'\x1f'$'\x7f']/}"   # no C0 control survives; argv is already escaped
       joined+="${joined:+$'\t'}$f"
@@ -257,7 +267,8 @@ emit | jq -Rsc '
       latMs: (.[16] | num),
       httpCode: (.[17] | num),
       argvTruncated: (.[18] == "1"),
-      start: (.[19] | num)
+      start: (.[19] | num),
+      exclusiveOwner: (.[20] == "true")
     }
     | .cmdline = ([.argv[] | gsub("[\u0000-\u001f\u007f]"; "")] | join(" ") | .[:2048])
     | .scope = (if (.addresses | any(. == "0.0.0.0" or . == "*" or . == "::")) then "all"

@@ -74,6 +74,66 @@ SIGNAL_LOG="$signal_log" S="$S" bash -c '
 ' >/dev/null 2>&1; rc=$?
 is "dangerous pid records fail before a signal path" "$rc $(grep -Ec -- '(^| )-(0|1)( |$)' "$signal_log" 2>/dev/null || true)" "0 0"
 
+GROUP_ONLY="$T/group-only"; mkdir -p "$GROUP_ONLY"/{stop,start,status}; : > "$GROUP_ONLY/signals"; : > "$GROUP_ONLY/launches"
+GROUP_ONLY="$GROUP_ONLY" S="$S" bash -c '
+  source "$S/tunnels.sh"
+  proc() { printf "proc %s\n" "$*" >> "$GROUP_ONLY/signals"; return 1; }
+  kill() { printf "kill %s\n" "$*" >> "$GROUP_ONLY/signals"; return 1; }
+  alive_line() { return 1; }
+  group_alive() { return 0; }
+  state() {
+    if [[ $1 == launch-tracked ]]; then printf "launch %s\n" "$*" >> "$GROUP_ONLY/launches"; return 1; fi
+    /usr/bin/python3 -I -S "$STATEDIR_PY" "$@"
+  }
+  provider_bin() { printf /usr/bin/true; }
+  target_owns_port() { return 0; }
+  cloudflared_argv() { printf "300\n"; }
+  ss() { return 0; }
+  STOP_TERM_WAIT=0; STOP_KILL_WAIT=0
+
+  stop_line "999999 1" cloudflared; stop_rc=$?
+  printf "%s" "$((stop_rc != 0))" > "$GROUP_ONLY/stop-line-failed"
+
+  STATE_DIR="$GROUP_ONLY/stop"
+  printf "999999 1" > "$STATE_DIR/cloudflared-4501.pid"
+  printf "https://group-only.trycloudflare.com" > "$STATE_DIR/cloudflared-4501.url"
+  stop_out=$(cmd_stop cloudflared 4501); printf "%s" "$stop_out" > "$GROUP_ONLY/stop.out"
+
+  STATE_DIR="$GROUP_ONLY/start"
+  printf "999999 1" > "$STATE_DIR/cloudflared-4502.pid"
+  printf "https://group-only.trycloudflare.com" > "$STATE_DIR/cloudflared-4502.url"
+  state dump "$STATE_DIR" 8192 32 | jq -S . > "$GROUP_ONLY/start.before"
+  start_out=$(cmd_start cloudflared 4502 --target 999999 1); printf "%s" "$start_out" > "$GROUP_ONLY/start.out"
+  state dump "$STATE_DIR" 8192 32 | jq -S . > "$GROUP_ONLY/start.after"
+
+  STATE_DIR="$GROUP_ONLY/status"
+  printf "999999 1" > "$STATE_DIR/cloudflared-4503.pid"
+  printf "https://group-only.trycloudflare.com" > "$STATE_DIR/cloudflared-4503.url"
+  status_out=$(cmd_status); printf "%s" "$status_out" > "$GROUP_ONLY/status.out"
+' >/dev/null 2>&1
+is "a group-only identity makes stop_line fail closed" "$(cat "$GROUP_ONLY/stop-line-failed")" "1"
+is "cmd_stop fails and keeps group-only records" "$(jq -c .ok "$GROUP_ONLY/stop.out") $(find "$GROUP_ONLY/stop" -maxdepth 1 -type f | wc -l)" "false 2"
+cmp -s "$GROUP_ONLY/start.before" "$GROUP_ONLY/start.after" && group_start_state=same || group_start_state=changed
+is "cmd_start fails without launching or altering group-only records" "$(jq -c .ok "$GROUP_ONLY/start.out") $(wc -l < "$GROUP_ONLY/launches") $group_start_state" "false 0 same"
+is "cmd_status fails and keeps group-only records" "$(jq -c .ok "$GROUP_ONLY/status.out") $(find "$GROUP_ONLY/status" -maxdepth 1 -type f | wc -l)" "false 2"
+is "group-only records never reach a signal path" "$(wc -l < "$GROUP_ONLY/signals") $(grep -Ec -- '(^| )-(0|1)( |$)' "$GROUP_ONLY/signals" 2>/dev/null || true)" "0 0"
+
+ESCALATE_LOG="$GROUP_ONLY/escalate-signals" S="$S" bash -c '
+  source "$S/tunnels.sh"
+  checks=0; group_dead=0
+  alive_line() { checks=$((checks + 1)); (( checks == 1 )); }
+  group_alive() { (( group_dead == 0 )); }
+  proc() { printf "proc %s\n" "$*" >> "$ESCALATE_LOG"; return 0; }
+  kill() {
+    printf "kill %s\n" "$*" >> "$ESCALATE_LOG"
+    [[ $1 == -KILL ]] && group_dead=1
+    return 0
+  }
+  STOP_TERM_WAIT=0; STOP_KILL_WAIT=1
+  stop_line "999999 1" cloudflared
+' >/dev/null 2>&1; rc=$?
+is "a verified stop still escalates after its leader exits" "$rc $(grep -c "kill -KILL -- -999999" "$GROUP_ONLY/escalate-signals")" "0 1"
+
 # cmd_stop must never signal a pid the pidfile names unless it is still the provider.
 mkdir -p "$STATE_DIR"
 printf '%s' "$$" > "$STATE_DIR/cloudflared-4444.pid"
@@ -92,11 +152,25 @@ jq -nc --arg p "$M/my bin/cloudflared" --arg s "$d" '{path:$p, sha256:$s}' | sta
 plan=$(PORTAL_BIN_DIR="$M/my bin" PORTAL_METRICS_DIR=$M PORTAL_STATE_DIR=$M/rt "$S/uninstall.sh" --dry 2>&1)
 grep -qF "would: state remove-digest $M/my bin cloudflared $d 134217728" <<<"$plan" && ok "uninstall finds a marked binary in a path with a space" || bad "uninstall lost the marked binary: $plan"
 # State roots pointed at a shared directory lose only Portal's own entries.
-mkdir -p "$M/shared/metrics" "$M/rt2"; : > "$M/shared/thesis.txt"; : > "$M/shared/trusted-stores"; : > "$M/shared/metrics/3000.jsonl"; : > "$M/rt2/cloudflared-1.url"; : > "$M/rt2/notes.txt"
+mkdir -p "$M/shared/metrics" "$M/rt2" "$M/rt2/cloudflared-2.url"; printf keep > "$M/link-target"
+: > "$M/shared/thesis.txt"; : > "$M/shared/trusted-stores"; : > "$M/shared/metrics/3000.jsonl"; : > "$M/rt2/cloudflared-1.url"; : > "$M/rt2/notes.txt"
+ln -s "$M/link-target" "$M/shared/watched.json"; mkfifo "$M/rt2/ngrok.ok"
+ln -s "$M/link-target" "$M/shared/unknown-link"; mkfifo "$M/rt2/unknown-fifo"
 plan=$(PORTAL_METRICS_DIR=$M/shared PORTAL_STATE_DIR=$M/rt2 "$S/uninstall.sh" --dry 2>/dev/null)
 grep -q 'rm -rf' <<<"$plan" && bad "uninstall would remove a state root wholesale" || ok "uninstall never removes a state root wholesale"
-is "uninstall removes Portal's entries by name" "$(grep -c -E "would: state_remove $M/(shared trusted-stores|shared/metrics 3000.jsonl|rt2 cloudflared-1.url)$" <<<"$plan")" "3"
-grep -qE 'thesis|notes' <<<"$plan" && bad "uninstall would touch files that are not Portal's" || ok "and leaves other files alone"
+planned_regular=0; for name in trusted-stores 3000.jsonl cloudflared-1.url; do grep -Fq "$name" <<<"$plan" && planned_regular=$((planned_regular + 1)); done
+is "uninstall removes Portal's entries by name" "$planned_regular" "3"
+planned_special=0; for name in watched.json ngrok.ok; do grep -Fq "$name" <<<"$plan" && planned_special=$((planned_special + 1)); done
+is "uninstall includes exact known symlink and FIFO leaves" "$planned_special" "2"
+grep -qE 'thesis|notes|unknown-link|unknown-fifo|cloudflared-2\.url' <<<"$plan" && bad "uninstall would touch unknown leaves or directories" || ok "and leaves unknown leaves and directories alone"
+remove_rc=0
+timeout 5 /usr/bin/python3 -I -S "$S/lib/statedir.py" remove "$M/shared" watched.json >/dev/null 2>&1 || remove_rc=$?
+timeout 5 /usr/bin/python3 -I -S "$S/lib/statedir.py" remove "$M/rt2" ngrok.ok cloudflared-2.url >/dev/null 2>&1 || remove_rc=$?
+[[ -e $M/shared/watched.json || -L $M/shared/watched.json ]] && removed_link=kept || removed_link=gone
+[[ -e $M/rt2/ngrok.ok ]] && removed_fifo=kept || removed_fifo=gone
+is "descriptor-relative removal unlinks a symlink and FIFO without blocking" "$remove_rc $removed_link $removed_fifo" "0 gone gone"
+is "descriptor-relative removal does not follow the symlink" "$(cat "$M/link-target")" "keep"
+[[ -d $M/rt2/cloudflared-2.url ]] && ok "descriptor-relative removal keeps directories" || bad "descriptor-relative removal removed a directory"
 # A binary that could not be removed keeps its marker, and the removal stops there.
 # (omarchy is a stub here so nothing about the live plugin is touched.)
 mkdir -p "$M/stub" "$M/held" "$M/st3" "$M/rt3"; printf '#!/bin/bash\n[[ $1 == plugin && $2 == list ]] && { echo "[]"; exit 0; }\nexit 1\n' > "$M/stub/omarchy"; chmod 755 "$M/stub/omarchy"
@@ -411,7 +485,23 @@ proc signal "$competitor" "$competitor_start" TERM >/dev/null 2>&1 || true
 python3 -m http.server 4497 --bind 127.0.0.1 >/dev/null 2>&1 & scan_server=$!; sleep 0.4
 scan_start=$(proc_start "$scan_server"); scan=$("$S/scan-ports.sh")
 is "the scan carries the owned listener's kernel start time" "$(jq -r '.ports[] | select(.port == 4497) | "\(.pid) \(.start)"' <<<"$scan")" "$scan_server $scan_start"
-proc signal "$scan_server" "$scan_start" TERM >/dev/null 2>&1
+is "a single-owner scan grants process authority" "$(jq -r '.ports[] | select(.port == 4497) | .exclusiveOwner' <<<"$scan")" "true"
+/usr/bin/sleep 300 & scan_peer=$!; scan_peer_start=$(proc_start "$scan_peer")
+scan_stub="$T/scan-stub"; mkdir -p "$scan_stub"
+cat > "$scan_stub/ss" <<'SH'
+#!/bin/bash
+case "$*" in
+  -tlnpH) printf 'LISTEN 0 5 127.0.0.1:4498 0.0.0.0:* users:(("python3",pid=%s,fd=3),("sleep",pid=%s,fd=4))\n' "$REP_PID" "$OTHER_PID" ;;
+  '-tnH state established') ;;
+  *) exit 1 ;;
+esac
+SH
+chmod 755 "$scan_stub/ss"
+shared_scan=$(REP_PID="$scan_server" OTHER_PID="$scan_peer" PATH="$scan_stub:/usr/bin:/bin" "$S/scan-ports.sh")
+is "a shared scan keeps the representative listener identity" "$(jq -r '.ports[] | select(.port == 4498) | "\(.pid) \(.start)"' <<<"$shared_scan")" "$scan_server $scan_start"
+is "a shared scan with two attributed owners denies process authority" "$(jq -r '.ports[] | select(.port == 4498) | .exclusiveOwner' <<<"$shared_scan")" "false"
+proc signal "$scan_peer" "$scan_peer_start" TERM >/dev/null 2>&1 || true; wait "$scan_peer" 2>/dev/null || true
+proc signal "$scan_server" "$scan_start" TERM >/dev/null 2>&1 || true; wait "$scan_server" 2>/dev/null || true
 
 # ---- statedir.py: a short write is completed, never reported as done --------
 SW=$(mktemp -d); /usr/bin/python3 - "$SW" "$S/lib/statedir.py" <<'PY'
