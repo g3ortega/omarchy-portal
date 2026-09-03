@@ -313,6 +313,25 @@ check("a wildcard bind still opens localhost", e({
   const scanKeyFields = serviceSrc.match(/identity\.push\(\[([\s\S]*?)\]\)/)?.[1] ?? ""
   for (const field of ["e.start", "e.argv", "e.argvTruncated", "e.exclusiveOwner"])
     if (!scanKeyFields.includes(field)) bad.push(`scan identity omits ${field}`)
+
+  const notifyVanishedDev = fn(serviceSrc, "_notifyVanishedDev",
+    ["devPorts", "_prevDevPorts", "processKey", "_expectedGoneAt", "expectedGoneMs", "publicTunnelFor", "notify"])
+  const runVanished = (markers, now) => {
+    const notices = [], state = { ...markers }, realNow = Date.now
+    Date.now = () => now
+    try {
+      notifyVanishedDev([], [{ port: 3000, process: { pid: 10, start: "20" }, label: "Node" }],
+        (p) => p ? `${p.pid}:${p.start}` : "", state, 600000, () => null,
+        (...a) => notices.push(a))
+    } finally { Date.now = realNow }
+    return { notices, markers: state }
+  }
+  eq("a fresh expected-stop marker suppresses the crash notice",
+    runVanished({ "10:20": 700000 - 60000 }, 700000),
+    { notices: [], markers: {} })
+  eq("an expired expected-stop marker does not suppress a crash",
+    runVanished({ "10:20": 700000 - 600001 }, 700000),
+    { notices: [["Port 3000 went quiet", "Node is no longer listening"]], markers: {} })
   const maxPorts = Number(scanSrc.match(/^MAX_PORTS=([0-9]+)/m)?.[1] ?? 0)
   const argvB64Cutoff = Number(scanSrc.match(/\$\{#argv_b64\} -gt ([0-9]+)/)?.[1] ?? 0)
   const scanCap = Number(serviceSrc.match(/outputCaps:[^\n]*scan:\s*([0-9]+)/)?.[1] ?? 0)

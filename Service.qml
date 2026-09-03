@@ -320,16 +320,16 @@ Item {
   // otherwise, unless Portal itself just stopped or restarted it. Text is
   // built only from the port number and the rule's own label, never from
   // process-controlled strings.
-  property var _expectedGone: ({})
+  property var _expectedGoneAt: ({})
   readonly property int expectedGoneMs: 600000
   function _expectGone(process) {
     var key = processKey(process)
-    if (key) _expectedGone[key] = Date.now()
+    if (key) _expectedGoneAt[key] = Date.now()
   }
 
   function _forgetGone(process) {
     var key = processKey(process)
-    if (key) delete _expectedGone[key]
+    if (key) delete _expectedGoneAt[key]
   }
 
   function _notifyVanishedDev(devPorts) {
@@ -345,20 +345,20 @@ Item {
       var wasKey = processKey(was.process)
       var samePort = devPorts.some(function (d) { return d.port === was.port })
       if ((wasKey && liveProcesses[wasKey]) || (!wasKey && samePort)) continue
-      // A stop or restart marks the port; the marker is honored whenever the
-      // port finally disappears, however long the graceful shutdown took, and
-      // consumed here so a later genuine crash is still announced.
-      if (wasKey && _expectedGone[wasKey]) { consumedExpected[wasKey] = true; continue }
+      if (wasKey && _expectedGoneAt[wasKey] && Date.now() - _expectedGoneAt[wasKey] <= expectedGoneMs) {
+        consumedExpected[wasKey] = true
+        continue
+      }
       if (samePort) continue
       var shared = publicTunnelFor(was.port) ? "; its public tunnel is still open" : ""
       notify("Port " + was.port + " went quiet", was.label + " is no longer listening" + shared)
     }
-    for (var consumed in consumedExpected) delete _expectedGone[consumed]
+    for (var consumed in consumedExpected) delete _expectedGoneAt[consumed]
     // Drop a marker once its exact process is gone or it has lingered far past
     // any real shutdown.
     var nowT = Date.now()
-    for (var g in _expectedGone) {
-      if (!liveProcesses[g] || nowT - _expectedGone[g] > expectedGoneMs) delete _expectedGone[g]
+    for (var g in _expectedGoneAt) {
+      if (!liveProcesses[g] || nowT - _expectedGoneAt[g] > expectedGoneMs) delete _expectedGoneAt[g]
     }
   }
 

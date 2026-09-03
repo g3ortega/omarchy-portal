@@ -53,11 +53,22 @@ target() {  # <pid> <start> <port>: validated, the process the scan listed, and 
   proc check "$1" "$2" || die "pid $1 exited while its port ownership was checked"
 }
 
-cancel_restart() {  # <pid> <start> <log> <pidfile> <exit status>
+cancel_restart() {  # <pid> <start> <pidfile> <exit status>
   trap - TERM INT HUP
-  proc end "$1" "$2" >/dev/null 2>&1 || true
-  state_remove "$PORTAL_RUNTIME_DIR" "$3" "$4" >/dev/null 2>&1 || true
-  exit "$5"
+  rollback_replacement "$1" "$2" "$3" || true
+  exit "$4"
+}
+rollback_replacement() {  # <pid> <start> <pidfile>: keep identity if stop cannot be proven
+  if proc check "$1" "$2" >/dev/null 2>&1; then
+    proc end "$1" "$2" >/dev/null 2>&1 || return 1
+  fi
+  state_remove "$PORTAL_RUNTIME_DIR" "$3" >/dev/null 2>&1
+}
+fail_restart() {  # <pid> <start> <pidfile> <reason>: a replacement that cannot serve is never left half-owned
+  trap - TERM INT HUP
+  rollback_replacement "$1" "$2" "$3" \
+    || die_effect "$4; the replacement could not be closed out, so its identity record was kept" stopped
+  die_effect "$4" stopped
 }
 
 case "${1:-}" in
@@ -94,15 +105,16 @@ case "${1:-}" in
     exe=$(readlink "/proc/$pid/exe" 2>/dev/null); exe=${exe% (deleted)}
     proc check "$pid" "$start" || die "pid $pid exited while its environment was read"
     # argv[0] may be absolute, on the process's own PATH, or relative to its
-    # cwd (./bin/dev is common); its executable is the fallback for a name
-    # only a shell hook could resolve. Checked before touching the process.
+    # cwd (./bin/dev is common). It is resolved from that cwd, so a same-named
+    # file in this helper's directory can never take its place, and a relative
+    # PATH entry means what it meant to the process. Checked before touching it.
     proc_path="" exec_path=""
     for kv in "${envs[@]}"; do [[ $kv == PATH=* ]] && proc_path=${kv#PATH=}; done
-    exec_path=$(PATH="${proc_path:-$PATH}" command -v "${argv[0]}" 2>/dev/null) || true
-    [[ -z $exec_path && -x ${argv[0]} ]] && exec_path=${argv[0]}
-    [[ -z $exec_path && -x $cwd/${argv[0]} ]] && exec_path=$cwd/${argv[0]}
-    [[ -n $exec_path ]] && exec_path=$(readlink -f -- "$exec_path" 2>/dev/null)
-    [[ -n $exec_path && -x $exec_path ]] || exec_path=$exe
+    cand=$(cd "$cwd" 2>/dev/null && PATH="${proc_path:-$PATH}" command -v -- "${argv[0]}" 2>/dev/null) || true
+    [[ -z $cand || $cand == /* ]] || cand="$cwd/$cand"
+    [[ -n $cand ]] && cand=$(readlink -f -- "$cand" 2>/dev/null)
+    [[ -n $cand && -f $cand && -x $cand ]] && exec_path=$cand
+    [[ -z $exec_path && -n $exe ]] && exec_path=$exe
     [[ -n $exec_path && -x $exec_path ]] || die "launcher not found: ${argv[0]}"
 
     proc signal "$pid" "$start" TERM || die "could not stop pid $pid"
@@ -117,43 +129,42 @@ case "${1:-}" in
     (( busy_rc == 2 )) && die_effect "could not query port $port after stopping pid $pid" stopped
     (( busy_rc == 0 )) && die_effect "port $port did not free up" stopped
 
-    restart_log=".restart-$port.log"; restart_pid=".restart-$port.pid"
+    restart_pid=".restart-$port.pid"
     relaunched=$(
       if (( ${#envs[@]} > 0 )); then
         for v in $(compgen -e); do unset "$v"; done
         for kv in "${envs[@]}"; do [[ $kv =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && export "$kv"; done
       fi
-      cd "$cwd" && state launch-tracked "$PORTAL_RUNTIME_DIR" "$restart_log" "$restart_pid" \
+      # Discarded output: nothing reads a restart's log, and unlinking one that
+      # the replacement still holds would park a growing inode nowhere.
+      cd "$cwd" && state launch-tracked "$PORTAL_RUNTIME_DIR" --discard-output "$restart_pid" \
         --exec "$exec_path" -- "${argv[@]}"
     ) || die_effect "could not launch the replacement process" stopped
     read -r new_pid new_start <<<"$relaunched"
     [[ $new_pid =~ ^[1-9][0-9]*$ && $new_start =~ ^[1-9][0-9]*$ ]] && (( new_pid > 1 )) \
       || die_effect "the replacement process returned an invalid identity" stopped
-    trap 'cancel_restart "$new_pid" "$new_start" "$restart_log" "$restart_pid" 143' TERM
-    trap 'cancel_restart "$new_pid" "$new_start" "$restart_log" "$restart_pid" 130' INT
-    trap 'cancel_restart "$new_pid" "$new_start" "$restart_log" "$restart_pid" 129' HUP
+    trap 'cancel_restart "$new_pid" "$new_start" "$restart_pid" 143' TERM
+    trap 'cancel_restart "$new_pid" "$new_start" "$restart_pid" 130' INT
+    trap 'cancel_restart "$new_pid" "$new_start" "$restart_pid" 129' HUP
     # Report success only once the port is serving again; the relaunch is
     # detached, so give it a moment. An exec that failed leaves the port free.
     for ((i = 0; i < 50; i++)); do
       port_busy "$port"; busy_rc=$?
-      (( busy_rc == 2 )) && die_effect "could not query port $port after restart" stopped
+      (( busy_rc == 2 )) && fail_restart "$new_pid" "$new_start" "$restart_pid" "could not query port $port after restart"
       (( busy_rc == 0 )) && break
       sleep 0.1
     done
     port_busy "$port"; busy_rc=$?
-    (( busy_rc == 2 )) && die_effect "could not query port $port after restart" stopped
-    (( busy_rc == 0 )) || die_effect "restart did not bring a listener back on port $port" stopped
+    (( busy_rc == 2 )) && fail_restart "$new_pid" "$new_start" "$restart_pid" "could not query port $port after restart"
+    (( busy_rc == 0 )) || fail_restart "$new_pid" "$new_start" "$restart_pid" "restart did not bring a listener back on port $port"
     # The listener must be the relaunched service: anything else that grabbed
     # the port in the meantime is not a successful restart.
     restart_ok=""
     for lpid in $(ss -tlnpH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\),.*/\1/p' | sort -u); do
       [[ $(ps -o sid= -p "$lpid" 2>/dev/null | tr -d ' ') == "$new_pid" ]] && { restart_ok=1; break; }
     done
-    if [[ -z $restart_ok ]]; then
-      proc end "$new_pid" "$new_start" >/dev/null 2>&1 || true
-      die_effect "port $port is held by another process after restart" stopped
-    fi
-    state_remove "$PORTAL_RUNTIME_DIR" "$restart_log" "$restart_pid" \
+    [[ -n $restart_ok ]] || fail_restart "$new_pid" "$new_start" "$restart_pid" "port $port is held by another process after restart"
+    state_remove "$PORTAL_RUNTIME_DIR" "$restart_pid" \
       || die_effect "restart succeeded, but its temporary identity could not be cleared" restarted
     trap - TERM INT HUP
     echo '{"ok":true,"effect":"restarted"}'

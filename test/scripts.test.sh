@@ -428,6 +428,62 @@ sleep 300 & dpid=$!; dstart=$(cut -d')' -f2- "/proc/$dpid/stat" | awk '{print $2
 is "owned_pid matches by comm regardless of a deleted exe" "$(bash -c 'source "'"$S"'/tunnels.sh"; owned_pid '"$dpid"' sleep '"$dstart"' && echo yes || echo no')" "yes"
 kill "$dpid" 2>/dev/null
 
+PY3=$(readlink -f -- "$(command -v python3)")
+wait_listener_pid() {
+  local p i
+  for i in $(seq 1 50); do
+    p=$(ss -tlnpH "sport = :$1" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
+    [[ -n $p ]] && { printf '%s' "$p"; return 0; }
+    sleep 0.05
+  done
+  return 1
+}
+REL="$T/rel-launch"; mkdir -p "$REL/target/bin" "$REL/helper/bin"
+cp "$PY3" "$REL/target/bin/dev"; cp /usr/bin/true "$REL/helper/bin/dev"
+cat > "$REL/srv.py" <<'PYEOF'
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PYEOF
+( cd "$REL/target" && setsid ./bin/dev "$REL/srv.py" 4499 >/dev/null 2>&1 & ) >/dev/null 2>&1
+rel_pid=$(wait_listener_pid 4499) || bad "the relative-launcher fixture never listened"
+rel_start=$(proc_start "$rel_pid")
+rel_argv=$(jq -nc --arg a './bin/dev' --arg s "$REL/srv.py" '[$a,$s,"4499"]')
+rel_out=$( cd "$REL/helper" && "$S/lifecycle.sh" restart "$rel_pid" "$rel_start" 4499 "$REL/target" "$rel_argv" )
+sleep 0.6
+new_pid=$(ss -tlnpH 'sport = :4499' 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
+if [[ $(jq -r .ok <<<"$rel_out") == true && -n $new_pid ]]; then
+  is "restart resolves a relative launcher from the process's own directory" "$(readlink "/proc/$new_pid/exe")" "$REL/target/bin/dev"
+  is "and keeps the original argv[0]" "$(tr '\0' '\n' < "/proc/$new_pid/cmdline" | head -1)" "./bin/dev"
+  is "and its output is discarded, not parked on a deleted log" "$(readlink "/proc/$new_pid/fd/1")$(readlink "/proc/$new_pid/fd/2")" "/dev/null/dev/null"
+  is "and no restart leaf remains" "$(ls "$STATE_DIR"/.restart-4499.* 2>/dev/null | wc -l)" "0"
+  kill "$new_pid" 2>/dev/null
+else
+  bad "a relative launcher restart failed: $rel_out"
+fi
+RB2="$T/rel-restart"; mkdir -p "$RB2"
+( cd "$RB2" && setsid "$PY3" -m http.server 4499 --bind 127.0.0.1 >/dev/null 2>&1 & ) >/dev/null 2>&1
+rb_pid=$(wait_listener_pid 4499) || bad "the non-serving-replacement fixture never listened"
+rb_start=$(proc_start "$rb_pid")
+rb_out=$( cd "$RB2" && "$S/lifecycle.sh" restart "$rb_pid" "$rb_start" 4499 "$RB2" '["/usr/bin/sleep","4590"]' )
+stray=$(pgrep -f "sleep [4]590")
+rb_leaves=$(ls "$STATE_DIR"/.restart-4499.* 2>/dev/null | wc -l)
+if [[ -n $stray ]]; then s_start=$(proc_start "$stray"); proc signal "$stray" "$s_start" KILL >/dev/null 2>&1; fi
+is "a replacement that never serves is ended" "$stray" ""
+is "and its identity record cleared" "$rb_leaves" "0"
+jq -e '.ok == false' <<<"$rb_out" >/dev/null 2>&1 && ok "and the restart reports failure" || bad "restart reported success for a non-serving replacement: $rb_out"
+DIS="$T/discard-launch"; mkdir -p "$DIS"
+discard_line=$(state launch-tracked "$DIS" --discard-output discard.pid -- /usr/bin/sleep 4591)
+sleep 0.2
+dpid=${discard_line%% *}; dstart=${discard_line#* }
+is "a discard launch records the identity before execution" "$(cat "$DIS/discard.pid" 2>/dev/null)" "$discard_line"
+is "and creates no log leaf" "$(ls "$DIS" | grep -vc '^discard\.pid$')" "0"
+is "and its output goes to /dev/null" "$(readlink "/proc/$dpid/fd/1" 2>/dev/null)" "/dev/null"
+proc signal "$dpid" "$dstart" KILL >/dev/null 2>&1
+
 # ---- proc.py: capped runs, and signals bound to one process -----------------
 PR="$S/lib/proc.py"
 is "run passes output and exit status through" "$(/usr/bin/python3 -I -S "$PR" run 1000 5 -- bash -c 'echo hello; exit 3'; echo "rc=$?")" "hello

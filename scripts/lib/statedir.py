@@ -28,7 +28,10 @@ and truncation go through the validated descriptor, never the path again.
                                            directory root's or ours, swappable by
                                            nobody else) and executed by descriptor.
   launch-tracked <dir> <logname> <pidname> -- <argv...>
-                                           launch only after the pid record is durable
+                                           launch only after the pid record is durable.
+                                           The log name may instead be
+                                           --discard-output: stdio then goes to
+                                           /dev/null and no log leaf is created
 
 Most commands exit 0 on success, 1 when refused, and 2 on top-level usage.
 Lock returns 75 on nowait contention and otherwise returns its child's status.
@@ -574,10 +577,12 @@ def cmd_truncate(a):
 
 
 def launch_process(d, logname, pidname, argv, executable=None):
-    check_name(logname, "log name")
+    discard = logname is None
+    if not discard:
+        check_name(logname, "log name")
     if pidname is not None:
         check_name(pidname, "pid name")
-        if pidname == logname:
+        if not discard and pidname == logname:
             raise Refused("log and pid names must differ")
     executable = executable or (argv[0] if argv else "")
     if not argv or not os.path.isabs(executable):
@@ -591,16 +596,19 @@ def launch_process(d, logname, pidname, argv, executable=None):
     released = False
     try:
         dirfd = open_dir(d, create=True)
-        try:
-            os.unlink(logname, dir_fd=dirfd)
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            raise Refused(f"could not replace log {logname}: {e.strerror}")
-        try:
-            logfd = os.open(logname, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_APPEND | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
-        except OSError as e:
-            raise Refused(f"could not create log {logname}: {e.strerror}")
+        if discard:
+            logfd = os.open(os.devnull, os.O_WRONLY | os.O_CLOEXEC)
+        else:
+            try:
+                os.unlink(logname, dir_fd=dirfd)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                raise Refused(f"could not replace log {logname}: {e.strerror}")
+            try:
+                logfd = os.open(logname, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_APPEND | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+            except OSError as e:
+                raise Refused(f"could not create log {logname}: {e.strerror}")
         ready_r, ready_w = os.pipe()
         release_r, release_w = os.pipe()
         pid = os.fork()
@@ -668,11 +676,12 @@ def cmd_launch(a):
 
 
 def cmd_launch_tracked(a):
+    logname = None if a[1] == "--discard-output" else a[1]
     if len(a) < 5 or a[3] != "--":
         if len(a) < 7 or a[3] != "--exec" or a[5] != "--":
-            raise Refused("usage: launch-tracked <dir> <logname> <pidname> [--exec <path>] -- <argv...>")
-        return launch_process(a[0], a[1], a[2], a[6:], a[4])
-    return launch_process(a[0], a[1], a[2], a[4:])
+            raise Refused("usage: launch-tracked <dir> <logname|--discard-output> <pidname> [--exec <path>] -- <argv...>")
+        return launch_process(a[0], logname, a[2], a[6:], a[4])
+    return launch_process(a[0], logname, a[2], a[4:])
 
 
 COMMANDS = {
