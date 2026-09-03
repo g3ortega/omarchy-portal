@@ -170,6 +170,17 @@ owned_pid "$lpid" sleep "$lstart" && ok "launch reports a pid whose start time m
 [[ $(ps -o sid= -p "$lpid" | tr -d ' ') == "$lpid" ]] && ok "the launched process leads its own session" || bad "launched process is not a session leader"
 is "the launch log is private" "$(stat -c %a "$STATE_DIR/launch-test.log")" "600"
 kill "$lpid" 2>/dev/null
+# A launched tunnel keeps only stdio and its executable: any other inherited
+# descriptor would stay open for the tunnel's whole life — a lifecycle lock
+# held across the launch would never release, failing every later start and
+# hanging uninstall's exclusive wait forever.
+LT="$T/lockinh"; mkdir -p "$LT"
+{ exec 8>"$LT/.lifecycle.lock"; } 2>/dev/null && flock -n -x 8 2>/dev/null || bad "could not hold a test lock"
+lout=$(state launch "$LT" inh.log -- /usr/bin/sleep 300); lpid=${lout%% *}
+exec 8>&- 2>/dev/null || true
+if ls -l "/proc/$lpid/fd" 2>/dev/null | grep -q "lifecycle.lock"; then bad "the tunnel inherited the lifecycle lock"; else ok "the tunnel inherits no lock descriptor"; fi
+flock -n -x "$LT/.lifecycle.lock" -c true 2>/dev/null && ok "the lock is acquirable while the tunnel lives" || bad "the tunnel still holds the lock"
+kill "$lpid" 2>/dev/null
 is "cmd_stop rejects an unknown provider" "$(cmd_stop nope 1 | jq -r .error)" "unknown provider"
 # A stub provider: an ELF copy (so the process carries the provider's name)
 # whose URL and argv the sourced functions supply. Nothing touches the network.

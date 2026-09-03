@@ -394,6 +394,18 @@ def cmd_launch(a):
                 os.write(w, b"1")
                 os.close(w)
                 os.set_inheritable(exefd, True)   # a #! script is handed to its interpreter as /dev/fd/N
+                # Only stdio and the executable survive into the tunnel: any
+                # other inherited descriptor (a lifecycle lock among them)
+                # would stay open for the tunnel's whole life — a lock the
+                # launcher held would never release, blocking every later
+                # start and hanging uninstall's exclusive wait forever.
+                keep = {0, 1, 2, exefd}
+                for name in os.listdir("/proc/self/fd"):
+                    if name.isdigit() and int(name) not in keep:
+                        try:
+                            os.close(int(name))
+                        except OSError:
+                            pass
                 os.execve(exefd, argv, os.environ)      # the descriptor, not the path
             finally:
                 os._exit(127)
