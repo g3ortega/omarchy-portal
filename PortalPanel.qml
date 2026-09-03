@@ -45,6 +45,9 @@ Panel {
   property int verbIndex: 0
   property string toast: ""
   property bool toastIsHint: false
+  // A hint carrying a command renders as a card (title + copyable command)
+  // instead of plain toast text; cleared everywhere the toast is.
+  property string toastCopy: ""
 
   function showToast(message, hint) {
     toast = message; toastIsHint = hint === true
@@ -52,6 +55,11 @@ Panel {
     // until read — Esc dismisses it, anything new replaces it.
     if (toastIsHint) toastTimer.stop()
     else toastTimer.restart()
+  }
+
+  function showCopyCard(message, command) {
+    toast = message; toastIsHint = true; toastCopy = command
+    toastTimer.stop()
   }
 
   // A toast is a moment, not a status line — unless it is guidance.
@@ -176,6 +184,7 @@ Panel {
     query = ""
     selectedPort = -1
     toast = ""
+    toastCopy = ""
     pendingAction = null
     helpOpen = false
     settingsOpen = false
@@ -186,6 +195,7 @@ Panel {
     target: root.service
     function onActionFailed(message) { root.showToast(message) }
     function onActionHint(message) { root.showToast(message, true) }
+    function onActionCopy(message, command) { root.showCopyCard(message, command) }
   }
 
   // ---- model ---------------------------------------------------------------
@@ -435,7 +445,7 @@ Panel {
       // Esc steps back one level, in mode precedence order. A persistent
       // hint is the topmost level: it goes first, the rest is untouched.
       onCloseRequested: {
-        if (root.toast !== "" && root.toastIsHint) { root.toast = ""; return }
+        if (root.toast !== "" && root.toastIsHint) { root.toast = ""; root.toastCopy = ""; return }
         switch (root.mode) {
         case "help":     root.helpOpen = false; return
         case "confirm":  root.pendingAction = null; return
@@ -1143,7 +1153,7 @@ Panel {
         // ---- error / toast --------------------------------------------------
         Text {
           width: parent.width
-          visible: text.length > 0
+          visible: text.length > 0 && root.toastCopy === ""
           textFormat: Text.PlainText
           text: root.toast || (root.service ? root.service.lastError : "")
           // A hint is guidance, not an alarm.
@@ -1151,6 +1161,56 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
+        }
+
+        // ---- setup card -----------------------------------------------------
+        // A hint carrying a command: the title, the command as its own block,
+        // and a button that copies it. Persistent like hint toasts; Esc clears.
+        Rectangle {
+          visible: root.toastCopy !== ""
+          width: parent.width
+          implicitHeight: cardColumn.implicitHeight + Style.spacing.lg
+          radius: Style.cornerRadius
+          color: Util.alpha(Color.accent, 0.08)
+          border.width: 1
+          border.color: Util.alpha(Color.accent, 0.35)
+
+          Column {
+            id: cardColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: Style.spacing.lg
+            anchors.rightMargin: Style.spacing.lg
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.spacing.xs
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: root.toast
+              color: Color.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: root.toastCopy
+              color: root.panelText
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WrapAnywhere
+            }
+
+            LinkText {
+              text: "Copy command"
+              color: Color.accent
+              font.pixelSize: Style.font.bodySmall
+              onClicked: if (root.service) root.service.copyText(root.toastCopy)
+            }
+          }
         }
 
         // One quiet line keeps the keys discoverable without a manual.

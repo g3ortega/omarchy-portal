@@ -65,7 +65,7 @@ MAX_ROWS=512      # past this many tunnels, status reports an error, not a growi
 
 die() { jq -nc --arg e "$1" '{ok:false,error:$e}'; exit 0; }
 json_str() { jq -Rn --arg v "$1" '$v'; }
-ok_json() { jq -nc --arg h "${1:-}" '{ok:true} + (if $h == "" then {} else {hint:$h} end)'; }
+ok_json() { jq -nc --arg h "${1:-}" --arg c "${2:-}" '{ok:true} + (if $h == "" then {} else {hint:$h} end) + (if $c == "" then {} else {copy:$c} end)'; }
 have() { command -v "$1" >/dev/null 2>&1; }
 url_host() { local h=${1#*://}; h=${h%%/*}; printf '%s' "${h%%:*}"; }
 # Provider output is untrusted: a tunnel log, an agent API, a routes file. A
@@ -223,9 +223,13 @@ portless_status() {
 }
 
 portless_setup() {
-  local out
+  local out entry title copy
   out=$("$SCRIPT_DIR/portless-setup.sh" run)
-  ok_json "$(jq -r '.remaining[0] // empty' <<<"$out")"
+  entry=$(jq -r '.remaining[0] // empty' <<<"$out")
+  # A remaining step carrying a command joins title and command with a unit
+  # separator; the panel shows them as a card with a copy button.
+  title=${entry%%$'\x1f'*}
+  if [[ $entry == *$'\x1f'* ]]; then copy=${entry#*$'\x1f'}; ok_json "$title" "$copy"; else ok_json "$title"; fi
 }
 
 cloudflared_setup() {

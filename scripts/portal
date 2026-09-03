@@ -119,7 +119,7 @@ case "${1:-list}" in
   uninstall) shift; "$HERE/uninstall.sh" "$@" ;;
   doctor)    cmd_doctor ;;
   refresh)   omarchy-shell "$PLUGIN_ID" refresh ;;
-  setup)     "$HERE/portless-setup.sh" run | jq . ;;
+  setup)     "$HERE/portless-setup.sh" run | jq '.remaining |= map(gsub("\u001f"; ": "))' ;;
   test)      "$HERE/../test/test.sh" ;;
   -h|--help|help)
     cat <<USAGE

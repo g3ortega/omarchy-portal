@@ -127,16 +127,16 @@ report() {
     if have portless; then
       remaining+=("portless at $(command -v portless) is not a trusted executable (it and every directory above it must belong to root or you and be writable by nobody else): fix the permissions or reinstall it")
     else
-      remaining+=("install portless: npm install -g portless")
+      remaining+=("install portless"$'\x1f'"npm install -g portless")
     fi
   fi
   if [[ $proxy == wrong-tld ]]; then
-    remaining+=("restart the proxy so it serves .$(configured_tld) too: $(portless_fix_cmd)")
+    remaining+=("restart the proxy so it serves .$(configured_tld) too"$'\x1f'"$(portless_fix_cmd)")
   elif [[ $proxy != ok ]]; then
-    remaining+=("start the proxy on 443 (needs sudo once): $(portless_fix_cmd "$([[ $proxy == foreign ]] && echo evict)")")
+    remaining+=("start the proxy on 443 (needs sudo once)"$'\x1f'"$(portless_fix_cmd "$([[ $proxy == foreign ]] && echo evict)")")
   fi
   $ca || remaining+=("CA appears after the first proxy start")
-  $tldok || remaining+=("wildcard-resolve .$(configured_tld) once (root, replaces per-name hosts syncs): $(tld_fix_cmd)")
+  $tldok || remaining+=("wildcard-resolve .$(configured_tld) once (root, replaces per-name hosts syncs)"$'\x1f'"$(tld_fix_cmd)")
 
   jq -nc --argjson installed "$installed" --argjson ca "$ca" --arg proxy "$proxy" \
         --argjson nss "$nss" --argjson ffMissing "${ff_missing:-0}" \

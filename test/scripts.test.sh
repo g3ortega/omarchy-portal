@@ -336,6 +336,17 @@ jq -r '.remaining[0]' <<<"$rep" | grep -q "is not a trusted executable" && ok "a
 # not silently installed where provider_bin will never find it.
 SH="$T/shadow"; mkdir -p "$SH"; printf '#!/bin/sh\n' > "$SH/cloudflared"; chmod 777 "$SH/cloudflared"
 is "install refuses when an untrusted cloudflared shadows the target" "$(PATH="$SH:$PATH" "$S/provider-install.sh" cloudflared 2>/dev/null | jq -r '.error // empty' | grep -c 'shadows the install')" "1"
+# A setup step carrying a command arrives split: title for the card, command
+# for its copy button. The engine is stubbed; only the split is exercised.
+FB="$T/fakebin"; mkdir -p "$FB"; OLD_SD="$SCRIPT_DIR"
+printf '#!/bin/bash\necho %s\n' "'{\"ok\":true,\"remaining\":[\"Do the thing\\u001fdo --it --now\"]}'" > "$FB/portless-setup.sh"
+chmod +x "$FB/portless-setup.sh"; SCRIPT_DIR="$FB"
+is "setup splits a command-carrying step" "$(cmd_setup portless 2>/dev/null | jq -c '{hint,copy}')" '{"hint":"Do the thing","copy":"do --it --now"}'
+printf '#!/bin/bash\necho %s\n' "'{\"ok\":true,\"remaining\":[\"Just words\"]}'" > "$FB/portless-setup.sh"
+is "setup passes a plain step through with no copy" "$(cmd_setup portless 2>/dev/null | jq -c .)" '{"ok":true,"hint":"Just words"}'
+printf '#!/bin/bash\necho %s\n' "'{\"ok\":true,\"remaining\":[]}'" > "$FB/portless-setup.sh"
+is "setup with nothing remaining reports bare ok" "$(cmd_setup portless 2>/dev/null | jq -c .)" '{"ok":true}'
+SCRIPT_DIR="$OLD_SD"
 
 # ---- portless-setup.sh untrust: a store that keeps the CA stays on record ----
 if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then

@@ -77,6 +77,7 @@ Item {
 
   signal actionFailed(string message)
   signal actionHint(string message)
+  signal actionCopy(string message, string command)
 
   // A port can hold both a local name (portless) and a public tunnel at the
   // same time; they are different facts and the UI treats them differently.
@@ -533,8 +534,10 @@ Item {
         root.actionFailed(parsed && parsed.error ? String(parsed.error) : root._actionFallback)
       } else if (parsed.hint) {
         // The action worked but needs one more step (e.g. a hosts entry for a
-        // non-localhost TLD). Same channel as errors: it must be seen.
-        root.actionHint(String(parsed.hint))
+        // non-localhost TLD). Same channel as errors: it must be seen. A hint
+        // carrying a command arrives as a copy card instead of plain text.
+        if (parsed.copy) root.actionCopy(String(parsed.hint), String(parsed.copy))
+        else root.actionHint(String(parsed.hint))
       }
       root.refreshTunnels()
       root.refreshProviders()
