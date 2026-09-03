@@ -220,6 +220,29 @@ out=$(timeout 10 bash -c 'source "'"$S"'/tunnels.sh"; cmd_status' 2>/dev/null); 
 is "and reports the refused ownership record" "$(jq -c .ok <<<"$out")" "false"
 [[ -e $STATE_DIR/cloudflared-4446.url ]] && ok "and the unreadable pidfile's records are kept" || bad "status cleared records over an unreadable pidfile"
 rm -f "$STATE_DIR/cloudflared-4446".*
+LOG_STATE="$T/status-log-cap"; mkdir -p "$LOG_STATE"; : > "$T/status-log-signals"
+printf '999999 1' > "$LOG_STATE/cloudflared-4449.pid"
+printf 'https://one-two.trycloudflare.com' > "$LOG_STATE/cloudflared-4449.url"
+printf 'public' > "$LOG_STATE/cloudflared-4449.reach"
+truncate -s $((LOG_CAP + 1)) "$LOG_STATE/cloudflared-4449.log"
+log_cap_result=$(PORTAL_STATE_DIR="$LOG_STATE" PORTLESS_STATE_DIR="$PORTLESS_STATE_DIR" \
+  SIGNAL_LOG="$T/status-log-signals" S="$S" bash -c '
+  source "$S/tunnels.sh"
+  ss() { return 0; }
+  portless_state_load() { return 0; }
+  alive_line() { return 0; }
+  reconcile_idle() { return 0; }
+  cloudflared_adopt() { :; }
+  ngrok_adopt() { :; }
+  portless_adopt() { :; }
+  kill() { printf "kill %s\n" "$*" >> "$SIGNAL_LOG"; return 1; }
+  proc() { printf "proc %s\n" "$*" >> "$SIGNAL_LOG"; return 1; }
+  out=$(cmd_status)
+  printf "%s %s %s" "$(jq -r .ok <<<"$out")" \
+    "$(stat -c %s "$STATE_DIR/cloudflared-4449.log")" "$(wc -l < "$SIGNAL_LOG")"
+')
+is "status truncates an oversized provider log without treating it as ownership state" \
+  "$log_cap_result" "true 0 0"
 crowd=$(mktemp -d); for i in $(seq 1 600); do : > "$crowd/f$i"; done
 is "a state directory with too many entries dumps nothing" "$(state_dump "$crowd" | jq -c '.files|length')" "0"
 rm -rf "$crowd"
@@ -252,6 +275,13 @@ chmod 777 "$T/open"; chmod 1777 "$T/stuck"
 PATH="$T/open/bin:$PATH" resolve_bin fakeprov >/dev/null && bad "resolve_bin accepted a world-writable ancestor" || ok "resolve_bin rejects a world-writable ancestor"
 is "resolve_bin accepts a sticky ancestor" "$(PATH="$T/stuck/bin:$PATH" resolve_bin fakeprov)" "$T/stuck/bin/fakeprov"
 state launch "$STATE_DIR" open.log -- "$T/open/bin/fakeprov" >/dev/null 2>&1 && bad "launch ran a binary under a world-writable ancestor" || ok "launch refuses a binary under a world-writable ancestor"
+cp /usr/bin/true "$T/bin/execute-only"; chmod 111 "$T/bin/execute-only"
+execute_only=$(state launch "$STATE_DIR" execute-only.log -- "$T/bin/execute-only" 2>/dev/null); execute_only_rc=$?
+if (( execute_only_rc == 0 )) && [[ $execute_only =~ ^[1-9][0-9]*\ [1-9][0-9]*$ ]] && (( ${execute_only%% *} > 1 )); then
+  ok "launch binds an execute-only ELF"
+else
+  bad "launch refused an execute-only ELF: rc=$execute_only_rc out=$execute_only"
+fi
 
 # launch: a session of its own, a private log, pid bound to start time.
 out=$(state launch "$STATE_DIR" launch-test.log -- /usr/bin/sleep 20); lpid=${out%% *}; lstart=${out#* }
@@ -687,10 +717,27 @@ if command -v certutil >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; th
   # A certificate that replaced Portal's under the same name is not deleted.
   V=$(mktemp -d); mkdir -p "$V/nss"; certutil -d "sql:$V/nss" -N --empty-password >/dev/null 2>&1
   PORTAL_METRICS_DIR=$V PORTLESS_STATE_DIR=$U/portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$V"'/nss"' >/dev/null
+  valid_ledger=$(cat "$V/trusted-stores")
+  printf '%s\t%s\n' "$V/nss" NOT-A-FINGERPRINT > "$V/trusted-stores"
+  out=$(PORTAL_METRICS_DIR=$V "$S/portless-setup.sh" untrust)
+  malformed_state=$(certutil -d "sql:$V/nss" -L -n "portless Local CA" >/dev/null 2>&1 && echo cert-kept || echo cert-lost)
+  is "untrust refuses a malformed trust fingerprint before changing the store" \
+    "$(jq -r .ok <<<"$out") $malformed_state $(test -e "$V/trusted-stores" && echo ledger-kept || echo ledger-lost)" \
+    "false cert-kept ledger-kept"
+  printf '%s\n' "$valid_ledger" > "$V/trusted-stores"
   # replace the cert under the same nickname with a different self-signed CA
   openssl req -x509 -newkey rsa:2048 -nodes -keyout "$V/k.pem" -out "$V/other.pem" -days 1 -subj "/CN=portless Local CA" >/dev/null 2>&1
   certutil -d "sql:$V/nss" -D -n "portless Local CA" >/dev/null 2>&1
   certutil -d "sql:$V/nss" -A -t "C,," -n "portless Local CA" -i "$V/other.pem" >/dev/null 2>&1
+  printf '%s\n' "$V/nss" > "$V/trusted-stores"
+  out=$(PORTAL_METRICS_DIR=$V "$S/portless-setup.sh" untrust)
+  missing_state=$(certutil -d "sql:$V/nss" -L -n "portless Local CA" >/dev/null 2>&1 && echo cert-kept || echo cert-lost)
+  is "untrust refuses a missing trust fingerprint before changing the store" \
+    "$(jq -r .ok <<<"$out") $missing_state $(test -e "$V/trusted-stores" && echo ledger-kept || echo ledger-lost)" \
+    "false cert-kept ledger-kept"
+  certutil -d "sql:$V/nss" -D -n "portless Local CA" >/dev/null 2>&1 || true
+  certutil -d "sql:$V/nss" -A -t "C,," -n "portless Local CA" -i "$V/other.pem" >/dev/null 2>&1
+  printf '%s\n' "$valid_ledger" > "$V/trusted-stores"
   out=$(PORTAL_METRICS_DIR=$V "$S/portless-setup.sh" untrust)
   is "untrust reports success when the recorded cert is gone" "$(jq -c .ok <<<"$out")" "true"
   certutil -d "sql:$V/nss" -L -n "portless Local CA" >/dev/null 2>&1 && ok "and leaves a replacement cert under the same name in place" || bad "untrust deleted a cert Portal did not import"
@@ -701,6 +748,13 @@ if command -v certutil >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; th
   certutil -d "sql:$W/nss" -N --empty-password >/dev/null 2>&1
   certutil -d "sql:$W/nss2" -N --empty-password >/dev/null 2>&1
   PORTAL_METRICS_DIR=$W PORTLESS_STATE_DIR=$U/portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$W"'/nss"' >/dev/null
+  valid_ledger=$(cat "$W/trusted-stores")
+  printf '%s\t%s\n' "$W/nss" NOT-A-FINGERPRINT > "$W/trusted-stores"
+  PORTAL_METRICS_DIR=$W PORTLESS_STATE_DIR=$U/portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$W"'/nss2"' >/dev/null 2>&1; rc=$?
+  certutil -d "sql:$W/nss2" -L -n "portless Local CA" >/dev/null 2>&1 && malformed_import=trusted || malformed_import=clean
+  is "trust_store refuses a malformed ledger before importing" "$rc $malformed_import" "1 clean"
+  certutil -d "sql:$W/nss2" -D -n "portless Local CA" >/dev/null 2>&1 || true
+  printf '%s\n' "$valid_ledger" > "$W/trusted-stores"
   chmod 777 "$W/trusted-stores"
   PORTAL_METRICS_DIR=$W PORTLESS_STATE_DIR=$U/portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$W"'/nss2"' >/dev/null 2>&1 \
     && bad "trust_store imported over an unreadable ledger" || ok "trust_store refuses when the ledger cannot be read"

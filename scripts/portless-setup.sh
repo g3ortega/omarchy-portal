@@ -52,6 +52,17 @@ ca_load
 TRUSTED="$PORTAL_STATE_HOME/trusted-stores"
 TRUSTED_CAP=65536
 MAX_TRUSTED_STORES=512
+valid_trust_ledger() {
+  local record="$1" line store fp count=0
+  [[ -n $record ]] || return 1
+  while IFS= read -r line; do
+    [[ $line == *$'\t'* && ${line#*$'\t'} != *$'\t'* ]] || return 1
+    store=${line%%$'\t'*}; fp=${line#*$'\t'}
+    [[ $store == /* && $store != *[[:cntrl:]]* && $fp =~ ^[0-9A-F]{64}$ ]] || return 1
+    (( ++count <= MAX_TRUSTED_STORES )) || return 1
+  done <<<"$record"
+  return 0
+}
 # Import into one store and record it; a trust that could not be recorded is
 # undone at once, since removal would never find it. certutil sizes its input
 # with stat, so the verified bytes go through a file: one written by the state
@@ -70,6 +81,7 @@ write_trust_record() {  # <store> <fingerprint> <current ledger>
 drop_trust_record() {  # <store>
   local store="$1" current d fp rows=()
   current=$(cat_own "$TRUSTED" "$TRUSTED_CAP") || return 1
+  valid_trust_ledger "$current" || return 1
   while IFS=$'\t' read -r d fp; do
     [[ -n $d && $d != "$store" ]] && rows+=("$d"$'\t'"$fp")
   done <<<"$current"
@@ -85,6 +97,7 @@ trust_store() {  # <nss dir>
   # over it would replace every earlier record with this one entry.
   if [[ -e $TRUSTED || -L $TRUSTED ]]; then
     rec=$(cat_own "$TRUSTED" "$TRUSTED_CAP" 2>/dev/null) || return 1
+    valid_trust_ledger "$rec" || return 1
   fi
   { own_dir "$PORTAL_STATE_HOME" && printf '%s' "$CA_PEM" | state write "$pem"; } 2>/dev/null || return 1
   write_trust_record "$1" "$fp" "$rec" || { state_remove "$PORTAL_STATE_HOME" ca-import.pem; return 1; }
@@ -123,7 +136,7 @@ ca_is_portless() {
   return $rc
 }
 
-store_cert_state() {  # <nss dir> [expected fingerprint]: absent|matches|different|unreadable
+store_cert_state() {  # <nss dir> <expected fingerprint>: absent|matches|different|unreadable
   local listing pem fp
   have certutil || { echo unreadable; return; }
   listing=$(certutil -d "sql:$1" -L 2>/dev/null) || { echo unreadable; return; }
@@ -131,7 +144,7 @@ store_cert_state() {  # <nss dir> [expected fingerprint]: absent|matches|differe
   pem=$(certutil -d "sql:$1" -L -n "$NICK" -a 2>/dev/null) || { echo unreadable; return; }
   fp=$(ca_fingerprint <<<"$pem")
   [[ -n $fp ]] || { echo unreadable; return; }
-  [[ -z ${2:-} || $fp == "$2" ]] && echo matches || echo different
+  [[ $fp == "$2" ]] && echo matches || echo different
 }
 
 proxy_state() {  # echoes: ok | wrong-tld | odd-port | foreign | off
@@ -243,6 +256,8 @@ case "${1:-status}" in
     if [[ -e $TRUSTED || -L $TRUSTED ]]; then
       record=$(cat_own "$TRUSTED" "$TRUSTED_CAP") \
         || die "the record of the stores the CA was imported into could not be read"
+      valid_trust_ledger "$record" \
+        || die "the record of the stores the CA was imported into is malformed; no stores were changed"
     fi
     left=()
     while IFS=$'\t' read -r d fp; do

@@ -245,7 +245,7 @@ def open_exe(path):
         if swappable(os.fstat(fd)):
             raise Refused(f"refused {path}: its directory is not root's or yours alone")
         try:
-            efd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            efd = os.open(parts[-1], os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
         except OSError as e:
             raise Refused(f"refused {path}: {e.strerror}")
     finally:

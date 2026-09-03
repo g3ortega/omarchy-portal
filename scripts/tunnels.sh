@@ -806,7 +806,7 @@ cmd_status() {
   # listed cannot be cleaned up either, so the caller keeps its last snapshot.
   dump=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null) || die "could not list Portal's state"
   local refused idle_refused
-  refused=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.(pid|url|reach|dns|log|target)$|^portless-[0-9]+\\.(url|reach|name)$"))' <<<"$dump" 2>/dev/null)
+  refused=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.(pid|url|reach|dns|target)$|^portless-[0-9]+\\.(url|reach|name)$"))' <<<"$dump" 2>/dev/null)
   idle_refused=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.idle$"))' <<<"$dump" 2>/dev/null)
   [[ -z $refused ]] \
     || die "could not read Portal ownership state safely: $(tr '\n' ' ' <<<"$refused")"
