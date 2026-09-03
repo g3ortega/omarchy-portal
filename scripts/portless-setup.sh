@@ -78,7 +78,7 @@ drop_trust_record() {  # <store>
   fi
 }
 trust_store() {  # <nss dir>
-  local pem="$PORTAL_STATE_HOME/ca-import.pem" rc fp rec="" cert_state
+  local pem="$PORTAL_STATE_HOME/ca-import.pem" pemfd rc fp bound_fp rec="" cert_state
   fp=$(printf '%s' "$CA_PEM" | ca_fingerprint)
   [[ -n $fp ]] || return 1
   # A ledger that exists but cannot be read is not an empty one: importing
@@ -88,7 +88,15 @@ trust_store() {  # <nss dir>
   fi
   { own_dir "$PORTAL_STATE_HOME" && printf '%s' "$CA_PEM" | state write "$pem"; } 2>/dev/null || return 1
   write_trust_record "$1" "$fp" "$rec" || { state_remove "$PORTAL_STATE_HOME" ca-import.pem; return 1; }
-  certutil -d "sql:$1" -A -t "C,," -n "$NICK" -i "$pem" >/dev/null 2>&1; rc=$?
+  exec {pemfd}<"$pem" || { drop_trust_record "$1"; state_remove "$PORTAL_STATE_HOME" ca-import.pem; return 1; }
+  bound_fp=$(ca_fingerprint < "/proc/self/fd/$pemfd")
+  if [[ $bound_fp != "$fp" ]]; then
+    exec {pemfd}<&-
+    drop_trust_record "$1"; state_remove "$PORTAL_STATE_HOME" ca-import.pem
+    return 1
+  fi
+  certutil -d "sql:$1" -A -t "C,," -n "$NICK" -i "/proc/self/fd/$pemfd" >/dev/null 2>&1; rc=$?
+  exec {pemfd}<&-
   state_remove "$PORTAL_STATE_HOME" ca-import.pem || rc=1
   (( rc == 0 )) && return 0
   certutil -d "sql:$1" -D -n "$NICK" >/dev/null 2>&1

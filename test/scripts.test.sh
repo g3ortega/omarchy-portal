@@ -489,6 +489,26 @@ if command -v certutil >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; th
   PORTAL_METRICS_DIR=$U PORTLESS_STATE_DIR=$U/portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$U"'/nss"' && ok "trust_store imports the CA" || bad "trust_store failed"
   certutil -d "sql:$U/nss" -L -n "portless Local CA" >/dev/null 2>&1 && ok "and the CA is in the store" || bad "the CA is not in the store"
   is "and the store is on record with a fingerprint" "$(cut -f1 "$U/trusted-stores"); $(cut -f2 "$U/trusted-stores" | grep -qE '^[0-9A-F]{64}$' && echo fp-ok)" "$U/nss; fp-ok"
+  mkdir -p "$U/fd-import/nss"
+  PORTAL_METRICS_DIR=$U/fd-import PORTLESS_STATE_DIR=$U/portless FD_PROOF=$U/fd-proof bash -c '
+    set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1
+    certutil() {
+      local prev="" arg
+      for arg in "$@"; do
+        if [[ $prev == -i ]]; then
+          printf "%s" "$arg" > "$FD_PROOF.path"
+          cat "$arg" > "$FD_PROOF.pem"
+        fi
+        prev=$arg
+      done
+      return 0
+    }
+    trust_store "'"$U"'/fd-import/nss"
+  ' >/dev/null 2>&1
+  [[ $(cat "$U/fd-proof.path") =~ ^/proc/self/fd/[0-9]+$ ]] \
+    && ok "browser trust imports through a held descriptor" || bad "browser trust reopened a pathname"
+  printf '%s' "$(cat "$U/portless/ca.pem")" > "$U/validated-ca.pem"
+  cmp -s "$U/validated-ca.pem" "$U/fd-proof.pem" && ok "and certutil reads the validated CA bytes" || bad "certutil read different CA bytes"
   mkdir -p "$U/rollback/nss" "$U/rollback-bin"
   printf '#!/bin/sh\ncase " $* " in *" -L "*) exit 1;; *) exit 0;; esac\n' > "$U/rollback-bin/certutil"
   chmod 755 "$U/rollback-bin/certutil"
