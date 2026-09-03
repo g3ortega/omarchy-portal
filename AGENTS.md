@@ -27,6 +27,9 @@ bash test/test.sh          # full gate: syntax, manifest, 60 detect, 157+ shell,
                            # scan/setup/provider JSON, qmllint, glyphs
 bash test/scripts.test.sh  # shell suite alone
 bash test/e2e-live.sh      # 21 real servers; farm in tmp/ (gitignored)
+dev/portal.sh status|sync|reload [--hard]|restart-shell
+                           # local-install lifecycle: health, push/pull + parity
+                           # proof, settings-preserving reloads, fresh engine
 ```
 
 - `e2e-live.sh` runs an **unprivileged copy** of node (`cp` drops file
@@ -65,7 +68,7 @@ bash test/e2e-live.sh      # 21 real servers; farm in tmp/ (gitignored)
 - The running shell serves `~/.config/omarchy/plugins/g3ortega.portal`
   (a separate clone), NOT this workdir. Sync via commit → push → pull there,
   then prove parity:
-  `diff -r Work/omarchy-portal <install> --exclude=.git --exclude=tmp --exclude=__pycache__`
+  `diff -r Work/omarchy-portal <install> --exclude=.git --exclude=tmp --exclude=__pycache__ --exclude=dev`
 - File-watcher reloads are **unreliable for panel code**: same-URL components
   get reused and an already-created panel object is never rebuilt — a forced
   on-disk change with confirmed reload lines still rendered stale content.
