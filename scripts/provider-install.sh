@@ -8,13 +8,14 @@
 # signatures, install the distro package instead (sudo pacman -S cloudflared);
 # the setup surfaces that alternative rather than hiding it.
 #
-# The download lands in a private temp dir, must match its digest, must parse
-# as an ELF, and must execute `--version` before it is installed into
+# The download lands in a private temp dir, must match its digest, and must
+# parse as an ELF before it is installed into
 # ~/.local/bin through the same descriptor-relative path as every other file
 # Portal writes. Nothing runs elevated.
 set -o pipefail
+INSTALL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/files.sh
-source "$(dirname -- "${BASH_SOURCE[0]}")/lib/files.sh"
+source "$INSTALL_DIR/lib/files.sh"
 
 BIN_DIR="${PORTAL_BIN_DIR:-$HOME/.local/bin}"
 MARK="$PORTAL_STATE_HOME/installed-cloudflared"   # so removal knows the binary is Portal's to delete
@@ -44,6 +45,12 @@ install_cloudflared() {
     [[ -z $found || $found == "$HOME/.local/bin/cloudflared" ]] \
       || die "cloudflared at $found is not a trusted executable and shadows the install location; fix its permissions or remove it, then set up again"
   fi
+
+  local target="$BIN_DIR/cloudflared"
+  [[ ! -e $target && ! -L $target ]] \
+    || die "refusing to overwrite the existing $target"
+  [[ ! -e $MARK && ! -L $MARK ]] \
+    || die "the cloudflared install marker already exists; remove the prior Portal install first"
 
   local arch
   case "$(uname -m)" in
@@ -76,18 +83,27 @@ install_cloudflared() {
     || { exec {dl}<&-; die "downloaded file is not an ELF binary"; }
 
   own_dir "$BIN_DIR" || { exec {dl}<&-; die "$BIN_DIR is not a private directory of yours"; }
-  state write "$BIN_DIR/cloudflared" 755 < "/proc/self/fd/$dl" || { exec {dl}<&-; die "could not install into $BIN_DIR"; }
+  state create "$target" 755 < "/proc/self/fd/$dl" || { exec {dl}<&-; die "could not install into $BIN_DIR"; }
   exec {dl}<&-
   # Without the marker removal could not tell this copy from the user's own:
   # no marker, no install.
-  if ! { own_dir "${MARK%/*}" && write_own "$MARK" "$(jq -nc --arg p "$BIN_DIR/cloudflared" --arg s "$sum" '{path:$p, sha256:$s}')"; }; then
-    state_remove "$BIN_DIR" cloudflared
-    die "could not record the install under ${MARK%/*}"
+  if ! { own_dir "${MARK%/*}" && jq -nc --arg p "$target" --arg s "$sum" '{path:$p, sha256:$s}' | state create "$MARK"; }; then
+    state remove-digest "$BIN_DIR" cloudflared "$sum" 134217728 \
+      || die "could not record the install under ${MARK%/*}; the installed path changed before digest-bound rollback"
+    die "could not record the install under ${MARK%/*}; the installed copy was removed again"
   fi
 
+  rm -rf -- "$tmp" || die "could not remove the private download directory $tmp"
+  trap - EXIT
   jq -nc --arg v "$CLOUDFLARED_VERSION" --arg p "$BIN_DIR/cloudflared" \
     '{ok:true, version:$v, path:$p, note:"official Cloudflare release, checksum-pinned; prefer sudo pacman -S cloudflared for repo signatures"}'
 }
+
+case "${1:-}" in
+  cloudflared)
+    lifecycle_mutation nowait /usr/bin/bash "$INSTALL_DIR/provider-install.sh" "$@"
+    ;;
+esac
 
 case "${1:-}" in
   cloudflared) install_cloudflared ;;

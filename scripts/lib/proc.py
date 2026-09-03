@@ -7,13 +7,17 @@
       (seconds), the whole process group is ended (TERM, then KILL five
       seconds later) and nothing is passed on: exit 125 for overflow, 124 for
       the deadline, so a reader never parses a document that was cut short.
-      Otherwise the child's output and its own exit status are returned.
+      TERM, INT, or HUP sent to this wrapper ends and reaps the group before
+      returning 128 plus that signal. Otherwise the child's output and its
+      own exit status are returned.
   signal <pid> <starttime> <SIG>
       Signal the process that is <pid> and started at <starttime> (kernel
       ticks, field 22 of /proc/<pid>/stat) through a pidfd, so a pid reused
       since the process was listed is never signaled. Exit 1 when refused.
   check <pid> <starttime>
       Exit 0 while that process exists, 1 otherwise.
+  end <pid> <starttime>
+      End and reap the process's session after validating its identity.
 
 Runs as python3 -I -S: no environment or working directory redirects it.
 """
@@ -41,7 +45,8 @@ def starttime(pid):
 def parse_pid(a, b):
     if not re.fullmatch(r"[1-9][0-9]*", a) or not re.fullmatch(r"[0-9]+", b):
         return None, None
-    return int(a), b
+    pid = int(a)
+    return (pid, b) if pid > 1 else (None, None)
 
 
 def cmd_check(a):
@@ -76,6 +81,14 @@ def cmd_signal(a):
         return 0
     finally:
         os.close(pidfd)
+
+
+def cmd_end(a):
+    pid, start = parse_pid(a[0], a[1])
+    if not pid or starttime(pid) != start:
+        return 1
+    end_group(pid)
+    return 0 if starttime(pid) != start else 1
 
 
 def end_group(pid):
@@ -132,9 +145,35 @@ def cmd_run(a):
         return 2
     out_r, out_w = os.pipe()
     err_r, err_w = os.pipe()
-    pid = os.fork()
+    watched = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, watched)
+    forwarded = [None]
+
+    class ForwardedSignal(Exception):
+        pass
+
+    def forward(signum, _frame):
+        if forwarded[0] is None:
+            forwarded[0] = signum
+            raise ForwardedSignal
+
+    old_handlers = {}
+    try:
+        for sig in watched:
+            old_handlers[sig] = signal.signal(sig, forward)
+        pid = os.fork()
+    except BaseException:
+        for sig, handler in old_handlers.items():
+            signal.signal(sig, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        for fd in (out_r, out_w, err_r, err_w):
+            os.close(fd)
+        raise
     if pid == 0:
         try:
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
             os.setsid()
             os.dup2(out_w, 1)
             os.dup2(err_w, 2)
@@ -149,56 +188,96 @@ def cmd_run(a):
     sel = selectors.DefaultSelector()
     sel.register(out_r, selectors.EVENT_READ, out)
     sel.register(err_r, selectors.EVENT_READ, err)
+    open_reads = {out_r, err_r}
     limit = time.monotonic() + deadline
     status = None
-    while sel.get_map():
-        left = limit - time.monotonic()
-        if left <= 0:
-            status = 124
-            break
-        for key, _ in sel.select(timeout=left):
-            chunk = os.read(key.fd, 65536)
-            if not chunk:
-                sel.unregister(key.fd)
-                os.close(key.fd)
-                continue
-            key.data.extend(chunk)
-            if key.data is out and len(out) > cap:
-                status = 125
+    reaped = False
+
+    def close_reads():
+        for fd in tuple(open_reads):
+            try:
+                sel.unregister(fd)
+            except (KeyError, ValueError):
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            open_reads.discard(fd)
+        sel.close()
+
+    try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        while sel.get_map():
+            left = limit - time.monotonic()
+            if left <= 0:
+                status = 124
                 break
-            if key.data is err and len(err) > STDERR_CAP:
-                del err[STDERR_CAP:]
+            for key, _ in sel.select(timeout=left):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    sel.unregister(key.fd)
+                    os.close(key.fd)
+                    open_reads.discard(key.fd)
+                    continue
+                key.data.extend(chunk)
+                if key.data is out and len(out) > cap:
+                    status = 125
+                    break
+                if key.data is err and len(err) > STDERR_CAP:
+                    del err[STDERR_CAP:]
+            if status is not None:
+                break
         if status is not None:
-            break
-    if status is not None:
-        end_group(pid)
-        sys.stderr.buffer.write(err[:STDERR_CAP])
-        sys.stderr.buffer.write(b"\nproc: output past the cap\n" if status == 125 else b"\nproc: past the deadline\n")
-        return status
-    # Both pipes reached EOF: the helper is done or has handed its descriptors
-    # on. Wait for it, but not past the deadline: a lingering grandchild does
-    # not hold the caller.
-    while True:
-        try:
-            done, code = os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            done, code = pid, 0
-        if done:
-            break
-        if time.monotonic() > limit:
+            close_reads()
             end_group(pid)
-            code = 124 << 8
-            break
-        time.sleep(0.02)
-    sys.stdout.buffer.write(out)
-    sys.stdout.buffer.flush()
-    sys.stderr.buffer.write(err[:STDERR_CAP])
-    if os.WIFSIGNALED(code):
-        return 128 + os.WTERMSIG(code)
-    return os.WEXITSTATUS(code)
+            reaped = True
+            sys.stderr.buffer.write(err[:STDERR_CAP])
+            sys.stderr.buffer.write(b"\nproc: output past the cap\n" if status == 125 else b"\nproc: past the deadline\n")
+            return status
+        # Both pipes reached EOF: the helper is done or has handed its descriptors
+        # on. Wait for it, but not past the deadline: a lingering grandchild does
+        # not hold the caller.
+        while True:
+            try:
+                done, code = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                done, code = pid, 0
+            if done:
+                reaped = True
+                break
+            if time.monotonic() > limit:
+                close_reads()
+                end_group(pid)
+                reaped = True
+                code = 124 << 8
+                break
+            time.sleep(0.02)
+        sys.stdout.buffer.write(out)
+        sys.stdout.buffer.flush()
+        sys.stderr.buffer.write(err[:STDERR_CAP])
+        if os.WIFSIGNALED(code):
+            return 128 + os.WTERMSIG(code)
+        return os.WEXITSTATUS(code)
+    except ForwardedSignal:
+        close_reads()
+        if not reaped:
+            end_group(pid)
+            reaped = True
+        return 128 + forwarded[0]
+    except BaseException:
+        close_reads()
+        if not reaped:
+            end_group(pid)
+        raise
+    finally:
+        signal.pthread_sigmask(signal.SIG_BLOCK, watched)
+        for sig, handler in old_handlers.items():
+            signal.signal(sig, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
 
 
-COMMANDS = {"run": (cmd_run, 3), "signal": (cmd_signal, 3), "check": (cmd_check, 2)}
+COMMANDS = {"run": (cmd_run, 3), "signal": (cmd_signal, 3), "check": (cmd_check, 2), "end": (cmd_end, 2)}
 
 
 def main(argv):

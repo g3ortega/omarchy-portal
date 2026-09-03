@@ -19,10 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: System dependencies
+      - name: System dependencies, including certutil and OpenSSL
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qt6-declarative-dev-tools
+          sudo apt-get install -y --no-install-recommends \
+            libnss3-tools openssl qt6-declarative-dev-tools
 
       # The manifest validator and the qs.Ui / qs.Commons QML modules both live
       # in the Omarchy tree; test/test.sh consumes them via OMARCHY_PATH.
@@ -53,8 +54,8 @@ jobs:
           FONT: ${{ runner.temp }}/font/JetBrainsMonoNerdFont-Regular.ttf
         run: test/test.sh
 
-      # A real farm of listening processes carrying each stack's evidence
-      # profile, driven through the whole pipeline. Runtimes absent on the
-      # runner (deno) skip their fixtures; the shell IPC stage self-skips.
+      # Listener fixtures carry each stack's evidence through the full pipeline.
+      # Missing Ruby or Deno runtimes skip those fixtures. Local IPC runs only
+      # when the installed plugin matches the checkout.
       - name: Live end-to-end farm
         run: test/e2e-live.sh

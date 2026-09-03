@@ -29,7 +29,14 @@ SETUP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SETUP_DIR/lib/portless.sh"
 
 have() { command -v "$1" >/dev/null 2>&1; }
+die() { jq -nc --arg e "$1" '{ok:false,error:$e}'; exit 0; }
 have jq || { echo '{"ok":false,"error":"jq not found"}'; exit 0; }
+
+case "${1:-status}" in
+  run|untrust)
+    lifecycle_mutation nowait /usr/bin/bash "$SETUP_DIR/portless-setup.sh" "$@"
+    ;;
+esac
 
 # The file at $CA is trusted browser-wide, so it must be what portless mints:
 # a self-signed root whose subject is its own nickname. Anything else in that
@@ -51,8 +58,27 @@ MAX_TRUSTED_STORES=512
 # helper inside Portal's own directory, where nothing else can swap it.
 # The SHA-256 fingerprint of a PEM certificate, uppercase hex, no colons.
 ca_fingerprint() { openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g'; }
+write_trust_record() {  # <store> <fingerprint> <current ledger>
+  local store="$1" fp="$2" current="$3" d oldfp rows=()
+  while IFS=$'\t' read -r d oldfp; do
+    [[ -n $d && $d != "$store" ]] && rows+=("$d"$'\t'"$oldfp")
+  done <<<"$current"
+  (( ${#rows[@]} < MAX_TRUSTED_STORES )) || return 1
+  rows+=("$store"$'\t'"$fp")
+  printf '%s\n' "${rows[@]}" | state write "$TRUSTED"
+}
+drop_trust_record() {  # <store>
+  local store="$1" current d fp rows=()
+  current=$(cat_own "$TRUSTED" "$TRUSTED_CAP") || return 1
+  while IFS=$'\t' read -r d fp; do
+    [[ -n $d && $d != "$store" ]] && rows+=("$d"$'\t'"$fp")
+  done <<<"$current"
+  if (( ${#rows[@]} )); then printf '%s\n' "${rows[@]}" | state write "$TRUSTED"
+  else state_remove "$PORTAL_STATE_HOME" trusted-stores
+  fi
+}
 trust_store() {  # <nss dir>
-  local pem="$PORTAL_STATE_HOME/ca-import.pem" rc fp count rec=""
+  local pem="$PORTAL_STATE_HOME/ca-import.pem" rc fp rec="" cert_state
   fp=$(printf '%s' "$CA_PEM" | ca_fingerprint)
   [[ -n $fp ]] || return 1
   # A ledger that exists but cannot be read is not an empty one: importing
@@ -60,16 +86,14 @@ trust_store() {  # <nss dir>
   if [[ -e $TRUSTED || -L $TRUSTED ]]; then
     rec=$(cat_own "$TRUSTED" "$TRUSTED_CAP" 2>/dev/null) || return 1
   fi
-  count=$(grep -c $'[^\t]' <<<"$rec")
-  (( count < MAX_TRUSTED_STORES )) || return 1
   { own_dir "$PORTAL_STATE_HOME" && printf '%s' "$CA_PEM" | state write "$pem"; } 2>/dev/null || return 1
+  write_trust_record "$1" "$fp" "$rec" || { state_remove "$PORTAL_STATE_HOME" ca-import.pem; return 1; }
   certutil -d "sql:$1" -A -t "C,," -n "$NICK" -i "$pem" >/dev/null 2>&1; rc=$?
-  state_remove "$PORTAL_STATE_HOME" ca-import.pem
-  (( rc == 0 )) || return 1
-  # Record the store with the fingerprint of what was imported, so removal can
-  # tell Portal's certificate from one the user imported under the same name.
-  printf '%s\t%s\n' "$1" "$fp" | state_append "$TRUSTED" "$MAX_TRUSTED_STORES" "$TRUSTED_CAP" && return 0
+  state_remove "$PORTAL_STATE_HOME" ca-import.pem || rc=1
+  (( rc == 0 )) && return 0
   certutil -d "sql:$1" -D -n "$NICK" >/dev/null 2>&1
+  cert_state=$(store_cert_state "$1" "$fp")
+  case $cert_state in absent|different) drop_trust_record "$1" || true ;; esac
   return 1
 }
 ca_is_portless() {
@@ -89,6 +113,17 @@ ca_is_portless() {
   openssl verify -CAfile <(printf '%s' "$CA_PEM") "$leaf" >/dev/null 2>&1; local rc=$?
   rm -f -- "$leaf"
   return $rc
+}
+
+store_cert_state() {  # <nss dir> [expected fingerprint]: absent|matches|different|unreadable
+  local listing pem fp
+  have certutil || { echo unreadable; return; }
+  listing=$(certutil -d "sql:$1" -L 2>/dev/null) || { echo unreadable; return; }
+  grep -qF "$NICK" <<<"$listing" || { echo absent; return; }
+  pem=$(certutil -d "sql:$1" -L -n "$NICK" -a 2>/dev/null) || { echo unreadable; return; }
+  fp=$(ca_fingerprint <<<"$pem")
+  [[ -n $fp ]] || { echo unreadable; return; }
+  [[ -z ${2:-} || $fp == "$2" ]] && echo matches || echo different
 }
 
 proxy_state() {  # echoes: ok | wrong-tld | odd-port | foreign | off
@@ -147,16 +182,20 @@ report() {
                  remaining:$ARGS.positional}' "${remaining[@]}"
 }
 
-portless_state_load
 case "${1:-status}" in
-  status) report ;;
+  status)
+    portless_state_load || die "could not read Portless state safely: ${PORTLESS_STATE_ERROR:-unknown error}"
+    report
+    ;;
   run)
+    portless_state_load || die "could not read Portless state safely: ${PORTLESS_STATE_ERROR:-unknown error}"
     # A proxy missing the configured TLD is restarted only when that is
     # unprivileged (ours, on a high port); the 443 case stays in `remaining`
     # as a copyable command.
     PORTLESS=$(resolve_bin portless)
     if [[ -n $PORTLESS ]] && [[ $(proxy_state) == wrong-tld ]]; then
-      portless_clean_port || "$PORTLESS" proxy stop >/dev/null 2>&1
+      portless_clean_port || "$PORTLESS" proxy stop >/dev/null 2>&1 \
+        || die "could not stop the Portless proxy before restarting it"
       portless_probe_reset
     fi
     # Proxy-start is an unprivileged rung like any other: when portless is
@@ -164,16 +203,24 @@ case "${1:-status}" in
     # immediately; the report keeps carrying the 443 upgrade.
     if [[ -n $PORTLESS ]] && [[ $(proxy_state) == off ]]; then
       "$PORTLESS" proxy start -p "${PORTAL_PORTLESS_PORT:-1355}" \
-        --tld "$(portless_tld_arg)" >/dev/null 2>&1
+        --tld "$(portless_tld_arg)" >/dev/null 2>&1 \
+        || die "could not start the Portless proxy"
       sleep 1
-      portless_state_load; portless_probe_reset; ca_load   # the proxy just wrote its port and minted the CA
+      portless_state_load || die "Portless started, but its state could not be read safely"
+      portless_probe_reset
+      ca_load   # the proxy just wrote its port and minted the CA
+      [[ $(proxy_state) != off ]] || die "Portless reported success but its proxy is not reachable"
     fi
     if ca_is_portless && have certutil; then
       if [[ ! -d $NSSDB ]]; then
-        own_dir "$NSSDB" && certutil -d "sql:$NSSDB" -N --empty-password >/dev/null 2>&1
+        own_dir "$NSSDB" || die "could not create the browser trust store"
+        certutil -d "sql:$NSSDB" -N --empty-password >/dev/null 2>&1 \
+          || die "could not initialize the browser trust store"
       fi
-      nss_trusted || trust_store "$NSSDB"
-      firefox_untrusted | while read -r d; do trust_store "$d"; done
+      nss_trusted || trust_store "$NSSDB" || die "could not trust the Portless CA in $NSSDB"
+      while read -r d; do
+        trust_store "$d" || die "could not trust the Portless CA in $d"
+      done < <(firefox_untrusted)
     fi
     report
     ;;
@@ -187,27 +234,31 @@ case "${1:-status}" in
     record=""
     if [[ -e $TRUSTED || -L $TRUSTED ]]; then
       record=$(cat_own "$TRUSTED" "$TRUSTED_CAP") \
-        || { echo '{"ok":false,"error":"the record of the stores the CA was imported into could not be read"}'; exit 0; }
+        || die "the record of the stores the CA was imported into could not be read"
     fi
     left=()
     while IFS=$'\t' read -r d fp; do
       [[ -n $d && -d $d ]] || continue          # a store that is gone holds nothing
-      have certutil || { left+=("$d	$fp"); continue; }
-      # If a fingerprint was recorded, only remove a certificate that still
-      # matches it: a CA rotated and re-imported by the user under the same
-      # name is not Portal's to delete.
-      if [[ -n $fp ]]; then
-        cur=$(certutil -d "sql:$d" -L -n "$NICK" -a 2>/dev/null | ca_fingerprint)
-        [[ -n $cur && $cur != "$fp" ]] && continue   # a different certificate now holds the name: leave it, and drop our record of it
-      fi
-      certutil -d "sql:$d" -D -n "$NICK" >/dev/null 2>&1
-      certutil -d "sql:$d" -L -n "$NICK" >/dev/null 2>&1 && left+=("$d	$fp")
+      cert_state=$(store_cert_state "$d" "$fp")
+      case $cert_state in
+        absent|different) continue ;;
+        unreadable) left+=("$d	$fp"); continue ;;
+        matches) ;;
+      esac
+      certutil -d "sql:$d" -D -n "$NICK" >/dev/null 2>&1 || true
+      cert_state=$(store_cert_state "$d" "$fp")
+      case $cert_state in
+        absent|different) ;;
+        *) left+=("$d	$fp") ;;
+      esac
     done <<<"$record"
     if (( ${#left[@]} )); then
-      printf '%s\n' "${left[@]}" | state write "$TRUSTED"
+      printf '%s\n' "${left[@]}" | state write "$TRUSTED" \
+        || die "the remaining browser trust records could not be saved"
       jq -nc --args '{ok:false, error:"the CA is still trusted in some stores", remaining:$ARGS.positional}' "${left[@]%%$'\t'*}"
     else
-      state_remove "${TRUSTED%/*}" "${TRUSTED##*/}"
+      state_remove "${TRUSTED%/*}" "${TRUSTED##*/}" \
+        || die "the browser trust ledger could not be cleared"
       echo '{"ok":true}'
     fi
     ;;

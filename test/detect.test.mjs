@@ -264,14 +264,16 @@ check("a wildcard bind still opens localhost", e({
   const svc = (o) => ({
     routeFor: () => o.route || null, publicTunnelFor: () => o.tunnel || null,
     stats: o.stats || {}, urlFor: () => o.url === undefined ? "http://localhost:1" : o.url,
-    canRestart: (e) => !!(e.pid && e.argv.length && !e.argvTruncated)
+    validProcessIdentity: (p) => !!(p && p.pid > 1 && Number(p.start) > 0),
+    canRestart: (e) => !!(e.process && e.argv.length && !e.argvTruncated)
   })
   const ids = (vs) => vs.map((v) => v.id)
-  const dev = { port: 3000, pid: 10, category: "dev", url: "http://localhost:3000", argv: ["node"], argvTruncated: false }
+  const dev = { port: 3000, pid: 10, start: 20, process: { pid: 10, start: "20" }, category: "dev", url: "http://localhost:3000", argv: ["node"], argvTruncated: false }
   eq("a dev server offers every verb", ids(verbsFor(svc({}), true, -1, "", dev)), ["name", "share", "pause", "restart", "stop"])
   eq("a service is not restartable", ids(verbsFor(svc({}), true, -1, "", { ...dev, category: "service" })), ["name", "share", "pause", "stop"])
   eq("a system port gets no verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, category: "system" })), [])
-  eq("no pid means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, pid: null })), ["name", "share"])
+  eq("no pid means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, pid: null, process: null })), ["name"])
+  eq("no start means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, start: null, process: null })), ["name"])
   eq("no proxy and no name means no name verb", ids(verbsFor(svc({}), false, -1, "", dev)), ["share", "pause", "restart", "stop"])
   eq("an existing name can be renamed without the proxy", verbsFor(svc({ route: {} }), false, -1, "", dev)[0].label, "rename")
   eq("a truncated command line cannot be restarted", ids(verbsFor(svc({}), true, -1, "", { ...dev, argvTruncated: true })), ["name", "share", "pause", "stop"])
@@ -279,6 +281,51 @@ check("a wildcard bind still opens localhost", e({
   eq("a shared port offers to stop sharing, urgently", verbsFor(svc({ tunnel: { url: "x" } }), true, -1, "", dev)[1], { id: "share", label: "stop sharing", on: false, urgent: true })
   eq("the open section's verb is marked on", verbsFor(svc({}), true, 3000, "naming", dev)[0].on, true)
   eq("no URL means no share verb", ids(verbsFor(svc({ url: "" }), true, -1, "", dev)), ["name", "pause", "restart", "stop"])
+
+  const stillListed = fn(panelSrc, "stillListed", ["service", "entryForPort", "entry"])
+  const current = { ...dev, name: "app", cwd: "/tmp/app" }
+  const processService = { sameProcess: (a, b) => !!(a && b && a.pid === b.pid && a.start === b.start) }
+  eq("an exact process keeps its confirmation", stillListed(processService, () => current, current), true)
+  eq("a replacement process cancels its confirmation", stillListed(processService, () => ({ ...current, pid: 11, start: 21, process: { pid: 11, start: "21" } }), current), false)
+  eq("two unattributed rows do not retain public consent", stillListed(processService, () => ({ ...current, pid: null, start: null, process: null }), { ...current, pid: null, start: null, process: null }), false)
+
+  const validProcessIdentity = fn(serviceSrc, "validProcessIdentity", ["process"])
+  eq("pid and start make a process identity", validProcessIdentity({ pid: 2, start: "1" }), true)
+  eq("pid 1 is not a process identity", validProcessIdentity({ pid: 1, start: "1" }), false)
+  eq("start zero is not a process identity", validProcessIdentity({ pid: 2, start: "0" }), false)
+  if (!serviceSrc.includes('property string scanError: ""') || !serviceSrc.includes('property string tunnelError: ""'))
+    bad.push("scan and tunnel errors do not have independent state")
+  const lifecycleBody = serviceSrc.match(/function _runLifecycle\([^)]*\) \{([\s\S]*?)\n  \}/)?.[1] ?? ""
+  if (!lifecycleBody.includes("_queueAction") || lifecycleBody.includes("_expectGone"))
+    bad.push("lifecycle disappearance is not delegated to the queued launch")
+  const launchCheck = serviceSrc.indexOf("if (!started)")
+  const expectGone = serviceSrc.indexOf("_expectGone(root.activeAction.target)")
+  if (launchCheck === -1 || expectGone < launchCheck)
+    bad.push("lifecycle disappearance is marked before the helper launches")
+  if (!serviceSrc.includes("_forgetGone(action.target)"))
+    bad.push("failed lifecycle actions do not clear disappearance state")
+
+  const scanKeyFields = serviceSrc.match(/identity\.push\(\[([\s\S]*?)\]\)/)?.[1] ?? ""
+  for (const field of ["e.start", "e.argv", "e.argvTruncated"])
+    if (!scanKeyFields.includes(field)) bad.push(`scan identity omits ${field}`)
+  const tunnelCap = Number(serviceSrc.match(/outputCaps:[^\n]*poll:\s*([0-9]+)/)?.[1] ?? 0)
+  if (tunnelCap < 8 * 1024 * 1024) bad.push(`tunnel poll cap is only ${tunnelCap} bytes`)
+
+  const state = { feedback: null }, timer = { restarted: 0, stopped: 0,
+    restart() { this.restarted++ }, stop() { this.stopped++ } }
+  const feedbackFn = (name, params) => {
+    const body = panelSrc.match(new RegExp("\\n  function " + name + "\\([^)]*\\) \\{\\n([\\s\\S]*?)\\n  \\}\\n"))?.[1]
+    if (!body) throw new Error(`no function ${name}`)
+    return new Function("state", "feedbackTimer", ...params, body.replace(/\bfeedback\s*=/g, "state.feedback ="))
+  }
+  const showMoment = feedbackFn("showMoment", ["message", "error"])
+  const showGuidance = feedbackFn("showGuidance", ["message", "command"])
+  showGuidance(state, timer, "run this", "sudo true")
+  eq("copy guidance carries one command", state.feedback, { kind: "copy", text: "run this", error: false, command: "sudo true" })
+  showMoment(state, timer, "copied", false)
+  eq("a moment replaces copy guidance", state.feedback, { kind: "moment", text: "copied", error: false })
+  showMoment(state, timer, "failed", true)
+  eq("an action failure stays urgent", state.feedback, { kind: "moment", text: "failed", error: true })
 
   const probeList = fn(serviceSrc, "probeList", ["ports", "watchedPorts", "focusPort"])
   const p = (n, cat, web) => ({ port: n, category: cat, web: web })

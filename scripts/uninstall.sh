@@ -19,14 +19,17 @@ case "${1:-}" in
 esac
 run() { if (( DRY )); then echo "would: $*"; else "$@"; fi; }
 
-echo "the plugin, so nothing polls while state is removed"
-if (( ! DRY )) && command -v flock >/dev/null 2>&1; then
-  # Serialize uninstall against concurrent tunnel starts so no new share can
-  # write state while removal stops resources and deletes state files.
-  own_dir "$PORTAL_RUNTIME_DIR" 2>/dev/null
-  { exec 9>"$PORTAL_RUNTIME_DIR/.lifecycle.lock"; } 2>/dev/null
-  flock -x 9 2>/dev/null
+if (( ! DRY )); then
+  lifecycle_mutation nowait /usr/bin/bash "$HERE/uninstall.sh" "$@"
+  if [[ ${PORTAL_METRICS_LOCKED:-} != "$PORTAL_STATE_HOME" ]]; then
+    own_dir "$PORTAL_STATE_HOME" || { echo "could not open Portal state; nothing was removed" >&2; exit 1; }
+    PORTAL_METRICS_LOCKED="$PORTAL_STATE_HOME" state lock "$PORTAL_STATE_HOME" nowait .metrics.lock -- \
+      /usr/bin/bash "$HERE/uninstall.sh" "$@"
+    exit $?
+  fi
 fi
+
+echo "the plugin, so nothing polls while state is removed"
 if command -v omarchy >/dev/null 2>&1; then
   # An unreadable plugin state is not "disabled": a service still polling
   # would recreate what is removed below.
@@ -48,7 +51,7 @@ echo "browser trust Portal added for the Portless CA"
 if (( DRY )); then run "$HERE/portless-setup.sh" untrust
 else
   out=$("$HERE/portless-setup.sh" untrust)
-  jq -e .ok <<<"$out" >/dev/null || { echo "$(jq -r '.error + ": " + (.remaining | join(", "))' <<<"$out"); the record is kept; nothing else was removed" >&2; exit 1; }
+  jq -e .ok <<<"$out" >/dev/null || { echo "$(jq -r '.error + (if (.remaining // []) | length > 0 then ": " + (.remaining | join(", ")) else "" end)' <<<"$out"); the record is kept; nothing else was removed" >&2; exit 1; }
 fi
 
 echo "cloudflared, if it is still the copy Portal installed"
@@ -61,37 +64,46 @@ if [[ -e $MARKER || -L $MARKER ]]; then
   mark=$(cat_own "$MARKER" 4096) || { echo "the cloudflared install marker cannot be read; nothing was removed" >&2; exit 1; }
   path=$(jq -r '.path // empty' <<<"$mark" 2>/dev/null)
   sum=$(jq -r '.sha256 // empty' <<<"$mark" 2>/dev/null)
-  [[ -n $path && -n $sum ]] || { echo "the cloudflared install marker is malformed; nothing was removed" >&2; exit 1; }
+  [[ -n $path && $sum =~ ^[0-9a-f]{64}$ ]] || { echo "the cloudflared install marker is malformed; nothing was removed" >&2; exit 1; }
   # Only the one path Portal installs to is ever a delete candidate, and the
   # digest is taken from the bytes the state helper binds, not from a pathname.
   # The marker is removed only together with the binary; a binary that is gone,
   # changed, or not at our path leaves the record in place for a retry.
-  if [[ $path == "$EXPECT_BIN" && ( -e $path || -L $path ) ]]; then
-    own_file "$path" 134217728 || { echo "could not read $path safely; its marker is kept; nothing else was removed" >&2; exit 1; }
-    if [[ $(cat_own "$path" 134217728 | sha256sum | cut -d' ' -f1) == "$sum" ]]; then
-      run state_remove "${path%/*}" "${path##*/}" || { echo "could not remove $path; its marker is kept; nothing else was removed" >&2; exit 1; }
-      run state_remove "$PORTAL_STATE_HOME" installed-cloudflared
-    fi
-  fi
+  [[ $path == "$EXPECT_BIN" ]] || { echo "the cloudflared install marker names an unexpected path; nothing was removed" >&2; exit 1; }
+  run state remove-digest "${path%/*}" "${path##*/}" "$sum" 134217728 \
+    || { echo "could not remove the exact Portal-installed bytes at $path; its marker is kept; nothing else was removed" >&2; exit 1; }
+  run state_remove "$PORTAL_STATE_HOME" installed-cloudflared \
+    || { echo "cloudflared was removed, but its install marker could not be cleared; nothing else was removed" >&2; exit 1; }
 fi
 
 echo "Portal state"
 # Only entries Portal writes, by name, then the directory if that emptied it:
 # a state root pointed at a directory holding other things keeps them.
-remove_known() {  # <dir> <name regex>
-  [[ -d $1 && ! -L $1 && -O $1 ]] || return 0
-  local names=()
-  mapfile -t names < <(find "$1" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | grep -E -- "$2")
-  (( ${#names[@]} )) && run state_remove "$1" "${names[@]}"
-  run rmdir --ignore-fail-on-non-empty -- "$1"
-  (( DRY )) || [[ ! -d $1 ]] || echo "left in place: $1 holds files that are not Portal's"
+remove_known() {  # <dir> <name regex> [retained lock]
+  local dir="$1" pattern="$2" retained="${3:-}"
+  [[ -d $dir && ! -L $dir && -O $dir ]] || return 0
+  local names=() remaining=()
+  mapfile -t names < <(find "$dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | grep -E -- "$pattern")
+  if (( ${#names[@]} )); then
+    run state_remove "$dir" "${names[@]}" || return 1
+  fi
+  if (( DRY )); then run rmdir --ignore-fail-on-non-empty -- "$dir"
+  else rmdir --ignore-fail-on-non-empty -- "$dir" 2>/dev/null || true
+  fi
+  if (( ! DRY )) && [[ -d $dir ]]; then
+    mapfile -t remaining < <(find "$dir" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null)
+    if [[ -n $retained && ${#remaining[@]} == 1 && ${remaining[0]} == "$retained" ]]; then return 0; fi
+    echo "left in place: $dir holds files that are not Portal's"
+  fi
 }
-remove_known "$PORTAL_RUNTIME_DIR" '^[a-z]+-[0-9]+\.(pid|url|reach|dns|idle|log|name)$|^\..*\.tmp$|^\.lifecycle\.lock$'
-remove_known "$PORTAL_STATE_HOME/metrics" '^[0-9]+\.jsonl$|^\..*\.tmp$'
-remove_known "$PORTAL_STATE_HOME" '^(trusted-stores|watched\.json)$|^\..*\.tmp$'   # the install marker is removed with its binary above
-# Released only after cleanup: a start that slips in earlier is refused by the
-# lock instead of having its fresh records deleted above.
-exec 9>&- 2>/dev/null || true
+runtime_leaf='((cloudflared|ngrok)-[0-9]{1,5}\.(pid|url|reach|dns|idle|log|target)|portless-[0-9]{1,5}\.(url|reach|name)|ngrok\.ok)'
+remove_known "$PORTAL_RUNTIME_DIR" "^${runtime_leaf}$|^\.${runtime_leaf}\.[0-9a-f]{16}\.tmp$" .lifecycle.lock \
+  || { echo "could not remove Portal runtime state" >&2; exit 1; }
+remove_known "$PORTAL_STATE_HOME/metrics" '^([0-9]{1,5}\.jsonl|\.[0-9]{1,5}\.jsonl\.[0-9a-f]{16}\.tmp)$' \
+  || { echo "could not remove Portal metrics" >&2; exit 1; }
+state_leaf='(trusted-stores|watched\.json|ca-import\.pem)'
+remove_known "$PORTAL_STATE_HOME" "^${state_leaf}$|^\.${state_leaf}\.[0-9a-f]{16}\.tmp$|^\.installed-cloudflared\.[0-9a-f]{16}\.tmp$" .metrics.lock \
+  || { echo "could not remove Portal state" >&2; exit 1; }
 
 echo
 echo "left in place: the portless package (npm uninstall -g portless), ~/.portless,"

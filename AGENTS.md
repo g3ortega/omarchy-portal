@@ -1,152 +1,145 @@
-# AGENTS.md — omarchy-portal contributor notes
+# omarchy-portal contributor rules
 
-Portal: an Omarchy bar plugin showing every listening TCP port, what runs on
-it, with local naming (Portless), public sharing (cloudflared/ngrok), charts,
-and pause/resume/restart/stop. QML UI + bash/python helpers.
+Portal is an Omarchy bar plugin for listening TCP ports. It provides Portless
+names, Cloudflared and ngrok sharing, charts, and process lifecycle actions.
+The UI is QML. Helpers are Bash and Python.
 
-## Layout
+## Code map
 
-- `Service.qml` — single source of truth: polling, IPC target, all actions.
-- `BarWidget.qml` — thin per-monitor widget, lazy panel loader.
+- `Service.qml` owns polling, IPC, and actions.
+- `BarWidget.qml` is the per-monitor widget and lazy panel loader.
 - `PortalPanel.qml`, `PortRow.qml`, `PortDetail.qml`, `SparkCard.qml`,
-  `LinkText.qml`, `TickerText.qml` — UI. `lib/*.js` — pure classify/format.
-- `scripts/portal` — CLI. `scripts/tunnels.sh` — providers + tunnel lifecycle.
-  `scripts/scan-ports.sh` — evidence gatherer. `scripts/lifecycle.sh`,
-  `scripts/metrics.sh`, `scripts/portless-setup.sh`,
-  `scripts/provider-install.sh`, `scripts/uninstall.sh`.
-- `scripts/lib/files.sh` — shell wrappers. `scripts/lib/statedir.py` —
-  descriptor-relative state (all reads/writes/launches go through it).
-  `scripts/lib/proc.py` — capped runs, pidfd-bound signals.
-- `test/test.sh` (full gate), `test/scripts.test.sh` (shell suite),
-  `test/detect.test.mjs`, `test/e2e-live.sh` (live farm).
+  `LinkText.qml`, and `TickerText.qml` make up the UI.
+- `lib/*.js` contains pure classification and formatting code.
+- `scripts/portal` is the CLI. `scripts/tunnels.sh`, `scripts/lifecycle.sh`,
+  `scripts/metrics.sh`, and the setup and uninstall scripts own effects.
+- `scripts/lib/files.sh` wraps shell state access. `scripts/lib/statedir.py`
+  owns descriptor-relative state and launches. `scripts/lib/proc.py` owns
+  capped runs, process identity checks, and pidfd leader signals.
 
-## Test commands
+## Commands
 
 ```sh
-bash test/test.sh          # full gate: syntax, manifest, 60 detect, 157+ shell,
-                           # scan/setup/provider JSON, qmllint, glyphs
-bash test/scripts.test.sh  # shell suite alone
-bash test/e2e-live.sh      # 21 real servers; farm in tmp/ (gitignored)
-dev/portal.sh status|sync|reload [--hard]|restart-shell
-                           # local-install lifecycle: health, push/pull + parity
-                           # proof, settings-preserving reloads, fresh engine
+bash test/test.sh          # syntax, manifest, Node and shell suites, JSON contracts, qmllint, glyphs
+bash test/scripts.test.sh  # shell suite
+bash test/e2e-live.sh      # 19 listeners, plus Ruby and Deno when available
+dev/portal.sh status|parity|stage|sync|reload [--hard]|restart-shell
 ```
 
-- `e2e-live.sh` runs an **unprivileged copy** of node (`cp` drops file
-  capabilities). The mise node carries `cap_net_bind_service`, which makes its
-  processes non-dumpable so `ss -tlnp` cannot attribute sockets — do NOT
-  "fix" this with setcap; the copy is the fix.
-- Live suites spawn real processes and signal only PIDs they harvested by
-  port through the same attribution the product uses. Teardown is pid-file
-  exact — never pattern-kill.
+The live farm copies Node to `tmp/bin`. The copy has no file capabilities that
+could hide socket ownership from `ss`. The farm records each PID with its
+kernel start time and checks both before teardown. Never pattern-kill it.
 
-## Safety rules (learned from a real outage)
+## Signal safety
 
-- A test once wrote mock pidfiles containing pid `1` while `stop_line`
-  signalled process groups (`kill -SIG -- -$pid`). `-1` broadcasts to **every
-  process of the user** — Hyprland, systemd --user and the whole session died,
-  three times. Rules:
-- NEVER use pid 0/1 (or anything ≤1) in fixtures or code paths reaching
-  `kill`. Dead-test PIDs look like `999999 1` (comm+start still refuse them).
-- `stop_line`/`group_alive` require `^[1-9][0-9]*$`, a numeric start time, a
-  passing `alive_line` (comm + kernel start), and `pid > 1` before any
-  `kill -- -pid`. Keep every one of those guards.
-- Prove dangerous paths with **stubbed signals first**: shadow `kill`/`proc`
-  as logging shell functions (no real signal can fire), cover crash inputs
-  (`1 1`, `0 0`, `-1 1`, empty, huge, non-numeric start), and assert the kill
-  log never contains a `-1`/`-0` group target. Only then run the live suite.
-- After any test that launches sleepers, verify no strays with
-  `pgrep -f "sleep [3]00"` (bracket form avoids matching grep itself —
-  a bare `pgrep -f "sleep 300"` matches its own command line).
-- `state launch` children must keep only fds 0,1,2 + the executable: an
-  inherited lock descriptor stays open for the tunnel's whole life (proven
-  via `/proc/<pid>/fd` + a cross-process `flock -n -x` attempt), silently
-  holding lifecycle locks and hanging uninstall forever.
+A past test put PID `1` in a mock pidfile. `kill -SIG -- -1` then signaled every
+process owned by the user and killed the desktop session.
 
-## Shell / QML iteration gotchas (all observed live)
+- Never use PID 0, PID 1, or any PID below 2 in a fixture or path that can call
+  `kill`. Use `999999 1` for a dead test identity. The command and start checks
+  still reject it.
+- Keep every `stop_line` and `group_alive` guard. Require a PID that matches
+  `^[1-9][0-9]*$`, a numeric start time, a passing `alive_line` command and
+  kernel-start check, and `pid > 1` before `kill -- -pid`.
+- Stub signals before every dangerous live test. Shadow `kill` and `proc` with
+  logging shell functions. Cover `1 1`, `0 0`, `-1 1`, empty values, huge
+  values, and a non-numeric start time. Assert that the log has no `-1` or `-0`
+  process-group target. Run the live suite only after these checks pass.
+- After a sleeper test, run `pgrep -f "sleep [3]00"`. The brackets stop `pgrep`
+  from matching its own command line.
+- A `state launch` child keeps only file descriptors 0, 1, 2, and its
+  executable. Prove this through `/proc/<pid>/fd` and a separate
+  `flock -n -x` attempt. An inherited lock descriptor holds the lifecycle lock
+  for the tunnel lifetime and can hang uninstall.
 
-- The running shell serves `~/.config/omarchy/plugins/g3ortega.portal`
-  (a separate clone), NOT this workdir. Sync via commit → push → pull there,
-  then prove parity:
-  `diff -r Work/omarchy-portal <install> --exclude=.git --exclude=tmp --exclude=__pycache__ --exclude=dev`
-- File-watcher reloads are **unreliable for panel code**: same-URL components
-  get reused and an already-created panel object is never rebuilt — a forced
-  on-disk change with confirmed reload lines still rendered stale content.
-  Trustworthy refresh, in escalating order:
-  1. `touch` the file, confirm `reloading: g3ortega.portal` in
-     `journalctl --user` (sometimes silently doesn't fire — re-touch).
-  2. `omarchy plugin disable/enable <id>` (destroys widgets; **resets that
-     widget's shell.json settings — back up shell.json first, restore after**).
-  3. `omarchy-restart-shell` (supported; fresh engine; bar blips; refuses
-     while the session is locked).
-- Never rewrite a watched QML file in place (the watcher loads torn files):
-  write temp + atomic `mv`.
-- Do not rename a widget entry-point file casually: renames produced
-  persistent `File name case mismatch` load failures (mechanism not fully
-  pinned down — treat renames as suspect until proven).
-- At-rest visual identity is a trap: TickerText renders exactly like the Text
-  it replaces, so screenshots cannot distinguish old vs new code. Fingerprint
-  versions with temporary forced content (long text / forced hover) reverted
-  afterwards — never ship probes (installed dir must end `git status` clean).
+## Installed plugin proof
 
-## Headless UI e2e toolkit (no mouse control exists)
+The shell loads `~/.config/omarchy/plugins/g3ortega.portal`, not this worktree.
+Use the staged index as the only source for the installed proof.
 
-- `grim` screenshots (view them with Read); `grim -g "x,y wxh"` for regions.
-- `hyprctl cursorpos` is READ-ONLY. No movecursor/click automation
-  (`wtype` types only). Real hover cannot be simulated — drive `hovered`
-  bindings with forced values for motion proofs, and use the standard
-  `HoverHandler.hovered` idiom (same mechanism all existing hovers use).
-- `omarchy-shell g3ortega.portal toggle` opens/closes the panel (state
-  flips — bracket with screenshots, toggles race reloads).
-- `journalctl --user` shows QML load errors; absence of errors after a
-  reload + render is the load proof. `qmllint` via `test/test.sh` is required.
-- Standalone `qmlscene` cannot load `qs.Commons` (Quickshell core plugin .so
-  is not on its path). Workaround: stub singletons (`Style`, `Color` with
-  only the used keys + a `qmldir`) in a scratch dir — real Qt runtime proof
-  of animation/layout logic, then delete the scratch dir.
-- Throwaway in-shell test plugins work (`BarWidget` root + `moduleName`,
-  validate, enable) but need rescan (`omarchy-shell shell rescanPlugins`)
-  when newly created, pollute the bar while present, and MUST be fully torn
-  down afterwards (disable, remove, `rm -rf` the dir incl. `.bak` dirs,
-  verify shell.json clean + bar screenshot). Prefer qmlscene+stubs.
+1. Finish one change and run its focused checks.
+2. Run `git add -A`, `dev/portal.sh stage`, and `dev/portal.sh parity`.
+   `stage` copies the index without pushing and stages the installed clone.
+3. Run `dev/portal.sh restart-shell`. A panel needs a fresh QML engine.
+4. Drive the real path through the installed plugin. Put temporary IPC verbs
+   only in the installed clone. Capture screenshots with `grim` and inspect the
+   pixels. Check journal entries written after the restart cursor.
+5. Revert every probe. Restore tracked probe edits from the installed index,
+   remove probe files, run `stage` again, and restart the shell.
+6. Run `parity`, the final smoke path, and `git status` in both checkouts.
+7. Commit only after the proof passes. Run `dev/portal.sh sync` to push, fetch,
+   merge with `--ff-only`, and prove parity again.
 
-## Code conventions
+Do not push a UI or behavior change before this proof. The installed clone must
+end clean. It must contain no probe file.
 
-- Bash: no `local` outside function bodies (tests *source* these files —
-  a top-level `local` breaks sourcing). `die()` prints `{ok:false,…}` and
-  exits 0; callers check `.ok`. Trace concurrent paths with the lock helpers
-  in `files.sh` (`flock -n`, fail fast, never block).
-- State: everything through `statedir.py` (descriptor-relative, caps,
-  atomic writes). Never follow symlinks, never trust PATH (`resolve_bin` +
-  ancestor checks, execute by descriptor).
-- QML: `Text.PlainText` for anything data-derived; `HoverHandler { id: … }`
-  for hover; toasts are moments (`toastTimer`, 5s) except hints (setup
-  guidance persists until Esc/replace/reopen).
-- Comments explain *why*, in the file's terse voice. No NOTE-comments about
-  the mechanism — restructure instead (nested bash functions leak to global
-  scope and see empty positionals; keep helpers top-level with explicit args).
-- Commit messages are long one-line summaries of the behavior change.
-  PR review replies: `Done in <sha>: …` + 👍 reaction on the finding.
+`parity` excludes `.git`, `dev`, `tmp`, and `__pycache__`. `sync` requires
+parity before push and after merge. It refuses installed-only unstaged files.
+
+## QML iteration
+
+- File-watcher reloads can reuse an existing panel object. A confirmed reload
+  can still show stale panel code. Trust a shell restart for panel proof.
+- `dev/portal.sh reload` captures a journal cursor before `touch`. It accepts
+  only a later `reloading: g3ortega.portal` line.
+- `reload --hard` disables and enables the plugin. That operation resets widget
+  settings in `shell.json`. Keep its backup in a private `mktemp -d` directory.
+  Restore it on success, command failure, or signal. Compare the restored bytes
+  with `cmp` before deleting the backup.
+- Never rewrite watched QML in place. Write beside the destination and use an
+  atomic `mv`. `stage` uses rsync's temporary-file rename behavior.
+- Treat widget entry-point renames as unsafe until proved. They have caused
+  persistent `File name case mismatch` failures.
+- A resting `TickerText` can look exactly like `Text`. For motion proof, force
+  long content or hover only in the installed clone. Remove the probe afterward.
+
+## Headless UI tools
+
+- Use `grim` for full screenshots and `grim -g "x,y wxh"` for a region.
+- `hyprctl cursorpos` is read-only. There is no mouse movement or click tool.
+  `wtype` types only. Force a `hovered` binding for motion checks, then restore
+  the standard `HoverHandler { id: ... }` binding.
+- `omarchy-shell g3ortega.portal toggle` opens or closes the panel. A toggle can
+  race a reload, so bracket it with screenshots.
+- Check `journalctl --user` for QML load errors after reload and render. Run
+  `qmllint` through `test/test.sh`.
+- Standalone `qmlscene` cannot load `qs.Commons`. For a focused runtime test,
+  create scratch `Style` and `Color` singletons with a `qmldir`, then delete the
+  scratch directory.
+- A throwaway shell plugin needs a `BarWidget` root, `moduleName`, validation,
+  enablement, and `omarchy-shell shell rescanPlugins`. It changes the bar. Tear
+  it down fully by disabling it, removing its directory and backup directories,
+  checking `shell.json`, and taking a clean bar screenshot. Prefer `qmlscene`
+  with stubs.
+
+## Code rules
+
+- Do not use `local` outside a Bash function. Tests source these files.
+- `die()` prints `{ok:false,...}` and exits zero. Callers inspect `.ok`.
+- Lifecycle locks use `files.sh`, `flock -n`, and fail-fast behavior. Never wait
+  forever for a lock.
+- Route state reads, writes, and launches through `statedir.py`. Do not follow
+  symlinks. Resolve a binary, check its owner and ancestors, and execute the
+  resolved path instead of trusting `PATH`.
+- Render data-derived QML strings with `Text.PlainText`. Use
+  `HoverHandler { id: ... }` for hover. Moments last five seconds. Setup guidance
+  stays until Escape, replacement, or panel reopen.
+- Comments explain a non-obvious reason. Keep helpers at top level with explicit
+  arguments. Nested Bash functions leak globally and can see empty positionals.
+- Use a long, one-line commit summary that names the behavior change. Reply to a
+  review with `Done in <sha>: ...` and a thumbs-up reaction.
 
 ## Environment facts
 
-- Portless: binary + CA + Chrome NSS trust are the steady state; the proxy
-  itself is regularly just *off* (`proxy: off`, stale `proxy.port`).
-  Privileged 443 needs the sudo command; the panel setup path uses
-  unprivileged 1355. `~/.portless/routes.json` outlives proxy restarts.
-- `PORTAL_STATE_DIR` (runtime, pid/url/reach/dns/idle/log) vs
-  `PORTAL_METRICS_DIR` (watched.json, metrics, trusted-stores,
-  installed-cloudflared). Overrides pointing at shared dirs only ever lose
-  Portal's own filenames (see uninstall tests).
-- This machine's node/redis/mysql come from mise; `ss`, `jq`, `flock`,
-  `certutil` are assumed present with graceful degradation where noted.
-
-## Workflow (hard rule: e2e before push)
-
-- Never commit or push UI/behavior changes before proving them on the local
-  install. Order: implement → sync the install → shell restart (only
-  trustworthy rebuild) → drive the real path headlessly (temporary IPC verbs
-  in the installed copy only, reverted afterwards) → screenshot and read the
-  pixels → revert probes → restart again → verify parity → then commit/push.
-- Temporary probes live in the installed clone only, never in a commit.
-  Installed dir must end every session `git status` clean.
+- Portless can have a valid binary, CA, and Chrome NSS trust while its proxy is
+  off. Its stale `proxy.port` does not prove a live proxy. Port 443 needs the
+  displayed sudo command. Portal starts an unprivileged proxy on port 1355.
+  `~/.portless/routes.json` survives proxy restarts.
+- `PORTAL_STATE_DIR` holds runtime share files. `PORTAL_METRICS_DIR` holds watch,
+  metric, trust, and install records. Uninstall removes only Portal filenames
+  from an overridden shared directory.
+- Node, Redis, and MySQL come from mise on this machine. `ss`, `jq`, `flock`,
+  `certutil`, and `openssl` are expected. Optional checks degrade as documented.
+- The Cloudflared installer verifies the pinned SHA-256 digest and ELF header.
+  It reports the pinned release version but does not execute the download to
+  discover that version.

@@ -59,9 +59,9 @@ known_provider() { provider_reach "$1" >/dev/null; }
 STATE_DIR="$PORTAL_RUNTIME_DIR"
 LOG_CAP=4194304   # a provider's log is truncated past this; O_APPEND writers carry on
 IDLE_CAP=600      # a public tunnel whose target has been gone this long is stopped
-SHARE_FILES=(pid url reach dns idle log)   # what a share leaves in STATE_DIR
-STATE_FILES_CAP=4096                        # the dump refuses past this; six files per share
+SHARE_FILES=(url reach dns idle log target pid)   # ownership records stay until cleanup reaches them
 MAX_ROWS=512      # past this many tunnels, status reports an error, not a growing document
+STATE_FILES_CAP=$((MAX_ROWS * (${#SHARE_FILES[@]} + 1)))
 
 die() { jq -nc --arg e "$1" '{ok:false,error:$e}'; exit 0; }
 json_str() { jq -Rn --arg v "$1" '$v'; }
@@ -70,7 +70,12 @@ have() { command -v "$1" >/dev/null 2>&1; }
 url_host() { local h=${1#*://}; h=${h%%/*}; printf '%s' "${h%%:*}"; }
 # Provider output is untrusted: a tunnel log, an agent API, a routes file. A
 # URL is accepted into a row (and later handed to xdg-open) only in this shape.
-valid_url() { [[ $1 =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]]*)?$ ]]; }
+valid_url() { (( ${#1} <= 8192 )) && [[ $1 =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]]*)?$ ]]; }
+valid_identity_line() {
+  local pid start extra=""
+  IFS=' ' read -r pid start extra <<<"$1"
+  [[ $1 != *$'\n'* && $pid =~ ^[1-9][0-9]*$ && $start =~ ^[1-9][0-9]*$ && -z $extra ]] && (( pid > 1 ))
+}
 # A pid from a pidfile is only ours to signal if it is still the very process
 # we launched: same comm and the same kernel start time, which no reused pid
 # can reproduce. A pidfile under ~/.cache can outlive a reboot.
@@ -110,7 +115,6 @@ provider_bin() {  # <name>
 augment_path() {
   local extra=(
     "$HOME/.local/bin"
-    "$HOME/.local/share/mise/shims"
     "$HOME/.bun/bin"
     "$HOME/.cargo/bin"
     "$HOME/.volta/bin"
@@ -118,12 +122,16 @@ augment_path() {
     "$HOME/go/bin"
     /usr/local/bin
   )
-  local d
+  local d concrete=()
   for d in "$HOME"/.local/share/mise/installs/node/*/bin \
            "$HOME"/.local/share/mise/installs/bun/*/bin \
            "$HOME"/.nvm/versions/node/*/bin; do
-    [[ -d $d ]] && extra+=("$d")
+    [[ -d $d ]] && concrete+=("$d")
   done
+  for d in "${concrete[@]}"; do
+    [[ ":$PATH:" != *":$d:"* ]] && PATH="$d:$PATH"
+  done
+  extra+=("$HOME/.local/share/mise/shims")
   for d in "${extra[@]}"; do
     [[ -d $d && ":$PATH:" != *":$d:"* ]] && PATH="$PATH:$d"
   done
@@ -143,12 +151,14 @@ cloudflared_setup_clause() { printf 'a checksum-pinned release, into ~/.local/bi
 # what a command line means. Pids come from the caller when it already has a
 # socket dump to name them; only the one-shot stop path pays for a /proc walk.
 cloudflared_targets() {  # [pid...]
-  local pid line target
+  local pid start line target
   for pid in ${*:-$(pgrep -x cloudflared 2>/dev/null)}; do
     line=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
     [[ $line == *--url\ * ]] || continue
     target=${line#*--url }; target=${target%% *}
-    [[ ${target##*:} =~ ^[0-9]+$ ]] && printf '%s\t%s\n' "$pid" "${target##*:}"
+    start=$(proc_start "$pid") || continue
+    valid_identity_line "$pid $start" && [[ ${target##*:} =~ ^[0-9]+$ ]] \
+      && printf '%s\t%s\t%s\n' "$pid" "$start" "${target##*:}"
   done
 }
 
@@ -159,18 +169,9 @@ cloudflared_url_from_log() { cat_own "$1" "$LOG_CAP" | grep -m1 -oE 'https://[a-
 NGROK_API_PORT="${NGROK_API_PORT:-4040}"
 ngrok_status() {
   local ng; ng=$(provider_bin ngrok) || { printf 'missing|Install with: yay -S ngrok|'; return; }
-  # `ngrok config check` execs the full binary; memoize a pass against the
-  # config file's mtime so the 30s poll stops paying for it.
-  local cfg="${NGROK_CONFIG:-$HOME/.config/ngrok/ngrok.yml}" cache="$STATE_DIR/ngrok.ok"
-  local mt; mt=$(stat -c %Y "$cfg" 2>/dev/null || echo 0)
-  if [[ $(read_own "$cache" 64) == "$mt" ]]; then
-    printf 'ready|Authenticated|'; return
-  fi
   if "$ng" config check >/dev/null 2>&1; then
-    write_own "$cache" "$mt"
     printf 'ready|Authenticated|'
   else
-    state_remove "$STATE_DIR" ngrok.ok
     printf 'setup|Run: ngrok config add-authtoken <token>|'
   fi
 }
@@ -224,7 +225,8 @@ portless_status() {
 
 portless_setup() {
   local out entry title copy
-  out=$("$SCRIPT_DIR/portless-setup.sh" run)
+  out=$("$SCRIPT_DIR/portless-setup.sh" run) || die "$(jq -r '.error // "portless setup failed"' <<<"$out" 2>/dev/null)"
+  jq -e '.ok == true' <<<"$out" >/dev/null 2>&1 || die "$(jq -r '.error // "portless setup failed"' <<<"$out" 2>/dev/null)"
   entry=$(jq -r '.remaining[0] // empty' <<<"$out")
   # A remaining step carrying a command joins title and command with a unit
   # separator; the panel shows them as a card with a copy button.
@@ -234,7 +236,7 @@ portless_setup() {
 
 cloudflared_setup() {
   local iout
-  iout=$("$SCRIPT_DIR/provider-install.sh" cloudflared)
+  iout=$("$SCRIPT_DIR/provider-install.sh" cloudflared) || die "$(jq -r '.error // "install failed"' <<<"$iout" 2>/dev/null)"
   if [[ $(jq -r '.ok' <<<"$iout") != true ]]; then
     die "$(jq -r '.error // "install failed"' <<<"$iout")"
   fi
@@ -265,7 +267,7 @@ portless_route_url() { portless_host_url "$1.$(portless_tld)"; }
 # ---- commands -----------------------------------------------------------------
 
 cmd_providers() {
-  portless_state_load
+  portless_state_load || die "could not read Portless state safely"
   local row name label reach status detail fix pair tld clause tsv=""
   for row in "${PROVIDERS[@]}"; do
     IFS=: read -r name label reach <<<"$row"
@@ -290,7 +292,12 @@ namefile()  { printf '%s/%s-%s.name'  "$STATE_DIR" "$1" "$2"; }
 reachfile() { printf '%s/%s-%s.reach' "$STATE_DIR" "$1" "$2"; }
 dnsfile()   { printf '%s/%s-%s.dns'   "$STATE_DIR" "$1" "$2"; }   # exists while DNS is pending
 idlefile()  { printf '%s/%s-%s.idle'  "$STATE_DIR" "$1" "$2"; }   # since when the target has been gone
-clear_share() { local n=(); for s in "${SHARE_FILES[@]}"; do n+=("$1-$2.$s"); done; state_remove "$STATE_DIR" "${n[@]}"; }
+targetfile(){ printf '%s/%s-%s.target' "$STATE_DIR" "$1" "$2"; }
+clear_share() {
+  local n=() s
+  for s in "${SHARE_FILES[@]}"; do n+=("$1-$2.$s"); done
+  state_remove "$STATE_DIR" "${n[@]}"
+}
 # Ending a tunnel means seeing it gone: TERM, a grace period, then KILL, and
 # failure if it is still there, so a record is never cleared over a process
 # that is still public. Both waits are in tenths of a second.
@@ -298,7 +305,7 @@ STOP_TERM_WAIT=50
 STOP_KILL_WAIT=20
 stop_line() {   # <"pid start"> <comm>: end the whole session the launcher created, not just its leader
   local pid start i sig; read -r pid start <<<"$1"
-  [[ $pid =~ ^[1-9][0-9]*$ && $start =~ ^[0-9]+$ ]] || return 0
+  valid_identity_line "$1" || return 2
   # If the leader is not ours to begin with (reused pid, mock test pid, already dead),
   # there is nothing to signal.
   alive_line "$1" "$2" || return 0
@@ -322,14 +329,46 @@ stop_line() {   # <"pid start"> <comm>: end the whole session the launcher creat
 }
 # Whether the pidfile still says what a status snapshot said: a start since
 # the snapshot wrote a new one, and that one is not the snapshot's to act on.
-snapshot_current() { [[ $(read_own "$(pidfile "$1" "$2")" 64) == "$3" ]]; }   # <provider> <port> <pidline>
+snapshot_current() { [[ $(cat_own "$(pidfile "$1" "$2")" 64) == "$3" ]]; }   # <provider> <port> <pidline>
 
 alive_line() {  # <"pid start"> <comm>
   local pid start; read -r pid start <<<"$1"
+  valid_identity_line "$1" || return 1
   owned_pid "$pid" "$2" "$start"
 }
-alive() { alive_line "$(read_own "$1" 64)" "$2"; }   # <pidfile> <comm>
+alive() { alive_line "$(cat_own "$1" 64)" "$2"; }   # <pidfile> <comm>
 group_alive() { (( ${1:-0} > 1 )) && kill -0 -- "-$1" 2>/dev/null; }   # <pid>: its process group still has members
+
+listener_identity() {  # <port>: one currently attributed listener as "pid start"
+  local sockets pids pid start
+  sockets=$(ss -tlnpH "sport = :$1" 2>/dev/null) || return 1
+  pids=$(grep -oE 'pid=[0-9]+' <<<"$sockets" | cut -d= -f2 | sort -u)
+  [[ $(grep -c . <<<"$pids") == 1 ]] || return 1
+  pid=$pids; start=$(proc_start "$pid") || return 1
+  valid_identity_line "$pid $start" || return 1
+  proc check "$pid" "$start" >/dev/null 2>&1 || return 1
+  printf '%s %s' "$pid" "$start"
+}
+
+target_owns_port() {  # <"pid start"> <port>, using the attributed status snapshot
+  local pid start _state _rq _sq local_addr _peer procinfo socket_pid matched=0
+  read -r pid start <<<"$1"
+  proc check "$pid" "$start" >/dev/null 2>&1 || return 1
+  if (( ! SOCKS_READY )); then
+    SOCKS=$(ss -tlnpH 2>/dev/null) || return 2
+    SOCKS_READY=1
+  fi
+  while read -r _state _rq _sq local_addr _peer procinfo; do
+    [[ ${local_addr##*:} == "$2" ]] || continue
+    [[ $procinfo == *pid=* ]] || return 1
+    while read -r socket_pid; do
+      [[ $socket_pid == "$pid" ]] || return 1
+      matched=1
+    done < <(grep -oE 'pid=[0-9]+' <<<"$procinfo" | cut -d= -f2)
+  done <<<"$SOCKS"
+  (( matched )) || return 1
+  proc check "$pid" "$start" >/dev/null 2>&1
+}
 
 # A fresh public hostname is published a beat after it appears in the log.
 # Any resolver asked before that caches the NXDOMAIN for the zone's negative
@@ -368,27 +407,90 @@ dns_gate() {  # <host>
 
 finish_start() {  # <provider> <port> <url> [hint]
   local reach; reach=$(provider_reach "$1")
-  write_own "$(urlfile "$1" "$2")" "$3"
-  write_own "$(reachfile "$1" "$2")" "$reach"
+  write_own "$(reachfile "$1" "$2")" "$reach" || return 1
+  write_own "$(urlfile "$1" "$2")" "$3" || return 1
   jq -nc --arg u "$3" --arg r "$reach" --arg h "${4:-}" \
     '{ok:true,url:$u,reach:$r} + (if $h == "" then {} else {hint:$h} end)'
 }
 
+rollback_portless() {  # <port> <new name> <old name> <old marker: 0|1> <bin>
+  local port="$1" new="$2" old="$3" old_owned="$4" bin="$5" current
+  if [[ $new != "$old" ]]; then
+    "$bin" alias --remove "$new" >/dev/null 2>&1 || true
+    [[ -z $old ]] || "$bin" alias "$old" "$port" --force >/dev/null 2>&1 || return 1
+  fi
+  portless_state_load || return 1
+  current=$(portless_route_name "$port")
+  [[ $current == "$old" ]] || return 1
+  if (( old_owned )); then
+    write_own "$(namefile portless "$port")" "$old"
+  else
+    clear_share portless "$port" || return 1
+    state_remove "$STATE_DIR" "portless-$port.name"
+  fi
+}
+
+public_start_failed() {  # <provider> <port> <pidline> <reason>
+  local provider="$1" port="$2" pidline="$3" reason="$4" rc
+  stop_line "$pidline" "$provider"; rc=$?
+  if (( rc == 0 )); then
+    clear_share "$provider" "$port" \
+      || die "$reason; the tunnel stopped, but its ownership records could not be cleared"
+    die "$reason"
+  elif (( rc == 2 )); then
+    die "$reason; the tracked pid record is malformed, so its records were kept"
+  fi
+  die "$reason; the tunnel did not stop, so its ownership records were kept"
+}
+
+cancel_public_start() {  # <provider> <port> <pidline> <exit status>
+  trap - TERM INT HUP
+  if [[ -n $3 ]] && stop_line "$3" "$1"; then clear_share "$1" "$2" || true; fi
+  exit "$4"
+}
+
 cmd_start_portless() {  # <port> <name>
-  local port="$1" name="$2" out bin
+  local port="$1" name="$2" out bin old old_owned=0
   bin=$(provider_bin portless) || die "portless is not installed as a trusted executable"
+  portless_state_load || die "could not read Portless state safely"
   # A port holds one name; drop the previous alias on rename.
   local n; n=$(slug "${name:-port-$port}")
   [[ -n $n ]] || n="port-$port"
-  local old; old=$(read_own "$(namefile portless "$port")" 256)
-  if [[ -z $old ]]; then
+  if [[ -e $(namefile portless "$port") || -L $(namefile portless "$port") ]]; then
+    old=$(cat_own "$(namefile portless "$port")" 256) \
+      || die "the Portless name record for port $port cannot be read; it was kept"
+    [[ -n $old ]] || die "the Portless name record for port $port is malformed; it was kept"
+    old_owned=1
+  else
     # A route this plugin did not create (portless run / CLI) still renames.
     old=$(portless_route_name "$port")
   fi
-  [[ -n $old && $old != "$n" ]] && "$bin" alias --remove "$old" >/dev/null 2>&1
-  out=$("$bin" alias "$n" "$port" --force 2>&1 | head -c 4096) || die "portless alias failed: ${out:0:200}"
-  portless_state_load   # routes changed
-  write_own "$(namefile portless "$port")" "$n"
+  write_own "$(namefile portless "$port")" "$n" || die "could not record the Portless name before creating it"
+  if [[ -n $old && $old != "$n" ]] && ! "$bin" alias --remove "$old" >/dev/null 2>&1; then
+    if (( old_owned )); then
+      write_own "$(namefile portless "$port")" "$old" \
+        || die "portless could not remove $old, and its name record could not be restored"
+    else
+      state_remove "$STATE_DIR" "portless-$port.name" \
+        || die "portless could not remove $old, and the pending name record could not be cleared"
+    fi
+    die "portless could not remove the previous name $old"
+  fi
+  out=$("$bin" alias "$n" "$port" --force 2>&1 | head -c 4096) || {
+    rollback_portless "$port" "$n" "$old" "$old_owned" "$bin" \
+      && die "portless alias failed: ${out:0:200}"
+    die "portless alias failed and rollback could not be verified; the name record was kept"
+  }
+  portless_state_load || {
+    rollback_portless "$port" "$n" "$old" "$old_owned" "$bin" \
+      && die "Portless state could not be read after creating the name; it was rolled back"
+    die "Portless state could not be read after creating the name, and rollback could not be verified; the name record was kept"
+  }
+  [[ $(portless_route_name "$port") == "$n" ]] || {
+    rollback_portless "$port" "$n" "$old" "$old_owned" "$bin" \
+      && die "Portless did not record the requested name; it was rolled back"
+    die "Portless did not record the requested name, and rollback could not be verified; the name record was kept"
+  }
   local resolved; resolved=$(portless_route_url "$n")
   [[ -n $resolved ]] || resolved="https://$n.$(portless_tld)"
 
@@ -403,46 +505,70 @@ cmd_start_portless() {  # <port> <name>
     getent hosts "$host" >/dev/null 2>&1 \
       || hint="$host does not resolve yet — the strip has the one-time fix"
   fi
-  finish_start portless "$port" "$resolved" "$hint"
+  finish_start portless "$port" "$resolved" "$hint" || {
+    rollback_portless "$port" "$n" "$old" "$old_owned" "$bin" \
+      && die "could not record the Portless URL; the name was rolled back"
+    die "could not record the Portless URL, and rollback could not be verified; the name record was kept"
+  }
 }
 
-cmd_start() {  # <provider> <port> [name] [--owner <pid>]
-  local provider="$1" port="$2" name="" owner=""; shift 2
+cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
+  local provider="$1" port="$2" name="" target=""; shift 2
   while (( $# )); do
     case $1 in
-      --owner) (( $# >= 2 )) || die "invalid owner pid"; owner="$2"; shift 2 ;;
+      --target) (( $# >= 3 )) || die "invalid target identity"; target="$2 $3"; shift 3 ;;
       *) name="$1"; shift ;;
     esac
   done
   valid_port "$port" || die "invalid port"
   known_provider "$provider" || die "unknown provider"
-  lifecycle_lock_exclusive || die "cannot start $provider: another operation is in progress"
-  # The panel names the process it showed the user; the port is shared only
-  # while that process still serves it, not whatever took the port since.
-  if [[ -n $owner ]]; then
-    [[ $owner =~ ^[1-9][0-9]*$ ]] || die "invalid owner pid"
-    ss -tlnpH "sport = :$port" 2>/dev/null | grep -qF "pid=$owner," || die "port $port is no longer served by pid $owner"
-  fi
-  portless_state_load
   if [[ $provider == portless ]]; then cmd_start_portless "$port" "$name"; return; fi
+  if [[ -n $target ]]; then
+    valid_identity_line "$target" || die "invalid target identity"
+  else
+    target=$(listener_identity "$port") \
+      || die "port $port has no single safely attributed listener to approve"
+  fi
+  local SOCKS="" SOCKS_READY=0 target_rc
+  target_owns_port "$target" "$port"; target_rc=$?
+  (( target_rc == 0 )) || {
+    (( target_rc == 2 )) && die "could not query attributed listening sockets"
+    die "port $port is no longer served by the approved process"
+  }
   local bin; bin=$(provider_bin "$provider") || die "$provider is not installed as a trusted executable"
 
-  local pf lf
+  local pf lf pidline existing_url
   pf=$(pidfile "$provider" "$port"); lf=$(logfile "$provider" "$port")
-  if alive "$pf" "$provider"; then
-    jq -nc --arg u "$(read_own "$(urlfile "$provider" "$port")" 8192)" '{ok:true,url:$u}'
-    return
+  if [[ -e $pf || -L $pf ]]; then
+    pidline=$(cat_own "$pf" 64) || die "$provider on port $port has a pidfile that cannot be read; its records are kept"
+    valid_identity_line "$pidline" || die "$provider on port $port has a malformed pidfile; its records are kept"
+    if alive_line "$pidline" "$provider"; then
+      existing_url=$(read_own "$(urlfile "$provider" "$port")" 8192)
+      if valid_url "$existing_url"; then
+        write_own "$(targetfile "$provider" "$port")" "$target" || die "could not bind the existing share to the approved process"
+        state_remove "$STATE_DIR" "$provider-$port.idle" || die "could not clear the existing share's idle deadline"
+        write_own "$(reachfile "$provider" "$port")" public || die "could not record the existing share's reach"
+        jq -nc --arg u "$existing_url" '{ok:true,url:$u,reach:"public"}'
+        return
+      fi
+      stop_line "$pidline" "$provider" || die "$provider on port $port has an incomplete start that did not stop; its records are kept"
+    fi
   fi
 
-  # A session of its own, a fresh private log, "pid starttime" back.
-  clear_share "$provider" "$port"
+  clear_share "$provider" "$port" || die "could not clear the previous $provider records"
+  write_own "$(targetfile "$provider" "$port")" "$target" \
+    || die "could not record the approved process before starting $provider"
   local argv=(); mapfile -t argv < <("${provider}_argv" "$port")
-  local pidline; pidline=$(state launch "$STATE_DIR" "${lf##*/}" -- "$bin" "${argv[@]}") || die "could not start $provider"
-  # A tunnel nobody has a record of would stay public through a removal.
-  write_own "$pf" "$pidline" || {
-    stop_line "$pidline" "$provider" && die "could not record the $provider process; it was stopped again"
-    die "could not record the $provider process, and it did not stop: pid ${pidline%% *}"
+  trap 'cancel_public_start "$provider" "$port" "$pidline" 143' TERM
+  trap 'cancel_public_start "$provider" "$port" "$pidline" 130' INT
+  trap 'cancel_public_start "$provider" "$port" "$pidline" 129' HUP
+  pidline=$(state launch-tracked "$STATE_DIR" "${lf##*/}" "${pf##*/}" -- "$bin" "${argv[@]}") || {
+    trap - TERM INT HUP
+    clear_share "$provider" "$port" || die "could not start $provider, and its pre-launch records could not be cleared"
+    die "could not start $provider"
   }
+  valid_identity_line "$pidline" \
+    || die "$provider returned a malformed tracked pid; its ownership records were kept"
 
   # Poll the log for the public URL rather than blocking on the process.
   local url="" i
@@ -455,19 +581,21 @@ cmd_start() {  # <provider> <port> [name] [--owner <pid>]
 
   if [[ -z $url ]]; then
     local why; why=$(cat_own "$lf" "$LOG_CAP" | tail -c 400 | tr '\n' ' ')
-    alive_line "$pidline" "$provider" || state_remove "$STATE_DIR" "$provider-$port.pid"
-    die "no URL after 30s: ${why:-see $lf}"   # the log stays for a look
+    public_start_failed "$provider" "$port" "$pidline" "no URL after 30s: ${why:-provider produced no URL}"
   fi
-  valid_url "$url" || die "$provider reported an unexpected URL; see $lf"
+  valid_url "$url" || public_start_failed "$provider" "$port" "$pidline" "$provider reported an unexpected URL"
 
   local host; host=$(url_host "$url")
   local hint=""
   if ! dns_gate "$host"; then
     # The row shows the URL as pending until status sees it resolve.
-    write_own "$(dnsfile "$provider" "$port")" pending
+    write_own "$(dnsfile "$provider" "$port")" pending \
+      || public_start_failed "$provider" "$port" "$pidline" "could not record pending DNS state"
     hint="$host is not in DNS yet — the row lights up when it resolves"
   fi
-  finish_start "$provider" "$port" "$url" "$hint"
+  finish_start "$provider" "$port" "$url" "$hint" \
+    || public_start_failed "$provider" "$port" "$pidline" "could not record the active $provider share"
+  trap - TERM INT HUP
 }
 
 cmd_stop() {
@@ -476,28 +604,43 @@ cmd_stop() {
   valid_port "$port" || die "invalid port"
   local pidline bin
   if [[ $provider == portless ]]; then
-    local n; n=$(read_own "$(namefile "$provider" "$port")" 256)
-    [[ -n $n ]] || n=$(portless_route_name "$port")
+    portless_state_load || die "could not read Portless state safely; its records are kept"
+    local n nf; nf=$(namefile "$provider" "$port")
+    if [[ -e $nf || -L $nf ]]; then
+      n=$(cat_own "$nf" 256) || die "the Portless name record for port $port cannot be read; its records are kept"
+      [[ -n $n ]] || die "the Portless name record for port $port is malformed; its records are kept"
+    else
+      n=$(portless_route_name "$port")
+    fi
     if [[ -n $n ]]; then
       # The record of a name stays until Portless has actually let it go.
       bin=$(provider_bin portless) || die "portless is not installed as a trusted executable; the name $n is still registered"
       "$bin" alias --remove "$n" >/dev/null 2>&1 || die "portless could not remove the name $n"
+      portless_state_load || die "Portless removed $n, but its state could not be verified; the records are kept"
+      routes_json | jq -e --arg n "$n" 'any(.[]?; ((.hostname // "") | split(".")[0]) == $n)' >/dev/null 2>&1 \
+        && die "Portless reported removing $n, but the route remains; the records are kept"
     fi
-    state_remove "$STATE_DIR" "portless-$port.name"
+    state_remove "$STATE_DIR" "portless-$port.name" \
+      || die "the Portless name was removed, but its ownership record could not be cleared"
   else
     local pf; pf=$(pidfile "$provider" "$port")
     if [[ -e $pf || -L $pf ]]; then
       # Ours: a pidfile that is present but unreadable (truncated, a planted
       # link) is a failure, not an invitation to adopt — its records stay.
-      pidline=$(read_own "$pf" 64)
+      pidline=$(cat_own "$pf" 64)
       [[ -n $pidline ]] || die "$provider on port $port has a pidfile that cannot be read; its records are kept"
+      valid_identity_line "$pidline" || die "$provider on port $port has a malformed pidfile; its records are kept"
       stop_line "$pidline" "$provider" || die "$provider on port $port did not stop; its records are kept"
+    elif [[ -e $(urlfile "$provider" "$port") || -L $(urlfile "$provider" "$port") ]]; then
+      die "$provider on port $port has an active record but no pidfile; its records are kept"
+    elif [[ -e $(targetfile "$provider" "$port") || -L $(targetfile "$provider" "$port") ]]; then
+      : # a pre-launch target with no pid has no provider process to stop
     elif declare -f "${provider}_stop_adopted" >/dev/null; then
       # Not ours to begin with: the provider knows how to end its own.
-      "${provider}_stop_adopted" "$port"
+      "${provider}_stop_adopted" "$port" || die "$provider on port $port did not stop"
     fi
   fi
-  clear_share "$provider" "$port"
+  clear_share "$provider" "$port" || die "$provider on port $port stopped, but its records could not be cleared"
   echo '{"ok":true}'
 }
 
@@ -536,8 +679,8 @@ cloudflared_adopt() {
   [[ -n ${pids// /} ]] || return 0
   local targets; targets=$(cloudflared_targets $pids)
   [[ -n $targets ]] || return 0
-  local cfpid tport mport qhost
-  while IFS=$'\t' read -r cfpid tport; do
+  local cfpid cfstart tport mport qhost
+  while IFS=$'\t' read -r cfpid cfstart tport; do
     mport=$(grep "pid=$cfpid," <<<"$SOCKS" | grep -oP '127\.0\.0\.1:\K[0-9]+' | head -1)
     [[ -n $mport ]] || continue
     qhost=$(curl -q -s --max-time 0.4 --max-redirs 0 --max-filesize 16384 "http://127.0.0.1:$mport/quicktunnel" 2>/dev/null \
@@ -548,11 +691,22 @@ cloudflared_adopt() {
 }
 
 cloudflared_stop_adopted() {  # <port>
-  local cfpid tport
-  while IFS=$'\t' read -r cfpid tport; do
-    [[ $tport == "$1" ]] && kill -TERM "$cfpid" 2>/dev/null
-  done < <(cloudflared_targets)
-  return 0
+  local cfpid cfstart tport targets found=0 failed=0 i
+  targets=$(cloudflared_targets)
+  while IFS=$'\t' read -r cfpid cfstart tport; do
+    [[ $tport == "$1" ]] || continue
+    found=1
+    if ! proc signal "$cfpid" "$cfstart" TERM >/dev/null 2>&1; then
+      proc check "$cfpid" "$cfstart" >/dev/null 2>&1 && failed=1
+      continue
+    fi
+    for ((i = 0; i < 25; i++)); do
+      proc check "$cfpid" "$cfstart" >/dev/null 2>&1 || break
+      sleep 0.1
+    done
+    proc check "$cfpid" "$cfstart" >/dev/null 2>&1 && failed=1
+  done <<<"$targets"
+  (( ! found || ! failed ))
 }
 
 # ngrok's agent (Portal-started or not) reports every live tunnel on its
@@ -577,10 +731,48 @@ ngrok_adopt() {
 }
 
 ngrok_stop_adopted() {  # <port>
-  local tname
-  tname=$(ngrok_api_tunnels 0.6 \
-    | jq -r --arg p ":$1" 'first(.tunnels[]? | select(.config.addr | endswith($p)) | .name | @uri) // empty')
-  [[ -n $tname ]] && curl -q -s --max-time 2 --max-redirs 0 -X DELETE "http://127.0.0.1:$NGROK_API_PORT/api/tunnels/$tname" >/dev/null 2>&1
+  local before after tname
+  before=$(ngrok_api_tunnels 0.6) || return 1
+  tname=$(jq -er --arg p ":$1" 'first(.tunnels[]? | select(.config.addr | endswith($p)) | .name | @uri) // ""' <<<"$before") \
+    || return 1
+  [[ -n $tname ]] || return 0
+  if ! curl -q -fsS --max-time 2 --max-redirs 0 -X DELETE \
+    "http://127.0.0.1:$NGROK_API_PORT/api/tunnels/$tname" >/dev/null 2>&1; then
+    after=$(ngrok_api_tunnels 0.6) || return 1
+    jq -e --arg p ":$1" 'all(.tunnels[]?; (.config.addr | endswith($p) | not))' <<<"$after" >/dev/null 2>&1
+    return
+  fi
+  after=$(ngrok_api_tunnels 0.6) || return 1
+  jq -e --arg p ":$1" 'all(.tunnels[]?; (.config.addr | endswith($p) | not))' <<<"$after" >/dev/null 2>&1
+}
+
+stop_reconciled_share() {  # <provider> <port> <reason>
+  local out
+  out=$(cmd_stop "$1" "$2")
+  if jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then return 0; fi
+  RECONCILE_STOP_ERROR="$3; $(jq -r '.error // "the share did not stop"' <<<"$out" 2>/dev/null)"
+  return 1
+}
+
+reconcile_idle() {  # <provider> <port> <idle> <healthy:0|1> <now>
+  local provider="$1" port="$2" idle="$3" healthy="$4" now="$5"
+  if (( healthy )); then
+    [[ -z $idle ]] || state_remove "$STATE_DIR" "$provider-$port.idle" \
+      || die "could not clear the idle deadline for $provider on port $port"
+    return 0
+  fi
+  if [[ -z $idle ]]; then
+    if write_own "$(idlefile "$provider" "$port")" "$now"; then return 0; fi
+    stop_reconciled_share "$provider" "$port" "could not record an idle deadline for $provider on port $port" \
+      || die "$RECONCILE_STOP_ERROR"
+    return 1
+  fi
+  [[ $idle =~ ^[0-9]+$ ]] && (( idle <= now )) \
+    || die "$provider on port $port has an invalid idle deadline"
+  if (( now - idle >= IDLE_CAP )); then
+    stop_reconciled_share "$provider" "$port" "$provider on port $port reached its idle deadline" || return 0
+    return 1
+  fi
   return 0
 }
 
@@ -596,21 +788,37 @@ cmd_status() {
   # the proxy target: a listener bound only to a LAN address does not count.
   command -v ss >/dev/null 2>&1 || die "ss not found"
   local ss_raw; ss_raw=$(ss -tlnH 2>/dev/null) || die "could not query listening sockets"
-  local LIVE_PORTS=" " SOCKS="" _l
+  local LIVE_PORTS=" " SOCKS="" SOCKS_READY=0 _l
   while read -r _ _ _ _l _; do
     case ${_l%:*} in 127.*|'*'|0.0.0.0|'[::]'|'[::1]'|'[::ffff:127.'*|::|::1) LIVE_PORTS+="${_l##*:} " ;; esac
   done <<<"$ss_raw"
 
-  portless_state_load; local portless_ok=$?
+  portless_state_load || die "could not read Portless state safely"
   local dump tsv="" listed=" " now; printf -v now '%(%s)T' -1
   # An unreadable state directory is not an empty one: a tunnel that cannot be
   # listed cannot be cleaned up either, so the caller keeps its last snapshot.
   dump=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null) || die "could not list Portal's state"
+  local refused idle_refused
+  refused=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.(pid|url|reach|dns|log|target)$|^portless-[0-9]+\\.(url|reach|name)$"))' <<<"$dump" 2>/dev/null)
+  idle_refused=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.idle$"))' <<<"$dump" 2>/dev/null)
+  [[ -z $refused ]] \
+    || die "could not read Portal ownership state safely: $(tr '\n' ' ' <<<"$refused")"
+  local partial_provider partial_port partial_out
+  while IFS=$'\t' read -r partial_provider partial_port; do
+    [[ -n $partial_provider ]] || continue
+    partial_out=$(cmd_stop "$partial_provider" "$partial_port")
+    jq -e '.ok == true' <<<"$partial_out" >/dev/null 2>&1 \
+      || die "incomplete $partial_provider start on port $partial_port could not be reconciled: $(jq -r '.error // "stop failed"' <<<"$partial_out")"
+  done < <(jq -r '.files as $f | ($f | keys[]) as $key
+    | select($key | test("^(cloudflared|ngrok)-[0-9]+\\.(pid|target)$"))
+    | ($key | sub("\\.(pid|target)$"; "")) as $base
+    | select($f[$base + ".url"] == null) | $base' <<<"$dump" | sort -u | tr '-' '\t')
   # Fields are joined with a unit separator: a tab is IFS whitespace, so an
   # empty field between tabs would vanish and shift the ones after it.
-  local provider port url reach pidline dns idle base pid
-  while IFS=$'\x1f' read -r provider port url reach pidline dns idle; do
-    valid_port "$port" && valid_url "$url" && known_provider "$provider" || continue
+  local provider port url reach pidline dns idle target target_present base target_rc healthy
+  while IFS=$'\x1f' read -r provider port url reach pidline dns idle target target_present; do
+    valid_port "$port" && known_provider "$provider" || continue
+    valid_url "$url" || die "$provider on port $port has a malformed URL record; its records were kept"
     base="$provider-$port"
     # portless routes have no process of their own, but a route removed with
     # the portless CLI is gone all the same; everything else must be alive.
@@ -619,54 +827,83 @@ cmd_status() {
       # mean the name is gone; a refused read keeps the markers. Re-read before
       # deleting: an alias registered after this poll's snapshot must not lose
       # its markers to the stale one.
-      if (( portless_ok == 0 )) && [[ -z $(portless_route_name "$port") ]]; then
-        portless_state_load && [[ -z $(portless_route_name "$port") ]] \
-          && { state_remove "$STATE_DIR" "$base".{url,name,reach}; continue; }
+      if [[ -z $(portless_route_name "$port") ]]; then
+        portless_state_load || die "could not re-read Portless state safely"
+        if [[ -z $(portless_route_name "$port") ]]; then
+          state_remove "$STATE_DIR" "$base".{url,reach,name} \
+            || die "could not clear stale Portless records for port $port"
+          continue
+        fi
       fi
     else
+      valid_identity_line "$pidline" \
+        || die "$provider on port $port has a malformed pid record; its records were kept"
       alive_line "$pidline" "$provider" || {
         # Only this snapshot's records go: a start since then has written new ones.
         # An unreadable pidfile is not proof of death — a stop fails on those
         # instead of clearing — so only a readable record is ever removed here.
-        [[ -n $pidline ]] && snapshot_current "$provider" "$port" "$pidline" && clear_share "$provider" "$port"
+        if snapshot_current "$provider" "$port" "$pidline"; then
+          clear_share "$provider" "$port" \
+            || die "could not clear stale $provider records for port $port"
+        fi
         continue
       }
+      if grep -qxF "$base.idle" <<<"$idle_refused"; then
+        snapshot_current "$provider" "$port" "$pidline" || continue
+        stop_reconciled_share "$provider" "$port" "could not read the idle deadline for $provider on port $port" \
+          || die "$RECONCILE_STOP_ERROR"
+        continue
+      fi
       # A log is read only while the URL is being minted; afterwards it only
       # grows. stat first: truncate is a helper process.
-      (( $(stat -c %s -- "$(logfile "$provider" "$port")" 2>/dev/null || echo 0) > LOG_CAP )) && state_truncate "$(logfile "$provider" "$port")" "$LOG_CAP"
-      # A tunnel whose target is gone stays up for a while (a restart should
-      # not lose the URL), then is stopped: whatever binds that port next must
-      # not inherit the exposure.
-      if [[ $LIVE_PORTS == *" $port "* ]]; then
-        [[ -n $idle ]] && state_remove "$STATE_DIR" "$base.idle"
-      elif [[ -z $idle ]]; then
-        write_own "$(idlefile "$provider" "$port")" "$now"
-      elif [[ $idle =~ ^[0-9]+$ ]] && (( now - idle > IDLE_CAP )); then
-        # A replacement's row comes with the next poll. A stop that failed
-        # keeps its records and stays listed: still public, still ours.
-        snapshot_current "$provider" "$port" "$pidline" || continue
-        jq -e .ok <<<"$(cmd_stop "$provider" "$port")" >/dev/null 2>&1 && continue
+      if (( $(stat -c %s -- "$(logfile "$provider" "$port")" 2>/dev/null || echo 0) > LOG_CAP )); then
+        state_truncate "$(logfile "$provider" "$port")" "$LOG_CAP" \
+          || die "could not truncate the $provider log for port $port"
       fi
+      healthy=0
+      if [[ $target_present == 1 ]]; then
+        valid_identity_line "$target" \
+          || die "$provider on port $port has a malformed target record; its records were kept"
+        target_owns_port "$target" "$port"; target_rc=$?
+        if (( target_rc == 0 )); then healthy=1
+        elif (( target_rc == 2 )); then die "could not query attributed listening sockets"
+        fi
+      fi
+      snapshot_current "$provider" "$port" "$pidline" || continue
+      if [[ $target_present == 1 && $healthy == 0 && $LIVE_PORTS == *" $port "* ]]; then
+        stop_reconciled_share "$provider" "$port" "a different process took port $port" \
+          || die "$RECONCILE_STOP_ERROR"
+        continue
+      fi
+      reconcile_idle "$provider" "$port" "$idle" "$healthy" "$now" || continue
     fi
     [[ -n $reach ]] || reach=$(provider_reach "$provider")
     # A share whose DNS was still pending at start is re-checked each poll,
     # off-path first, and stops being pending the moment the system resolves it.
     if [[ $dns == pending ]]; then
-      if dns_published "$(url_host "$url")" && dns_resolves_here "$(url_host "$url")"; then state_remove "$STATE_DIR" "$base.dns"; dns=""; fi
+      if dns_published "$(url_host "$url")" && dns_resolves_here "$(url_host "$url")"; then
+        state_remove "$STATE_DIR" "$base.dns" || die "could not clear pending DNS state for $provider on port $port"
+        dns=""
+      fi
     fi
     tsv+="$provider"$'\t'"$port"$'\t'"$url"$'\t'"$reach"$'\t'"$dns"$'\n'
     # One key shape for every provider, so adoption dedup is a single test.
     listed+="$provider:$port "
   done < <(jq -r 'def line1: split("\n")[0];
+    def one_line: if contains("\n") then
+      if endswith("\n") and ((rtrimstr("\n") | contains("\n")) | not) then rtrimstr("\n") else "!invalid" end
+      else . end;
     .files | . as $f | to_entries[]
     | select(.key | test("^[a-z]+-[0-9]+\\.url$"))
     | (.key | sub("\\.url$"; "")) as $b
     | ($b | split("-")) as $p
     | [$p[0], $p[1], (.value | line1),
        (($f[$b + ".reach"] // "") | line1),
-       (($f[$b + ".pid"] // "") | line1),
+       (($f[$b + ".pid"] // "") | one_line),
        (if $f[$b + ".dns"] != null then "pending" else "" end),
-       (($f[$b + ".idle"] // "") | line1)]
+       (($f[$b + ".idle"] // "") | one_line),
+       (($f[$b + ".target"] // "") | one_line),
+       (if $f[$b + ".target"] != null then "1" else "0" end)]
     | join("\u001f")' <<<"$dump")
 
   local row name aport aurl areach
@@ -700,7 +937,8 @@ cmd_stop_all() {
     out=$(cmd_stop "$provider" "$port")
     jq -e .ok <<<"$out" >/dev/null 2>&1 || failed+=("$provider:$port $(jq -r .error <<<"$out")")
   done < <(jq -r '.tunnels[]? | [.provider, (.port|tostring)] | @tsv' <<<"$status_out")
-  if (( ${#failed[@]} )); then jq -nc --args '{ok:false, error:("could not stop: " + ($ARGS.positional | join("; ")))}' "${failed[@]}"
+  if (( ${#failed[@]} )); then
+    jq -nc --args '{ok:false, error:("could not stop: " + ($ARGS.positional | join("; ")))}' "${failed[@]}"
   else echo '{"ok":true}'; fi
 }
 
@@ -711,7 +949,7 @@ cmd_stop_own() {
   # is reported, so a caller can retry.
   local provider port out rows failed=() bad_markers
   rows=$(state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null) || die "could not list Portal's state; nothing was stopped"
-  bad_markers=$(jq -r '.refused[]? | select(test("^[a-z]+-[0-9]+\\.(url|pid|name)$"))' <<<"$rows" 2>/dev/null)
+  bad_markers=$(jq -r '.refused[]? | select(test("^(cloudflared|ngrok)-[0-9]+\\.(url|pid|target)$|^portless-[0-9]+\\.(url|name)$"))' <<<"$rows" 2>/dev/null)
   if [[ -n $bad_markers ]]; then
     die "cannot stop safely: ownership markers could not be read safely: $(tr '\n' ' ' <<<"$bad_markers")"
   fi
@@ -719,8 +957,10 @@ cmd_stop_own() {
     out=$(cmd_stop "$provider" "$port")
     jq -e .ok <<<"$out" >/dev/null 2>&1 || failed+=("$provider:$port $(jq -r .error <<<"$out")")
   done < <(jq -r '.files | keys[]
-    | select(test("^[a-z]+-[0-9]+\\.(url|pid|name)$")) | sub("\\.(url|pid|name)$"; "")' <<<"$rows" | sort -u | tr '-' '\t')
-  if (( ${#failed[@]} )); then jq -nc --args '{ok:false, error:("could not stop: " + ($ARGS.positional | join("; ")))}' "${failed[@]}"
+    | select(test("^(cloudflared|ngrok)-[0-9]+\\.(url|pid|target)$|^portless-[0-9]+\\.(url|name)$"))
+    | sub("\\.(url|pid|target|name)$"; "")' <<<"$rows" | sort -u | tr '-' '\t')
+  if (( ${#failed[@]} )); then
+    jq -nc --args '{ok:false, error:("could not stop: " + ($ARGS.positional | join("; ")))}' "${failed[@]}"
   else echo '{"ok":true}'; fi
 }
 
@@ -730,7 +970,7 @@ cmd_stop_own() {
 cmd_setup() {
   local provider="$1"
   known_provider "$provider" || die "unknown provider"
-  portless_state_load
+  [[ $provider != portless ]] || portless_state_load || die "could not read Portless state safely"
   augment_path   # exported: the setup engine is a child process
   declare -f "${provider}_setup" >/dev/null || die "no automatic setup for $provider"
   "${provider}_setup"
@@ -748,6 +988,12 @@ if [[ ${1:-} == --tld ]]; then
   shift 2
 fi
 
+case "${1:-}" in
+  setup|start|stop|status|stop-all|stop-own)
+    lifecycle_mutation nowait /usr/bin/bash "$SCRIPT_DIR/tunnels.sh" "$@"
+    ;;
+esac
+
 # The runtime dir is verified once here for the commands that write; status
 # verifies it through its own dump.
 [[ ${1:-} == status || ${1:-} == providers ]] || own_dir "$STATE_DIR" || die "state directory is not a private directory of yours: $STATE_DIR"
@@ -760,5 +1006,5 @@ case "${1:-}" in
   status)    cmd_status ;;
   stop-all)  cmd_stop_all ;;
   stop-own)  cmd_stop_own ;;
-  *) echo '{"ok":false,"error":"usage: tunnels.sh providers|setup <provider>|start <provider> <port> [name] [--owner <pid>]|stop <provider> <port>|status|stop-all|stop-own"}' ;;
+  *) echo '{"ok":false,"error":"usage: tunnels.sh providers|setup <provider>|start <provider> <port> [name] [--target <pid> <start>]|stop <provider> <port>|status|stop-all|stop-own"}' ;;
 esac

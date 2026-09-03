@@ -18,6 +18,7 @@
 set -o pipefail
 set -f          # addresses contain '*'; never let the shell glob them
 MAX_PORTS=512   # past this the scan reports an error, not a growing document
+MAX_PROBES=64   # direct callers stay bounded; Service normally requests eight
 
 command -v ss >/dev/null 2>&1 || { echo '{"version":1,"error":"ss not found","ports":[]}'; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo '{"version":1,"error":"jq not found","ports":[]}'; exit 0; }
@@ -32,11 +33,18 @@ if [[ ${1:-} == --probe ]]; then
   PROBE_DIR=$(mktemp -d)
   trap 'rm -rf "$PROBE_DIR"' EXIT
   _probes=()
-  for _pp in $2; do
-    [[ $_pp =~ ^[0-9]+$ ]] || continue
+  _probe_seen=" "
+  _probe_count=0
+  for _pp in ${2:-}; do
+    [[ $_pp =~ ^[0-9]{1,5}$ ]] && (( 10#$_pp > 0 && 10#$_pp < 65536 )) || continue
+    _pp=$((10#$_pp))
+    [[ $_probe_seen == *" $_pp "* ]] && continue
+    (( _probe_count >= MAX_PROBES )) && break
+    _probe_seen+="$_pp "
+    _probe_count=$((_probe_count + 1))
     curl -q -so /dev/null -w '%{http_code} %{time_total}' --max-redirs 0 --max-filesize 65536 \
       --max-time 1 "http://localhost:$_pp/" > "$PROBE_DIR/$_pp" 2>/dev/null &
-    _probes+=($!)
+    _probes+=("$!")
   done
   (( ${#_probes[@]} )) && wait "${_probes[@]}"
 fi
@@ -127,15 +135,18 @@ project_info() {
 }
 
 # ---- gather listening sockets -------------------------------------------------
-raw=$(ss -tlnpH 2>/dev/null)
+raw=$(ss -tlnpH 2>/dev/null) \
+  || { echo '{"version":1,"error":"could not query listening sockets","ports":[]}'; exit 0; }
 
 # Established peers per local port: one ss call covers every row. Unprivileged.
 # With a state filter ss omits the State column, so Local is the third field.
 declare -A PORT_CONNS
+established=$(ss -tnH state established 2>/dev/null) \
+  || { echo '{"version":1,"error":"could not query established sockets","ports":[]}'; exit 0; }
 while read -r _rq _sq local_addr _peer; do
   cport="${local_addr##*:}"
   [[ $cport =~ ^[0-9]+$ ]] && PORT_CONNS[$cport]=$(( ${PORT_CONNS[$cport]:-0} + 1 ))
-done < <(ss -tnH state established 2>/dev/null)
+done <<<"$established"
 
 CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
 PAGE_KB=$(( $(getconf PAGESIZE 2>/dev/null || echo 4096) / 1024 ))
@@ -170,7 +181,7 @@ emit() {
   local port
   for port in "${!PORT_ADDRS[@]}"; do
     local pid="${PORT_PID[$port]}" comm="" cmdline="" cwd="" root=""
-    local argv_rs="" argv_cut="" cpu_ticks="" rss_kb="" up_sec="" pstate="" st=()
+    local argv_b64="" argv_cut="" cpu_ticks="" rss_kb="" up_sec="" pstate="" st=()
     local lat_ms="" http_code=""
     if [[ -n $PROBE_DIR && -f "$PROBE_DIR/$port" ]]; then
       local probe_out t_int t_frac
@@ -184,16 +195,11 @@ emit() {
     if [[ -n $pid && -r /proc/$pid/comm ]]; then
       { comm=$(< "/proc/$pid/comm"); } 2>/dev/null
       comm="${comm%-MainThread}"   # node names its main thread; the process is still node
-      # One read serves both forms: the exact argv (record-separated, split in
-      # the single assembly jq — no per-pid jq fork) and the display cmdline.
-      # A command line past the cap is flagged: restart must not re-run a
-      # truncated one.
-      # \036 == U+001E record separator (tr speaks octal, not \xHH)
-      argv_rs=$(tr '\0' '\036' < "/proc/$pid/cmdline" 2>/dev/null)
-      argv_rs="${argv_rs%$'\x1e'}"     # the terminating NUL is not an argument
-      [[ ${#argv_rs} -gt 8192 ]] && { argv_rs="${argv_rs:0:8192}"; argv_cut=1; }   # a real argv is tiny; 8 KiB is generous and bounds the whole document
-      cmdline="${argv_rs//$'\x1e'/ }"
-      cmdline="${cmdline:0:2048}"
+      # Base64 keeps NUL argument boundaries distinct from every byte an
+      # argument itself may contain, including U+001E. 10,924 encoded bytes
+      # represent the first 8,193 raw bytes, enough to flag an over-cap argv.
+      argv_b64=$(base64 -w0 < "/proc/$pid/cmdline" 2>/dev/null)
+      [[ ${#argv_b64} -gt 10924 ]] && { argv_b64="${argv_b64:0:10924}"; argv_cut=1; }
       cwd=$(readlink -- "/proc/$pid/cwd" 2>/dev/null); cwd="${cwd:0:4096}"
       # stat: field 3 is run state; utime+stime are 14+15; starttime is 22 —
       # but comm (field 2) may contain spaces, so parse after the closing paren.
@@ -210,21 +216,10 @@ emit() {
     [[ -n $cwd && -d $cwd ]] && root=$(find_project_root "$cwd")
     project_info "$root"
 
-    # argv travels as the body of a JSON string so every byte of every
-    # argument survives the tab-separated stream: backslash, quote, newline,
-    # tab and the record separator are escaped here and decoded by one
-    # fromjson in the assembly below. Nothing else is a control character
-    # after the strip.
-    local argv_json=${argv_rs//\\/\\\\}
-    argv_json=${argv_json//\"/\\\"}
-    argv_json=${argv_json//$'\n'/\\n}
-    argv_json=${argv_json//$'\t'/\\t}
-    argv_json=${argv_json//$'\x1e'/\\u001e}
-
     local f joined=""
     for f in "$port" "${PORT_ADDRS[$port]}" "$pid" "$comm" "$cmdline" "$cwd" \
              "$root" "$PROJ_NAME" "$PROJ_MARKERS" "$PROJ_DEPS" \
-             "${PORT_CONNS[$port]:-0}" "$cpu_ticks" "$rss_kb" "$up_sec" "$pstate" "$argv_json" \
+             "${PORT_CONNS[$port]:-0}" "$cpu_ticks" "$rss_kb" "$up_sec" "$pstate" "$argv_b64" \
              "$lat_ms" "$http_code" "$argv_cut" "${st[19]}"; do
       f="${f//$'\t'/ }"; f="${f//$'\n'/ }"
       f="${f//[$'\x01'-$'\x1f'$'\x7f']/}"   # no C0 control survives; argv is already escaped
@@ -237,6 +232,9 @@ emit() {
 emit | jq -Rsc '
   def words: if . == "" then [] else split(" ") end;
   def num: if . == "" then null else tonumber end;
+  def argv: if . == "" then [] else
+    (@base64d | split("\u0000") | if length > 0 and .[-1] == "" then .[:-1] else . end)
+    end;
   split("\n")
   | map(select(length > 0) | split("\t"))
   | map({
@@ -255,12 +253,13 @@ emit | jq -Rsc '
       rssKb: (.[12] | num),
       upSec: (.[13] | num),
       procState: .[14],
-      argv: (.[15] | if . == "" then [] else (("\"" + . + "\"") | fromjson | split("\u001e")) end),
+      argv: (.[15] | argv),
       latMs: (.[16] | num),
       httpCode: (.[17] | num),
       argvTruncated: (.[18] == "1"),
       start: (.[19] | num)
     }
+    | .cmdline = ([.argv[] | gsub("[\u0000-\u001f\u007f]"; "")] | join(" ") | .[:2048])
     | .scope = (if (.addresses | any(. == "0.0.0.0" or . == "*" or . == "::")) then "all"
                 elif (.addresses | all(. == "127.0.0.1" or . == "::1" or startswith("127."))) then "local"
                 else "lan" end))

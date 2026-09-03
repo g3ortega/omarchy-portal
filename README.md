@@ -27,10 +27,10 @@ every share and name Portal created, drops the Portless CA from the browser
 stores Portal added it to, deletes cloudflared if it is still Portal's copy,
 and removes Portal's state), then `omarchy plugin remove g3ortega.portal`.
 
-Portal talks to: `localhost` ports it lists (latency probes), the local
-Portless proxy and ngrok agent, `1.1.1.1` or `dns.google` over HTTPS to
-confirm a fresh tunnel hostname exists, and GitHub for the pinned cloudflared
-release you ask it to install. Nothing else.
+Portal probes listed ports on `localhost` and calls the local Portless proxy
+and ngrok agent. It checks new tunnel hostnames through `1.1.1.1` or
+`dns.google` over HTTPS. A confirmed Cloudflared install downloads the pinned
+release from GitHub. Cloudflared and ngrok connect to their own services.
 
 ## What it does
 

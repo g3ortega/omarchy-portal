@@ -60,13 +60,28 @@ owned_pid "0$$" bash && bad "owned_pid accepted a zero-padded pid" || ok "owned_
 is "slug lowercases nothing, collapses runs, trims" "$(slug 'Hello  World!!')" "Hello-World"
 long=$(slug "$(printf 'a%.0s' {1..60})"); is "slug caps length" "${#long}" "40"
 
+signal_log="$T/safety-signals"
+SIGNAL_LOG="$signal_log" S="$S" bash -c '
+  source "$S/tunnels.sh"
+  proc() { printf "proc %s\n" "$*" >> "$SIGNAL_LOG"; return 1; }
+  kill() { printf "kill %s\n" "$*" >> "$SIGNAL_LOG"; return 1; }
+  alive_line() { return 0; }
+  group_alive() { return 0; }
+  STOP_TERM_WAIT=0; STOP_KILL_WAIT=0
+  stop_line "1 1" cloudflared; [[ $? -ne 0 ]] || exit 11
+  for line in "0 0" "-1 1" "" "2 nope"; do stop_line "$line" cloudflared; [[ $? -ne 0 ]] || exit 12; done
+  stop_line "999999999999999999999 1" cloudflared; [[ $? -ne 0 ]] || exit 13
+' >/dev/null 2>&1; rc=$?
+is "dangerous pid records fail before a signal path" "$rc $(grep -Ec -- '(^| )-(0|1)( |$)' "$signal_log" 2>/dev/null || true)" "0 0"
+
 # cmd_stop must never signal a pid the pidfile names unless it is still the provider.
 mkdir -p "$STATE_DIR"
 printf '%s' "$$" > "$STATE_DIR/cloudflared-4444.pid"
 printf 'https://x.trycloudflare.com' > "$STATE_DIR/cloudflared-4444.url"
 out=$(cmd_stop cloudflared 4444)
-is "cmd_stop with a reused pid returns ok without signalling" "$out" '{"ok":true}'
-[[ -f $STATE_DIR/cloudflared-4444.url ]] && bad "cmd_stop left the url file" || ok "cmd_stop cleared the state files"
+is "cmd_stop refuses a malformed pid record" "$(jq -r .error <<<"$out")" "cloudflared on port 4444 has a malformed pidfile; its records are kept"
+is "and keeps malformed ownership records" "$(ls "$STATE_DIR"/cloudflared-4444.* | wc -l)" "2"
+rm -f "$STATE_DIR"/cloudflared-4444.*
 
 # Concurrent first use: many helpers creating the same missing directory all succeed.
 R=$(mktemp -d); for i in $(seq 1 12); do state ensure "$R/a/b/c" & done; wait; [[ -d $R/a/b/c ]] && ok "concurrent ensure creates the directory once, without error" || bad "concurrent ensure failed"; rm -rf "$R"
@@ -75,7 +90,7 @@ R=$(mktemp -d); for i in $(seq 1 12); do state ensure "$R/a/b/c" & done; wait; [
 M=$(mktemp -d); mkdir -p "$M/my bin"; printf 'x' > "$M/my bin/cloudflared"; d=$(sha256sum "$M/my bin/cloudflared" | cut -d' ' -f1)
 jq -nc --arg p "$M/my bin/cloudflared" --arg s "$d" '{path:$p, sha256:$s}' | state write "$M/installed-cloudflared"
 plan=$(PORTAL_BIN_DIR="$M/my bin" PORTAL_METRICS_DIR=$M PORTAL_STATE_DIR=$M/rt "$S/uninstall.sh" --dry 2>&1)
-grep -qF "would: state_remove $M/my bin cloudflared" <<<"$plan" && ok "uninstall finds a marked binary in a path with a space" || bad "uninstall lost the marked binary: $plan"
+grep -qF "would: state remove-digest $M/my bin cloudflared $d 134217728" <<<"$plan" && ok "uninstall finds a marked binary in a path with a space" || bad "uninstall lost the marked binary: $plan"
 # State roots pointed at a shared directory lose only Portal's own entries.
 mkdir -p "$M/shared/metrics" "$M/rt2"; : > "$M/shared/thesis.txt"; : > "$M/shared/trusted-stores"; : > "$M/shared/metrics/3000.jsonl"; : > "$M/rt2/cloudflared-1.url"; : > "$M/rt2/notes.txt"
 plan=$(PORTAL_METRICS_DIR=$M/shared PORTAL_STATE_DIR=$M/rt2 "$S/uninstall.sh" --dry 2>/dev/null)
@@ -128,7 +143,7 @@ alive "$STATE_DIR/x-1.pid" "$me" && bad "alive accepted a reused pid" || ok "ali
 mkfifo "$STATE_DIR/cloudflared-4446.pid"; printf 'https://f.trycloudflare.com' > "$STATE_DIR/cloudflared-4446.url"
 out=$(timeout 10 bash -c 'source "'"$S"'/tunnels.sh"; cmd_status' 2>/dev/null); rc=$?
 [[ $rc -eq 0 ]] && ok "status returns with a FIFO planted at a pidfile path" || bad "status blocked or failed (rc=$rc)"
-is "and the FIFO-backed entry is not a tunnel" "$(jq -c '[.tunnels[]|select(.port==4446)]|length' <<<"$out")" "0"
+is "and reports the refused ownership record" "$(jq -c .ok <<<"$out")" "false"
 [[ -e $STATE_DIR/cloudflared-4446.url ]] && ok "and the unreadable pidfile's records are kept" || bad "status cleared records over an unreadable pidfile"
 rm -f "$STATE_DIR/cloudflared-4446".*
 crowd=$(mktemp -d); for i in $(seq 1 600); do : > "$crowd/f$i"; done
@@ -170,6 +185,11 @@ owned_pid "$lpid" sleep "$lstart" && ok "launch reports a pid whose start time m
 [[ $(ps -o sid= -p "$lpid" | tr -d ' ') == "$lpid" ]] && ok "the launched process leads its own session" || bad "launched process is not a session leader"
 is "the launch log is private" "$(stat -c %a "$STATE_DIR/launch-test.log")" "600"
 kill "$lpid" 2>/dev/null
+TRACKED="$T/tracked-launch"; mkdir -p "$TRACKED/blocked.pid"
+printf '#!/bin/sh\nprintf ran > "'"$TRACKED"'/ran"\n' > "$TRACKED/provider"; chmod 755 "$TRACKED/provider"
+state launch-tracked "$TRACKED" provider.log blocked.pid -- "$TRACKED/provider" >/dev/null 2>&1; rc=$?
+sleep 0.1
+is "a failed pid record prevents provider execution" "$rc $(test -e "$TRACKED/ran" && echo ran || echo blocked)" "1 blocked"
 # A launched tunnel keeps only stdio and its executable: any other inherited
 # descriptor would stay open for the tunnel's whole life — a lifecycle lock
 # held across the launch would never release, failing every later start and
@@ -188,11 +208,47 @@ mkdir -p "$T/prov"; cp /usr/bin/sleep "$T/prov/cloudflared"
 stub_env() {   # run a snippet with the stub as cloudflared and no DNS gate
   PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$1" bash -c 'source "'"$S"'/tunnels.sh"
     cloudflared_argv() { echo 300; }; cloudflared_url_from_log() { echo https://stub-one-two.trycloudflare.com; }
+    dns_gate() { return 0; }; listener_identity() { echo "999999 1"; }; target_owns_port() { return 0; }
+    portless_state_load; '"$2"
+}
+real_stub_env() {
+  PATH="$T/prov:$PATH" PORTAL_STATE_DIR="$1" bash -c 'source "'"$S"'/tunnels.sh"
+    cloudflared_argv() { echo 300; }; cloudflared_url_from_log() { echo https://stub-one-two.trycloudflare.com; }
     dns_gate() { return 0; }; portless_state_load; '"$2"
 }
+CANCEL="$T/cancel-start"; mkdir -p "$CANCEL"
+PORTAL_STATE_DIR="$CANCEL" /usr/bin/python3 -I -S "$PR" run 1000 60 -- bash -c 'source "'"$S"'/tunnels.sh"
+  cloudflared_argv() { echo 300; }; cloudflared_url_from_log() { return 1; }
+  listener_identity() { echo "999999 1"; }; target_owns_port() { return 0; }
+  dns_gate() { return 0; }; cmd_start cloudflared 4488' \
+  >/dev/null 2>&1 & start_wrapper=$!
+for _ in $(seq 1 100); do [[ -s $CANCEL/cloudflared-4488.pid ]] && break; sleep 0.02; done
+cancel_identity=$(cat "$CANCEL/cloudflared-4488.pid" 2>/dev/null)
+kill -TERM "$start_wrapper" 2>/dev/null; wait "$start_wrapper" 2>/dev/null; cancel_rc=$?
+if [[ -n $cancel_identity ]] && proc check ${cancel_identity%% *} ${cancel_identity#* } >/dev/null 2>&1; then
+  cancel_state=alive; proc signal ${cancel_identity%% *} ${cancel_identity#* } KILL >/dev/null 2>&1
+else
+  cancel_state=gone
+fi
+is "cancelling a public start ends its detached provider" "$((cancel_rc != 0)) $cancel_state" "1 gone"
+INCOMPLETE="$T/incomplete-start"; mkdir -p "$INCOMPLETE"
+state launch-tracked "$INCOMPLETE" cloudflared-4489.log cloudflared-4489.pid -- "$T/prov/cloudflared" 300 >/dev/null
+printf '999999 1' > "$INCOMPLETE/cloudflared-4489.target"
+incomplete_identity=$(cat "$INCOMPLETE/cloudflared-4489.pid")
+stub_env "$INCOMPLETE" 'cmd_status >/dev/null'
+proc check ${incomplete_identity%% *} ${incomplete_identity#* } >/dev/null 2>&1 && incomplete_state=alive || incomplete_state=gone
+is "status reconciles an owned provider with no URL" "$incomplete_state $(find "$INCOMPLETE" -maxdepth 1 -type f | wc -l)" "gone 0"
+
+MALFORMED_URL="$T/malformed-url"; mkdir -p "$MALFORMED_URL"
+state launch-tracked "$MALFORMED_URL" cloudflared-4490.log cloudflared-4490.pid -- "$T/prov/cloudflared" 300 >/dev/null
+printf 'not-a-url' > "$MALFORMED_URL/cloudflared-4490.url"
+malformed_status=$(stub_env "$MALFORMED_URL" 'cmd_status')
+is "status reports a malformed owned URL" "$(jq -c .ok <<<"$malformed_status") $(test -e "$MALFORMED_URL/cloudflared-4490.pid" && echo kept || echo lost)" "false kept"
+malformed_identity=$(cat "$MALFORMED_URL/cloudflared-4490.pid")
+proc signal ${malformed_identity%% *} ${malformed_identity#* } KILL >/dev/null 2>&1
 # A tunnel whose pidfile cannot be written is stopped again, not left public with no record.
 R1="$T/rt1"; mkdir -p "$R1/cloudflared-4449.pid"
-is "start reports a pidfile it could not write" "$(stub_env "$R1" 'cmd_start cloudflared 4449' | jq -r .error)" "could not record the cloudflared process; it was stopped again"
+is "start refuses an unreadable pidfile before launch" "$(stub_env "$R1" 'cmd_start cloudflared 4449' | jq -r .error)" "cloudflared on port 4449 has a pidfile that cannot be read; its records are kept"
 sleep 0.3; pgrep -f "$T/prov/cloudflared" >/dev/null && bad "the unrecorded tunnel is still running" || ok "and the unrecorded tunnel was stopped"
 rmdir "$R1/cloudflared-4449.pid"
 is "the same start succeeds once the pidfile can be written" "$(stub_env "$R1" 'cmd_start cloudflared 4449' | jq -r .url)" "https://stub-one-two.trycloudflare.com"
@@ -202,7 +258,7 @@ stub_env "$R1" 'cmd_stop cloudflared 4449 >/dev/null'
 stub_env "$R1" 'cmd_start cloudflared 4449 >/dev/null'
 [[ $(cat "$R1/cloudflared-4449.pid") != "$old" ]] && ok "a replacement wrote its own pidfile" || bad "no replacement pidfile"
 SNAP="$snap" stub_env "$R1" 'state() { if [[ $1 == dump && $2 == "$STATE_DIR" ]]; then printf "%s" "$SNAP"; else /usr/bin/python3 -I -S "$STATEDIR_PY" "$@"; fi; }; cmd_status >/dev/null'
-is "status with a stale snapshot leaves the replacement's records" "$(ls "$R1" | grep -c '^cloudflared-4449\.')" "4"
+is "status with a stale snapshot leaves the replacement's records" "$(ls "$R1" | grep -c '^cloudflared-4449\.')" "5"
 # A share whose reach record is missing still carries its pid to the check.
 rm -f "$R1/cloudflared-4449.reach"
 stub_env "$R1" 'cmd_status >/dev/null'
@@ -229,7 +285,7 @@ stub_env "$R1" 'cmd_start cloudflared 4449 >/dev/null'; old=$(cat "$R1/cloudflar
 printf '%s' $(( $(printf '%(%s)T' -1) - 700 )) > "$R1/cloudflared-4449.idle"
 snap=$(state dump "$R1" 8192 4096)
 state launch "$R1" cloudflared-4449.log -- "$T/prov/cloudflared" 300 > "$R1/cloudflared-4449.pid"; rm -f "$R1/cloudflared-4449.idle"
-SNAP="$snap" stub_env "$R1" 'state() { if [[ $1 == dump && $2 == "$STATE_DIR" ]]; then printf "%s" "$SNAP"; else /usr/bin/python3 -I -S "$STATEDIR_PY" "$@"; fi; }; cmd_status >/dev/null'
+SNAP="$snap" stub_env "$R1" 'state() { if [[ $1 == dump && $2 == "$STATE_DIR" ]]; then printf "%s" "$SNAP"; else /usr/bin/python3 -I -S "$STATEDIR_PY" "$@"; fi; }; target_owns_port() { return 1; }; cmd_status >/dev/null'
 sleep 0.2; kill -0 "${old%% *}" 2>/dev/null && ok "the snapshot's own process is left to its live status" || bad "the old process was stopped from a stale snapshot"
 kill -0 "$(cut -d' ' -f1 "$R1/cloudflared-4449.pid")" 2>/dev/null && ok "and the replacement was not stopped" || bad "the replacement was stopped from a stale snapshot"
 kill "${old%% *}" 2>/dev/null
@@ -238,7 +294,7 @@ is "cmd_stop fails when the process will not die" "$(stub_env "$R1" 'STOP_TERM_W
 is "and keeps its records" "$(ls "$R1" | grep -c -E '^cloudflared-4449\.(pid|url)$')" "2"
 # An idle tunnel whose stop failed stays in the status, records and all.
 printf '%s' $(( $(printf '%(%s)T' -1) - 700 )) > "$R1/cloudflared-4449.idle"
-is "status keeps listing an idle tunnel it could not stop" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; proc() { :; }; kill() { :; }; cmd_status' | jq -c '[.tunnels[]|select(.provider=="cloudflared" and .port==4449)|.port]')" "[4449]"
+is "status keeps listing an idle tunnel it could not stop" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; target_owns_port() { return 1; }; proc() { :; }; kill() { :; }; cmd_status' | jq -c '[.tunnels[]|select(.provider=="cloudflared" and .port==4449)|.port]')" "[4449]"
 is "and its records" "$(ls "$R1" | grep -c -E '^cloudflared-4449\.(pid|url)$')" "2"
 stub_env "$R1" 'cmd_stop cloudflared 4449 >/dev/null'   # a real stop ends the replacement
 # A process that ignores TERM is killed, and the stop reports only once it is gone.
@@ -254,17 +310,40 @@ printf '%s %s' "$sg" "$(awk '{print $22}' "/proc/$sg/stat")" > "$R1/cloudflared-
 printf 'https://a-b-c.trycloudflare.com' > "$R1/cloudflared-4449.url"; printf 'public' > "$R1/cloudflared-4449.reach"
 is "stop-all reports a tunnel it could not stop" "$(stub_env "$R1" 'STOP_TERM_WAIT=2; STOP_KILL_WAIT=2; proc() { :; }; kill() { :; }; cmd_stop_all' | jq -r .ok)" "false"
 kill "$sg" 2>/dev/null
-# --owner with no value is rejected at once, not spun on.
-is "start rejects a bare --owner" "$(timeout 5 bash -c 'source "'"$S"'/tunnels.sh"; portless_state_load; cmd_start cloudflared 3000 --owner' | jq -r .error)" "invalid owner pid"
+is "start rejects a bare --target" "$(timeout 5 bash -c 'source "'"$S"'/tunnels.sh"; portless_state_load; cmd_start cloudflared 3000 --target' | jq -r .error)" "invalid target identity"
 # stop-own enumerates a portless name-only partial start (alias written, url not yet).
 PN="$T/pn"; mkdir -p "$PN"; printf 'acme' > "$PN/portless-4460.name"
 is "stop-own enumerates a portless name-only partial" "$(PORTAL_STATE_DIR="$PN" bash -c 'source "'"$S"'/tunnels.sh"; state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" 2>/dev/null | jq -r '"'"'.files | keys[] | select(test("^[a-z]+-[0-9]+\\.(url|pid|name)$")) | sub("\\.(url|pid|name)$"; "")'"'"'')" "portless-4460"
-# A start that names the process it is for refuses a port that process no longer serves.
 python3 -m http.server 4470 --bind 127.0.0.1 >/dev/null 2>&1 & lp=$!; sleep 0.6
-is "start refuses a port served by another pid" "$(stub_env "$R1" 'cmd_start cloudflared 4470 --owner 1' | jq -r .error)" "port 4470 is no longer served by pid 1"
-is "start rejects a malformed owner" "$(stub_env "$R1" 'cmd_start cloudflared 4470 --owner 0x1' | jq -r .error)" "invalid owner pid"
-is "start proceeds for the pid that serves the port" "$(stub_env "$R1" "cmd_start cloudflared 4470 --owner $lp" | jq -c .ok)" "true"
+lpstart=$(proc_start "$lp")
+is "start refuses a stale process start" "$(real_stub_env "$R1" "cmd_start cloudflared 4470 --target $lp $((lpstart + 1))" | jq -r .error)" "port 4470 is no longer served by the approved process"
+is "start rejects a malformed target" "$(real_stub_env "$R1" 'cmd_start cloudflared 4470 --target 0x1 2' | jq -r .error)" "invalid target identity"
+is "start proceeds for the process that serves the port" "$(real_stub_env "$R1" "cmd_start cloudflared 4470 --target $lp $lpstart" | jq -c .ok)" "true"
+is "the public share records the approved process" "$(cat "$R1/cloudflared-4470.target")" "$lp $lpstart"
 stub_env "$R1" 'cmd_stop cloudflared 4470 >/dev/null'; kill "$lp" 2>/dev/null
+
+R2="$T/target-idle"; mkdir -p "$R2"
+python3 -m http.server 4471 --bind 127.0.0.1 >/dev/null 2>&1 & first_listener=$!; sleep 0.4
+first_start=$(proc_start "$first_listener")
+real_stub_env "$R2" "cmd_start cloudflared 4471 --target $first_listener $first_start >/dev/null"
+tunnel_identity=$(cat "$R2/cloudflared-4471.pid")
+kill "$first_listener" 2>/dev/null; wait "$first_listener" 2>/dev/null
+python3 -m http.server 4471 --bind 127.0.0.1 >/dev/null 2>&1 & replacement_listener=$!; sleep 0.4
+real_stub_env "$R2" 'cmd_status >/dev/null'
+proc check ${tunnel_identity%% *} ${tunnel_identity#* } >/dev/null 2>&1 && tunnel_state=alive || tunnel_state=gone
+is "a replacement listener cannot inherit a public share" "$tunnel_state" "gone"
+kill "$replacement_listener" 2>/dev/null; wait "$replacement_listener" 2>/dev/null
+
+R3="$T/idle-write"; mkdir -p "$R3"
+python3 -m http.server 4472 --bind 127.0.0.1 >/dev/null 2>&1 & idle_listener=$!; sleep 0.4
+idle_start=$(proc_start "$idle_listener")
+real_stub_env "$R3" "cmd_start cloudflared 4472 --target $idle_listener $idle_start >/dev/null"
+idle_tunnel=$(cat "$R3/cloudflared-4472.pid")
+kill "$idle_listener" 2>/dev/null; wait "$idle_listener" 2>/dev/null
+mkdir "$R3/cloudflared-4472.idle"
+real_stub_env "$R3" 'cmd_status >/dev/null'
+proc check ${idle_tunnel%% *} ${idle_tunnel#* } >/dev/null 2>&1 && idle_tunnel_state=alive || idle_tunnel_state=gone
+is "an unwritable idle deadline closes the public tunnel" "$idle_tunnel_state" "gone"
 is "cmd_stop rejects a bad port" "$(cmd_stop cloudflared x | jq -r .error)" "invalid port"
 # A pidfile that is present but unreadable is a failure, not an adopt-and-forget.
 UB="$T/unread"; mkdir -p "$UB"; : > "$UB/cloudflared-4600.pid"; printf 'https://x-y.trycloudflare.com' > "$UB/cloudflared-4600.url"
@@ -296,6 +375,17 @@ dp=$(cat "$dmark" 2>/dev/null)
 if [[ -n $dp && -e /proc/$dp && $(awk '{print $3}' "/proc/$dp/stat" 2>/dev/null) != Z ]]; then
   bad "a TERM-ignoring descendant survived the deadline (pid $dp)"; kill -9 "$dp" 2>/dev/null
 else ok "run kills a TERM-ignoring descendant after the grace period"; fi
+term_mark="$T/term-child.pid"
+/usr/bin/python3 -I -S "$PR" run 1000 60 -- bash -c 'printf "%s" "$BASHPID" > "'"$term_mark"'"; exec sleep 300' >/dev/null 2>&1 & wrapper=$!
+for _ in $(seq 1 50); do [[ -s $term_mark ]] && break; sleep 0.02; done
+term_child=$(cat "$term_mark" 2>/dev/null); term_start=$(proc_start "$term_child")
+kill -TERM "$wrapper" 2>/dev/null; wait "$wrapper" 2>/dev/null; term_rc=$?
+if [[ -n $term_child ]] && proc check "$term_child" "$term_start"; then
+  term_state=alive; proc signal "$term_child" "$term_start" KILL 2>/dev/null
+else
+  term_state=gone
+fi
+is "terminating the wrapper ends its helper session" "$term_rc $term_state" "143 gone"
 python3 -m http.server 4495 --bind 127.0.0.1 >/dev/null 2>&1 & lp=$!; sleep 0.6
 lst=$(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $20}')
 /usr/bin/python3 -I -S "$PR" check "$lp" "$lst" && ok "check accepts the pid with its own start time" || bad "check refused the right process"
@@ -309,8 +399,17 @@ is "lifecycle pauses the listed process" "$("$S/lifecycle.sh" pause "$lp" "$lst"
 is "lifecycle resumes it" "$("$S/lifecycle.sh" resume "$lp" "$lst" 4495 | jq -c .ok) $(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $1}')" "true S"
 is "lifecycle stops it" "$("$S/lifecycle.sh" stop "$lp" "$lst" 4495 | jq -c .ok)" "true"
 sleep 0.5; kill -0 "$lp" 2>/dev/null && bad "the listener survived stop" || ok "and it is gone"
+
+COMP="$T/restart-competitor"; mkdir -p "$COMP"
+(cd "$COMP" && exec python3 -m http.server 4496 --bind 127.0.0.1 >/dev/null 2>&1) & old_server=$!; sleep 0.4
+old_start=$(proc_start "$old_server")
+(cd "$COMP"; while ss -tlnH 'sport = :4496' | grep -q .; do sleep 0.02; done; exec python3 -m http.server 4496 --bind 127.0.0.1 >/dev/null 2>&1) & competitor=$!
+competitor_start=$(proc_start "$competitor")
+restart_result=$("$S/lifecycle.sh" restart "$old_server" "$old_start" 4496 "$COMP" '["/usr/bin/true"]')
+is "restart rejects an unrelated same-directory listener" "$(jq -c '[.ok,.effect]' <<<"$restart_result")" '[false,"stopped"]'
+proc signal "$competitor" "$competitor_start" TERM >/dev/null 2>&1 || true
 scan=$("$S/scan-ports.sh")
-is "the scan carries a numeric start time for every attributed port" "$(jq -c '[.ports[] | select(.pid != null) | .start | type == "number"] | all' <<<"$scan")" "true"
+is "the scan carries a numeric start time for every attributed port" "$(jq -c '[.ports[] | select(.pid != null)] as $rows | ($rows | length > 0) and ($rows | all(.start | type == "number"))' <<<"$scan")" "true"
 
 # ---- statedir.py: a short write is completed, never reported as done --------
 SW=$(mktemp -d); /usr/bin/python3 - "$SW" "$S/lib/statedir.py" <<'PY'
@@ -326,6 +425,36 @@ PY
 is "append completes short writes" "$(cat "$SW/3000.jsonl" | tr '\n' ' ')" '{"t":1,"a":1} {"t":2,"a":2} '
 is "atomic writes complete short writes" "$(wc -c < "$SW/whole")" "30"
 rm -rf "$SW"
+
+DR="$T/digest-race"; mkdir -p "$DR"; printf old > "$DR/cloudflared"
+old_sum=$(sha256sum "$DR/cloudflared" | cut -d' ' -f1)
+/usr/bin/python3 - "$DR" "$S/lib/statedir.py" "$old_sum" <<'PY'
+import importlib.util, os, sys
+root, path, expected = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("sd", path)
+sd = importlib.util.module_from_spec(spec); spec.loader.exec_module(sd)
+real = sd.rename_noreplace
+swapped = False
+def replace_before_quarantine(dirfd, old, new):
+    global swapped
+    if old == "cloudflared" and not swapped:
+        swapped = True
+        os.rename("cloudflared", "old-cloudflared", src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        fd = os.open("cloudflared", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dirfd)
+        os.write(fd, b"replacement"); os.close(fd)
+    return real(dirfd, old, new)
+sd.rename_noreplace = replace_before_quarantine
+try:
+    sd.cmd_remove_digest([root, "cloudflared", expected, "1024"])
+except sd.Refused:
+    pass
+else:
+    raise SystemExit("replacement race was accepted")
+PY
+is "digest removal preserves a replacement inode" "$(cat "$DR/cloudflared")" "replacement"
+printf 'existing' > "$DR/no-replace"
+printf 'new' | state create "$DR/no-replace" >/dev/null 2>&1; rc=$?
+is "atomic create never replaces a concurrent target" "$rc $(cat "$DR/no-replace")" "1 existing"
 
 # ---- portless-setup.sh status: installed means runnable ---------------------
 mkdir -p "$T/pl"; printf '#!/bin/sh\n' > "$T/pl/portless"; chmod 777 "$T/pl/portless"
@@ -349,16 +478,32 @@ is "setup with nothing remaining reports bare ok" "$(cmd_setup portless 2>/dev/n
 SCRIPT_DIR="$OLD_SD"
 
 # ---- portless-setup.sh untrust: a store that keeps the CA stays on record ----
-if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then
-  U=$(mktemp -d); mkdir -p "$U/nss"
+if command -v certutil >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
+  U=$(mktemp -d); mkdir -p "$U/nss" "$U/portless"
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$U/ca.key" -out "$U/portless/ca.pem" \
+    -days 1 -subj "/CN=portless Local CA" >/dev/null 2>&1
   certutil -d "sql:$U/nss" -N --empty-password >/dev/null 2>&1
   # The import itself, through the setup script's own function, and its record.
-  PORTAL_METRICS_DIR=$U PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$U"'/nss"' && ok "trust_store imports the CA" || bad "trust_store failed"
+  PORTAL_METRICS_DIR=$U PORTLESS_STATE_DIR=$U/portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$U"'/nss"' && ok "trust_store imports the CA" || bad "trust_store failed"
   certutil -d "sql:$U/nss" -L -n "portless Local CA" >/dev/null 2>&1 && ok "and the CA is in the store" || bad "the CA is not in the store"
   is "and the store is on record with a fingerprint" "$(cut -f1 "$U/trusted-stores"); $(cut -f2 "$U/trusted-stores" | grep -qE '^[0-9A-F]{64}$' && echo fp-ok)" "$U/nss; fp-ok"
+  mkdir -p "$U/rollback/nss" "$U/rollback-bin"
+  printf '#!/bin/sh\ncase " $* " in *" -L "*) exit 1;; *) exit 0;; esac\n' > "$U/rollback-bin/certutil"
+  chmod 755 "$U/rollback-bin/certutil"
+  PATH="$U/rollback-bin:$PATH" PORTAL_METRICS_DIR="$U/rollback" PORTLESS_STATE_DIR="$U/portless" bash -c '
+    set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1
+    state_remove() { return 1; }
+    trust_store "'"$U"'/rollback/nss"
+  ' >/dev/null 2>&1
+  [[ -e $U/rollback/trusted-stores ]] && ok "a failed trust rollback keeps its ownership record" || bad "a failed trust rollback lost its ownership record"
+  cp "$U/trusted-stores" "$U/trusted.before-error"; mkdir -p "$U/failbin"
+  printf '#!/bin/sh\nexit 1\n' > "$U/failbin/certutil"; chmod 755 "$U/failbin/certutil"
+  out=$(PATH="$U/failbin:$PATH" PORTAL_METRICS_DIR=$U "$S/portless-setup.sh" untrust)
+  is "untrust retains a store when verification fails" "$(jq -c .ok <<<"$out") $(test -e "$U/trusted-stores" && echo kept || echo lost)" "false kept"
+  cp "$U/trusted.before-error" "$U/trusted-stores"
   # A trust whose record cannot be written is undone: the store ends without the CA.
   mkdir -p "$U/rb/nss"; certutil -d "sql:$U/rb/nss" -N --empty-password >/dev/null 2>&1; mkdir -p "$U/rb/trusted-stores"
-  PORTAL_METRICS_DIR=$U/rb PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$U"'/rb/nss"' && bad "trust_store reported success without a record" || ok "trust_store fails when the record cannot be written"
+  PORTAL_METRICS_DIR=$U/rb PORTLESS_STATE_DIR=$U/portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$U"'/rb/nss"' && bad "trust_store reported success without a record" || ok "trust_store fails when the record cannot be written"
   certutil -d "sql:$U/rb/nss" -L -n "portless Local CA" >/dev/null 2>&1 && bad "and left the CA trusted" || ok "and undoes the import"
   [[ -e $U/rb/ca-import.pem ]] && bad "the import file was left behind" || ok "and leaves no import file behind"
   # A record that exists but cannot be read is not treated as empty.
@@ -373,7 +518,7 @@ if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then
   certutil -d "sql:$U/nss" -L -n "portless Local CA" >/dev/null 2>&1 && bad "the CA is still in the store" || ok "and the CA is gone from the store"
   # A certificate that replaced Portal's under the same name is not deleted.
   V=$(mktemp -d); mkdir -p "$V/nss"; certutil -d "sql:$V/nss" -N --empty-password >/dev/null 2>&1
-  PORTAL_METRICS_DIR=$V PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$V"'/nss"' >/dev/null
+  PORTAL_METRICS_DIR=$V PORTLESS_STATE_DIR=$U/portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$V"'/nss"' >/dev/null
   # replace the cert under the same nickname with a different self-signed CA
   openssl req -x509 -newkey rsa:2048 -nodes -keyout "$V/k.pem" -out "$V/other.pem" -days 1 -subj "/CN=portless Local CA" >/dev/null 2>&1
   certutil -d "sql:$V/nss" -D -n "portless Local CA" >/dev/null 2>&1
@@ -387,15 +532,15 @@ if command -v certutil >/dev/null 2>&1 && [[ -f $HOME/.portless/ca.pem ]]; then
   W=$(mktemp -d); mkdir -p "$W/nss" "$W/nss2"
   certutil -d "sql:$W/nss" -N --empty-password >/dev/null 2>&1
   certutil -d "sql:$W/nss2" -N --empty-password >/dev/null 2>&1
-  PORTAL_METRICS_DIR=$W PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$W"'/nss"' >/dev/null
+  PORTAL_METRICS_DIR=$W PORTLESS_STATE_DIR=$U/portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$W"'/nss"' >/dev/null
   chmod 777 "$W/trusted-stores"
-  PORTAL_METRICS_DIR=$W PORTLESS_STATE_DIR=$HOME/.portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$W"'/nss2"' >/dev/null 2>&1 \
+  PORTAL_METRICS_DIR=$W PORTLESS_STATE_DIR=$U/portless bash -c 'set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1; trust_store "'"$W"'/nss2"' >/dev/null 2>&1 \
     && bad "trust_store imported over an unreadable ledger" || ok "trust_store refuses when the ledger cannot be read"
   is "and the earlier record survives" "$(wc -l < "$W/trusted-stores")" "1"
   chmod 700 "$W/trusted-stores"; rm -rf "$W"
   rm -rf "$U"
 else
-  ok "untrust checks skipped (no certutil or no local Portless CA)"
+  ok "untrust checks skipped (no certutil or openssl)"
 fi
 
 # ---- metrics.sh --------------------------------------------------------------
@@ -431,6 +576,87 @@ lines=$(wc -l < "$PORTAL_METRICS_DIR/metrics/4000.jsonl"); bytes=$(wc -c < "$POR
 "$M" unwatch 3000 >/dev/null
 [[ -e $PORTAL_METRICS_DIR/metrics/3000.jsonl ]] && bad "unwatch left the metric file" || ok "unwatch deletes the metric file"
 is "state files are private" "$(stat -c %a "$PORTAL_METRICS_DIR/metrics/4000.jsonl")" "600"
+exec 6>"$PORTAL_METRICS_DIR/.metrics.lock"; flock -x 6
+locked_append=$(timeout 2 "$M" append-batch '{"6000":{"t":1}}')
+exec 6>&-
+is "metric append fails fast behind a watched-state update" "$(jq -c .ok <<<"$locked_append") $(test -e "$PORTAL_METRICS_DIR/metrics/6000.jsonl" && echo wrote || echo clean)" "false clean"
+
+RB="$T/review"; mkdir -p "$RB/lock" "$RB/append" "$RB/portless" "$RB/cli" "$RB/bin" "$RB/fake"
+printf 'keep' > "$RB/victim"; ln -s "$RB/victim" "$RB/lock/.lifecycle.lock"
+state lock "$RB/lock" nowait .lifecycle.lock -- /usr/bin/true >/dev/null 2>&1; rc=$?
+is "a lifecycle lock symlink is refused" "$rc $(cat "$RB/victim")" "1 keep"
+rm "$RB/lock/.lifecycle.lock"
+is "a safe lifecycle lock runs its command" "$(state lock "$RB/lock" nowait .lifecycle.lock -- /usr/bin/printf ran 2>/dev/null)" "ran"
+exec 5>"$RB/lock/.lifecycle.lock"; flock -x 5
+PORTAL_STATE_DIR="$RB/lock" timeout 2 "$S/tunnels.sh" stop cloudflared 6000 >/dev/null 2>&1; rc=$?
+exec 5>&-
+is "tunnel mutations fail fast behind the lifecycle lock" "$rc" "75"
+
+mkdir -p "$RB/uninstall-state" "$RB/uninstall-runtime" "$RB/uninstall-bin"
+printf '#!/bin/sh\nprintf called >> "'"$RB"'/uninstall-called"\nexit 0\n' > "$RB/uninstall-bin/omarchy"
+chmod 755 "$RB/uninstall-bin/omarchy"
+exec 5>"$RB/uninstall-state/.metrics.lock"; flock -x 5
+PATH="$RB/uninstall-bin:$PATH" PORTAL_METRICS_DIR="$RB/uninstall-state" PORTAL_STATE_DIR="$RB/uninstall-runtime" \
+  timeout 2 "$S/uninstall.sh" >/dev/null 2>&1; rc=$?
+exec 5>&-
+is "uninstall fails before effects when metrics are being updated" "$rc $(test -e "$RB/uninstall-called" && echo called || echo clean)" "75 clean"
+
+exec 7<"$RB/append"; flock -x 7
+printf 'x\n' | timeout 2 /usr/bin/python3 -I -S "$S/lib/statedir.py" append "$RB/append/sample" 10 1024 >/dev/null 2>&1; rc=$?
+exec 7>&-
+is "append refuses a held directory lock without blocking" "$rc" "1"
+
+p1start=$(cut -d')' -f2- /proc/1/stat 2>/dev/null | awk '{print $20}')
+/usr/bin/python3 -I -S "$PR" check 1 "${p1start:-1}" >/dev/null 2>&1; rc=$?
+is "process identity rejects pid 1" "$rc" "1"
+
+printf '[]' > "$RB/route-target"; ln -s "$RB/route-target" "$RB/portless/routes.json"
+PORTLESS_STATE_DIR="$RB/portless" PORTAL_STATE_DIR="$RB/runtime" bash -c 'source "'"$S"'/lib/portless.sh"; portless_state_load' >/dev/null 2>&1; rc=$?
+is "a refused Portless route makes the state load fail" "$rc" "1"
+
+mkdir -p "$RB/portless-stop" "$RB/portless-stop-state" "$RB/fake-portless"
+printf '[{"port":45882,"hostname":"acme.test"}]' > "$RB/portless-stop/routes.json"
+printf 'acme' > "$RB/portless-stop-state/portless-45882.name"
+printf 'https://acme.test' > "$RB/portless-stop-state/portless-45882.url"
+printf '#!/bin/sh\nexit 0\n' > "$RB/fake-portless/portless"; chmod 755 "$RB/fake-portless/portless"
+stubborn=$(PATH="$RB/fake-portless:$PATH" PORTLESS_STATE_DIR="$RB/portless-stop" PORTAL_STATE_DIR="$RB/portless-stop-state" \
+  bash -c 'source "'"$S"'/tunnels.sh"; PROVIDER_BIN[portless]="'"$RB"'/fake-portless/portless"; cmd_stop portless 45882')
+is "Portless removal keeps ownership when the route remains" "$(jq -c .ok <<<"$stubborn") $(test -e "$RB/portless-stop-state/portless-45882.name" && echo kept || echo lost)" "false kept"
+
+printf '#!/bin/bash\necho '\''{"ok":false,"error":"setup engine failed"}'\''\n' > "$RB/fake/portless-setup.sh"; chmod 755 "$RB/fake/portless-setup.sh"
+OLD_SD="$SCRIPT_DIR"; SCRIPT_DIR="$RB/fake"
+is "Portless setup propagates an engine failure" "$(cmd_setup portless | jq -c .)" '{"ok":false,"error":"setup engine failed"}'
+SCRIPT_DIR="$OLD_SD"
+
+cp "$S/portal" "$RB/cli/portal"; printf '#!/bin/bash\necho '\''{"ok":false,"error":"sentinel"}'\''\n' > "$RB/cli/tunnels.sh"; chmod 755 "$RB/cli/portal" "$RB/cli/tunnels.sh"
+printf '#!/bin/sh\nexit 1\n' > "$RB/fake/omarchy-shell"; chmod 755 "$RB/fake/omarchy-shell"
+"$RB/cli/portal" expose cloudflared 3000 >/dev/null 2>&1; rc=$?
+is "portal expose returns failure for an action error" "$rc" "1"
+shared_error=$(PATH="$RB/fake:$PATH" "$RB/cli/portal" shared 2>&1); rc=$?
+is "portal shared preserves an offline status failure" "$rc $(grep -c sentinel <<<"$shared_error")" "1 1"
+
+printf 'mine' > "$RB/bin/cloudflared"
+printf '#!/bin/bash\nprintf called > "'"$RB"'/curl-called"; exit 1\n' > "$RB/fake/curl"; chmod 755 "$RB/fake/curl"
+PORTAL_BIN_DIR="$RB/bin" PORTAL_METRICS_DIR="$RB/provider-state" PATH="$RB/fake:/usr/bin:/bin" "$S/provider-install.sh" cloudflared >/dev/null 2>&1
+[[ -e $RB/curl-called ]] && bad "provider install tried to overwrite an existing target" || ok "provider install refuses an existing target before download"
+
+mkdir -p "$RB/home/.local/share/mise/installs/node/1/bin" "$RB/home/.local/share/mise/shims"
+printf '#!/bin/sh\nexit 0\n' > "$RB/home/.local/share/mise/installs/node/1/bin/portless"
+chmod 755 "$RB/home/.local/share/mise/installs/node/1/bin/portless"
+ln -s /usr/bin/true "$RB/home/.local/share/mise/shims/portless"
+resolved_portless=$(HOME="$RB/home" PATH="$RB/home/.local/share/mise/shims:/usr/bin:/bin" bash -c 'source "'"$S"'/tunnels.sh"; provider_bin portless')
+is "provider resolution prefers a concrete version-manager binary over its shim" "$resolved_portless" "$RB/home/.local/share/mise/installs/node/1/bin/portless"
+
+printf '#!/bin/bash\nexit 1\n' > "$RB/fake/ss"; chmod 755 "$RB/fake/ss"
+scan_fail=$(PATH="$RB/fake:/usr/bin:/bin" "$S/scan-ports.sh")
+is "a failed socket listing is an explicit scan error" "$(jq -r '.error // empty' <<<"$scan_fail")" "could not query listening sockets"
+
+mkdir -p "$RB/shared/metrics" "$RB/shared-runtime"
+: > "$RB/shared-runtime/server-3000.log"; : > "$RB/shared-runtime/.foreign.tmp"; : > "$RB/shared-runtime/ngrok.ok"
+: > "$RB/shared/ca-import.pem"; : > "$RB/shared/watched.json"
+plan=$(PORTAL_METRICS_DIR="$RB/shared" PORTAL_STATE_DIR="$RB/shared-runtime" "$S/uninstall.sh" --dry 2>/dev/null)
+grep -qE 'server-3000|foreign' <<<"$plan" && bad "uninstall selected unrelated shared files" || ok "uninstall ignores unrelated shared files"
+is "uninstall includes its exact transient files" "$(grep -Ec 'ngrok.ok|ca-import.pem' <<<"$plan")" "2"
 
 echo; echo "$pass passed, $fail failed"
 exit $((fail > 0))

@@ -23,15 +23,28 @@ firefox_profiles() {
 # once in the parent shell; a caller inside $(...) that finds nothing loaded
 # loads for itself. Reload after anything that changes routes.
 PORTLESS_STATE=""
+PORTLESS_STATE_ERROR=""
 # Returns nonzero when the read was refused (for example the directory is over
 # its entry cap), so a caller can tell "refused" from "empty" instead of acting
 # as if every route vanished.
 portless_state_load() {
-  PORTLESS_STATE=$(state dump "$PORTLESS_DIR" 1048576 512 routes.json proxy.port proxy.tlds proxy.tld 2>/dev/null) && return 0
-  PORTLESS_STATE='{"files":{}}'; return 1
+  PORTLESS_STATE_ERROR=""
+  if [[ ! -e $PORTLESS_DIR && ! -L $PORTLESS_DIR ]]; then
+    PORTLESS_STATE='{"files":{},"refused":[]}'
+    return 0
+  fi
+  PORTLESS_STATE=$(state dump "$PORTLESS_DIR" 1048576 512 routes.json proxy.port proxy.tlds proxy.tld 2>/dev/null) \
+    || { PORTLESS_STATE=''; PORTLESS_STATE_ERROR="state directory refused"; return 1; }
+  jq -e '(.files | type == "object") and ((.refused // []) | length == 0)' <<<"$PORTLESS_STATE" >/dev/null 2>&1 \
+    || { PORTLESS_STATE_ERROR="requested state leaf refused"; return 1; }
+  if jq -e '.files | has("routes.json")' <<<"$PORTLESS_STATE" >/dev/null 2>&1; then
+    jq -er '.files["routes.json"]' <<<"$PORTLESS_STATE" | jq -e 'type == "array"' >/dev/null 2>&1 \
+      || { PORTLESS_STATE_ERROR="routes.json is malformed"; return 1; }
+  fi
+  return 0
 }
 portless_file() {  # <name>: contents, or empty
-  [[ -n $PORTLESS_STATE ]] || portless_state_load
+  [[ -n $PORTLESS_STATE ]] || portless_state_load || return 1
   jq -r --arg n "$1" '.files[$n] // empty' <<<"$PORTLESS_STATE"
 }
 routes_json() { portless_file routes.json; }
@@ -102,7 +115,7 @@ configured_tld() {
 # The bare name portless holds for a port, if any.
 portless_route_name() {  # <port>
   local n
-  n=$(routes_json | jq -r --argjson p "$1" 'first(.[] | select(.port == $p) | .hostname) // empty' 2>/dev/null)
+  n=$(routes_json | jq -r --argjson p "$1" 'first(.[] | select(.port == $p) | .hostname) // empty' 2>/dev/null) || return 1
   printf '%s' "${n%%.*}"
 }
 

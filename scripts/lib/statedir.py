@@ -15,20 +15,28 @@ and truncation go through the validated descriptor, never the path again.
   dump     <dir> [maxbytes] [maxfiles] [name...]  JSON {"files":{name:text}} of every leaf, or only the named ones
   read     <path> [maxbytes]              raw bytes to stdout
   write    <path> [mode]                  stdin -> atomic replace
+  create   <path> [mode]                  stdin -> atomic no-replace create
   append   <path> <maxlines> [maxbytes]   stdin lines -> descriptor append, trimmed
   append-many <dir> <maxlines> <maxbytes> stdin rows "<name>\t<line>" -> one append each
   remove   <dir> <name>...                unlink leaves (never directories)
+  remove-digest <dir> <name> <sha256> <maxbytes>  remove only the bound matching file
   truncate <path> <maxbytes>              empty the file once it is past the cap
+  lock     <dir> <nowait|wait> <name> -- <argv...>  run argv under a stable lock
   launch   <dir> <logname> -- <argv...>   daemonize argv with the log as stdio;
-                                          prints "pid starttime". The executable
-                                          is walked to by descriptor (every
-                                          directory root's or ours, swappable by
-                                          nobody else) and executed by descriptor.
+                                           prints "pid starttime". The executable
+                                           is walked to by descriptor (every
+                                           directory root's or ours, swappable by
+                                           nobody else) and executed by descriptor.
+  launch-tracked <dir> <logname> <pidname> -- <argv...>
+                                           launch only after the pid record is durable
 
-Exit status 0 on success, 1 when a path is refused, 2 on usage; every refusal
-fails closed with nothing read or written. Runs under the caller's timeout.
+Most commands exit 0 on success, 1 when refused, and 2 on top-level usage.
+Lock returns 75 on nowait contention and otherwise returns its child's status.
+Every refusal fails closed. Runs under the caller's timeout.
 """
+import errno
 import fcntl
+import hashlib
 import os
 import stat
 import sys
@@ -94,6 +102,12 @@ def split(path):
     return d, name
 
 
+def check_name(name, kind="name"):
+    if not name or "/" in name or name in (".", ".."):
+        raise Refused(f"refused {kind}: {name}")
+    return name
+
+
 def open_leaf(dirfd, name, flags, cap):
     """Open a leaf relative to a verified directory and bind it: regular, ours, writable by nobody else, single link, capped."""
     try:
@@ -106,6 +120,25 @@ def open_leaf(dirfd, name, flags, cap):
     if not stat.S_ISREG(st.st_mode) or st.st_uid != UID or (st.st_mode & 0o022) or st.st_nlink != 1 or st.st_size > cap:
         os.close(fd)
         raise Refused(f"refused {name}: not a plain owned file, writable by nobody else, under the cap")
+    return fd
+
+
+def open_lock(dirfd, name):
+    check_name(name, "lock name")
+    try:
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+    except OSError as e:
+        raise Refused(f"refused {name}: {e.strerror}")
+    st = os.fstat(fd)
+    try:
+        current = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+    except OSError as e:
+        os.close(fd)
+        raise Refused(f"refused {name}: {e.strerror}")
+    if (not stat.S_ISREG(st.st_mode) or st.st_uid != UID or (st.st_mode & 0o022)
+            or st.st_nlink != 1 or (st.st_dev, st.st_ino) != (current.st_dev, current.st_ino)):
+        os.close(fd)
+        raise Refused(f"refused {name}: not a stable plain owned lock file")
     return fd
 
 
@@ -139,7 +172,21 @@ def write_all(fd, data):
         view = view[os.write(fd, view):]
 
 
-def atomic_write(dirfd, name, data, mode=0o600):
+def hash_fd(fd, cap):
+    os.lseek(fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    total = 0
+    while True:
+        chunk = os.read(fd, min(65536, cap + 1 - total))
+        if not chunk:
+            return digest.hexdigest()
+        total += len(chunk)
+        if total > cap:
+            raise Refused("refused: grew past the cap while hashing")
+        digest.update(chunk)
+
+
+def atomic_write(dirfd, name, data, mode=0o600, replace=True):
     """data is bytes, or a callable that writes to the descriptor and returns the byte count."""
     tmp = f".{name}.{os.urandom(8).hex()}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
@@ -151,7 +198,13 @@ def atomic_write(dirfd, name, data, mode=0o600):
         os.fsync(fd)
         os.fchmod(fd, mode)
         os.close(fd)
-        os.rename(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        if replace:
+            os.rename(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        else:
+            try:
+                rename_noreplace(dirfd, tmp, name)
+            except FileExistsError:
+                raise Refused(f"refused {name}: already exists")
         os.fsync(dirfd)
     except BaseException:
         try:
@@ -201,6 +254,26 @@ def open_exe(path):
     return efd
 
 
+def process_starttime(pid):
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            fields = f.read().rsplit(b")", 1)[1].split()
+    except (OSError, IndexError):
+        raise Refused("launched process disappeared before it could be recorded")
+    if len(fields) <= 19 or not fields[19].isdigit():
+        raise Refused("launched process has no valid start time")
+    return fields[19].decode()
+
+
+def close_unrelated(keep):
+    for name in os.listdir("/proc/self/fd"):
+        if name.isdigit() and int(name) not in keep:
+            try:
+                os.close(int(name))
+            except OSError:
+                pass
+
+
 def cmd_ensure(a):
     for d in a:
         os.close(open_dir(d, create=True))
@@ -245,25 +318,62 @@ def cmd_read(a):
         os.close(dirfd)
 
 
+def copy_stdin(fd):
+    total = 0
+    while True:
+        chunk = sys.stdin.buffer.read(1 << 20)
+        if not chunk:
+            return total
+        total += len(chunk)
+        if total > WRITE_CAP:
+            raise Refused("refused: content past the cap")
+        write_all(fd, chunk)
+
+
 def cmd_write(a):
     mode = int(a[1], 8) if len(a) > 1 else 0o600
     d, name = split(a[0])
-
-    def copy_stdin(fd):
-        total = 0
-        while True:
-            chunk = sys.stdin.buffer.read(1 << 20)
-            if not chunk:
-                return total
-            total += len(chunk)
-            if total > WRITE_CAP:
-                raise Refused("refused: content past the cap")
-            write_all(fd, chunk)
-
     dirfd = open_dir(d, create=True)
     try:
         atomic_write(dirfd, name, copy_stdin, mode)
     finally:
+        os.close(dirfd)
+
+
+def cmd_create(a):
+    mode = int(a[1], 8) if len(a) > 1 else 0o600
+    d, name = split(a[0])
+    dirfd = open_dir(d, create=True)
+    try:
+        atomic_write(dirfd, name, copy_stdin, mode, replace=False)
+    finally:
+        os.close(dirfd)
+
+
+def cmd_lock(a):
+    if len(a) < 5 or a[1] not in ("nowait", "wait") or a[3] != "--":
+        raise Refused("usage: lock <dir> <nowait|wait> <name> -- <argv...>")
+    argv = a[4:]
+    if not os.path.isabs(argv[0]):
+        raise Refused("lock needs an absolute command path")
+    dirfd = open_dir(a[0], create=True)
+    lockfd = None
+    try:
+        lockfd = open_lock(dirfd, a[2])
+        flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if a[1] == "nowait" else 0)
+        try:
+            fcntl.flock(lockfd, flags)
+        except BlockingIOError:
+            return 75
+        import subprocess
+        try:
+            result = subprocess.run(argv, close_fds=True)
+        except OSError as e:
+            raise Refused(f"could not run {argv[0]}: {e.strerror}")
+        return result.returncode if result.returncode >= 0 else 128 - result.returncode
+    finally:
+        if lockfd is not None:
+            os.close(lockfd)
         os.close(dirfd)
 
 
@@ -306,7 +416,10 @@ def cmd_append(a):
         raise Refused("refused: content past the cap")
     dirfd = open_dir(d, create=True)
     try:
-        fcntl.flock(dirfd, fcntl.LOCK_EX)   # appends in one directory take turns; a trim replaces the file
+        try:
+            fcntl.flock(dirfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Refused("append directory is busy")
         append_one(dirfd, name, data, maxlines, cap)
     finally:
         os.close(dirfd)
@@ -319,7 +432,10 @@ def cmd_append_many(a):
         raise Refused("refused: batch past the cap")
     dirfd = open_dir(a[0], create=True)
     try:
-        fcntl.flock(dirfd, fcntl.LOCK_EX)   # see cmd_append
+        try:
+            fcntl.flock(dirfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Refused("append directory is busy")
         for row in batch.splitlines():
             name, _, line = row.partition(b"\t")
             if not name or b"/" in name or name in (b".", b"..") or not line:
@@ -346,6 +462,100 @@ def cmd_remove(a):
         os.close(dirfd)
 
 
+def rename_noreplace(dirfd, old, new):
+    import ctypes
+    try:
+        call = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError:
+        raise OSError(errno.ENOSYS, "renameat2 is unavailable")
+    call.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    call.restype = ctypes.c_int
+    if call(dirfd, os.fsencode(old), dirfd, os.fsencode(new), 1) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+
+
+def refuse_quarantine(dirfd, quarantine, name, reason):
+    try:
+        rename_noreplace(dirfd, quarantine, name)
+    except OSError as e:
+        raise Refused(f"{reason}; could not restore {quarantine}: {e.strerror}")
+    try:
+        os.fsync(dirfd)
+    except OSError as e:
+        raise Refused(f"{reason}; restored {name} but could not sync its directory: {e.strerror}")
+    raise Refused(reason)
+
+
+def cmd_remove_digest(a):
+    if len(a) != 4:
+        raise Refused("usage: remove-digest <dir> <name> <sha256> <maxbytes>")
+    name = check_name(a[1])
+    expected = a[2].lower()
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise Refused("invalid sha256 digest")
+    try:
+        cap = int(a[3])
+    except ValueError:
+        raise Refused("invalid byte cap")
+    if cap < 0 or cap > WRITE_CAP:
+        raise Refused("invalid byte cap")
+
+    dirfd = open_dir(a[0])
+    fd = None
+    try:
+        fd = open_leaf(dirfd, name, os.O_RDONLY, cap)
+        if fd is None:
+            raise Refused(f"missing: {name}")
+        opened = os.fstat(fd)
+        if hash_fd(fd, cap) != expected:
+            raise Refused(f"digest mismatch: {name}")
+
+        quarantine = None
+        for _ in range(16):
+            candidate = f".remove-{os.urandom(16).hex()}"
+            try:
+                rename_noreplace(dirfd, name, candidate)
+                quarantine = candidate
+                break
+            except FileExistsError:
+                continue
+            except OSError as e:
+                raise Refused(f"could not quarantine {name}: {e.strerror}")
+        if quarantine is None:
+            raise Refused(f"could not quarantine {name}")
+
+        try:
+            moved = os.stat(quarantine, dir_fd=dirfd, follow_symlinks=False)
+        except OSError as e:
+            refuse_quarantine(dirfd, quarantine, name, f"could not bind quarantined {name}: {e.strerror}")
+        if (moved.st_dev, moved.st_ino) != (opened.st_dev, opened.st_ino):
+            refuse_quarantine(dirfd, quarantine, name, f"candidate changed while removing {name}")
+        try:
+            same_digest = hash_fd(fd, cap) == expected
+        except Refused as e:
+            refuse_quarantine(dirfd, quarantine, name, str(e))
+        if not same_digest or os.fstat(fd).st_nlink != 1:
+            refuse_quarantine(dirfd, quarantine, name, f"candidate changed while removing {name}")
+        try:
+            final = os.stat(quarantine, dir_fd=dirfd, follow_symlinks=False)
+        except OSError as e:
+            refuse_quarantine(dirfd, quarantine, name, f"could not recheck quarantined {name}: {e.strerror}")
+        if (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino):
+            refuse_quarantine(dirfd, quarantine, name, f"quarantine changed while removing {name}")
+        try:
+            os.unlink(quarantine, dir_fd=dirfd)
+        except OSError as e:
+            refuse_quarantine(dirfd, quarantine, name, f"could not remove {name}: {e.strerror}")
+        if os.fstat(fd).st_nlink != 0:
+            raise Refused(f"removed name but inode is still linked: {name}")
+        os.fsync(dirfd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(dirfd)
+
+
 def cmd_truncate(a):
     cap = int(a[1])
     d, name = split(a[0])
@@ -363,68 +573,114 @@ def cmd_truncate(a):
         os.close(dirfd)
 
 
-def cmd_launch(a):
-    if len(a) < 4 or a[2] != "--":
-        raise Refused("usage: launch <dir> <logname> -- <argv...>")
-    d, logname, argv = a[0], a[1], a[3:]
-    if "/" in logname or logname in (".", ".."):
-        raise Refused(f"refused log name: {logname}")
-    if not argv or not os.path.isabs(argv[0]):
+def launch_process(d, logname, pidname, argv, executable=None):
+    check_name(logname, "log name")
+    if pidname is not None:
+        check_name(pidname, "pid name")
+        if pidname == logname:
+            raise Refused("log and pid names must differ")
+    executable = executable or (argv[0] if argv else "")
+    if not argv or not os.path.isabs(executable):
         raise Refused("launch needs an absolute executable path")
-    exefd = open_exe(argv[0])
-    dirfd = open_dir(d, create=True)
+
+    exefd = open_exe(executable)
+    dirfd = None
+    logfd = None
+    ready_r = ready_w = release_r = release_w = None
+    pid = None
+    released = False
     try:
-        # A fresh, exclusive, private log; then a session of its own with that log as stdio.
+        dirfd = open_dir(d, create=True)
         try:
             os.unlink(logname, dir_fd=dirfd)
         except FileNotFoundError:
             pass
-        logfd = os.open(logname, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_APPEND, 0o600, dir_fd=dirfd)
-        os.set_inheritable(logfd, True)
-        r, w = os.pipe()
+        except OSError as e:
+            raise Refused(f"could not replace log {logname}: {e.strerror}")
+        try:
+            logfd = os.open(logname, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_APPEND | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+        except OSError as e:
+            raise Refused(f"could not create log {logname}: {e.strerror}")
+        ready_r, ready_w = os.pipe()
+        release_r, release_w = os.pipe()
         pid = os.fork()
         if pid == 0:
             try:
-                os.close(r)
+                os.close(ready_r)
+                os.close(release_w)
                 os.setsid()
-                devnull = os.open(os.devnull, os.O_RDONLY)
+                devnull = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
                 os.dup2(devnull, 0)
                 os.dup2(logfd, 1)
                 os.dup2(logfd, 2)
-                os.write(w, b"1")
-                os.close(w)
-                os.set_inheritable(exefd, True)   # a #! script is handed to its interpreter as /dev/fd/N
-                # Only stdio and the executable survive into the tunnel: any
-                # other inherited descriptor (a lifecycle lock among them)
-                # would stay open for the tunnel's whole life — a lock the
-                # launcher held would never release, blocking every later
-                # start and hanging uninstall's exclusive wait forever.
-                keep = {0, 1, 2, exefd}
-                for name in os.listdir("/proc/self/fd"):
-                    if name.isdigit() and int(name) not in keep:
-                        try:
-                            os.close(int(name))
-                        except OSError:
-                            pass
-                os.execve(exefd, argv, os.environ)      # the descriptor, not the path
+                close_unrelated({0, 1, 2, exefd, ready_w, release_r})
+                write_all(ready_w, b"1")
+                os.close(ready_w)
+                if os.read(release_r, 1) != b"1":
+                    os._exit(126)
+                os.close(release_r)
+                os.set_inheritable(exefd, True)
+                os.execve(exefd, argv, os.environ)
             finally:
                 os._exit(127)
-        os.close(w)
-        os.read(r, 1)     # the child has its session before we report it
-        os.close(r)
-        os.close(logfd)
-        os.close(exefd)
-        with open(f"/proc/{pid}/stat", "rb") as f:
-            fields = f.read().rsplit(b")", 1)[1].split()
-        sys.stdout.write(f"{pid} {fields[19].decode()}")
+
+        os.close(ready_w)
+        ready_w = None
+        os.close(release_r)
+        release_r = None
+        if os.read(ready_r, 1) != b"1":
+            raise Refused("launched process failed before it could be recorded")
+        os.close(ready_r)
+        ready_r = None
+        start = process_starttime(pid)
+        if pidname is not None:
+            atomic_write(dirfd, pidname, f"{pid} {start}".encode())
+        try:
+            write_all(release_w, b"1")
+        except OSError as e:
+            raise Refused(f"launched process exited before release: {e.strerror}")
+        released = True
+        os.close(release_w)
+        release_w = None
+        sys.stdout.write(f"{pid} {start}")
     finally:
-        os.close(dirfd)
+        for fd in (ready_r, ready_w, release_r, release_w, logfd, dirfd, exefd):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        if pid is not None and pid > 0 and not released:
+            while True:
+                try:
+                    os.waitpid(pid, 0)
+                    break
+                except InterruptedError:
+                    continue
+                except ChildProcessError:
+                    break
+
+
+def cmd_launch(a):
+    if len(a) < 4 or a[2] != "--":
+        raise Refused("usage: launch <dir> <logname> -- <argv...>")
+    return launch_process(a[0], a[1], None, a[3:])
+
+
+def cmd_launch_tracked(a):
+    if len(a) < 5 or a[3] != "--":
+        if len(a) < 7 or a[3] != "--exec" or a[5] != "--":
+            raise Refused("usage: launch-tracked <dir> <logname> <pidname> [--exec <path>] -- <argv...>")
+        return launch_process(a[0], a[1], a[2], a[6:], a[4])
+    return launch_process(a[0], a[1], a[2], a[4:])
 
 
 COMMANDS = {
     "ensure": (cmd_ensure, 1), "dump": (cmd_dump, 1), "read": (cmd_read, 1), "write": (cmd_write, 1),
+    "create": (cmd_create, 1),
     "append": (cmd_append, 2), "append-many": (cmd_append_many, 3), "remove": (cmd_remove, 2),
-    "truncate": (cmd_truncate, 2), "launch": (cmd_launch, 4),
+    "remove-digest": (cmd_remove_digest, 4), "truncate": (cmd_truncate, 2), "lock": (cmd_lock, 5),
+    "launch": (cmd_launch, 4), "launch-tracked": (cmd_launch_tracked, 5),
 }
 
 

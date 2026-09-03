@@ -29,8 +29,12 @@ Item {
   property var providers: []        // exposure providers and their readiness
   property var tunnels: ({})        // "provider:port" -> { url, reach }
   property bool everScanned: false
-  property string lastError: ""
-  property string busyAction: ""    // "provider:port" while a start/stop is in flight
+  property string scanError: ""
+  property string tunnelError: ""
+  property string providerError: ""
+  readonly property string lastError: [scanError, tunnelError, providerError].filter(function (v) { return v !== "" }).join(" · ")
+  property var activeAction: null
+  readonly property string busyAction: activeAction ? activeAction.key : ""
   property int refreshSeconds: 5
   onRefreshSecondsChanged: refreshSeconds = Util.clamp(refreshSeconds, 2, 120)   // shell.json is hand-editable
   property string namingMode: "Project"
@@ -76,6 +80,7 @@ Item {
   readonly property bool hasPublicTunnel: tunnelCounts.pub > 0
 
   signal actionFailed(string message)
+  signal actionMoment(string message)
   signal actionHint(string message)
   signal actionCopy(string message, string command)
 
@@ -106,6 +111,22 @@ Item {
     return null
   }
 
+  function validProcessIdentity(process) {
+    if (!process) return false
+    var pid = String(process.pid)
+    return /^[1-9][0-9]*$/.test(pid) && parseInt(pid, 10) > 1
+      && /^[1-9][0-9]*$/.test(String(process.start))
+  }
+
+  function sameProcess(a, b) {
+    return validProcessIdentity(a) && validProcessIdentity(b)
+      && String(a.pid) === String(b.pid) && String(a.start) === String(b.start)
+  }
+
+  function processKey(process) {
+    return validProcessIdentity(process) ? String(process.pid) + ":" + String(process.start) : ""
+  }
+
   // Derived once here so the panel and the row cursor cannot index two
   // separately-built arrays that drift in order.
   readonly property var publicProviders: {
@@ -131,10 +152,9 @@ Item {
   // may say and a deadline, past either of which its whole process group is
   // ended and nothing is passed on (so no document is ever parsed cut short).
   readonly property var deadlines: ({ scan: 20, poll: 20, action: 330, quick: 15 })
-  // scan: 512 ports x (8 KiB argv, escaped worst-case x2, + a few KiB of other
-  // fields) stays well under this; the ceiling covers the largest valid scan so
-  // a legitimate document is never killed for its size.
-  readonly property var outputCaps: ({ scan: 16777216, poll: 1048576, action: 1048576, quick: 4194304 })
+  // Scan covers 512 ports with 8 KiB argv. Poll covers 512 tunnel rows with
+  // 8 KiB URLs plus JSON escaping. Both valid producer maxima fit under 16 MiB.
+  readonly property var outputCaps: ({ scan: 16777216, poll: 16777216, action: 1048576, quick: 4194304 })
   function runScript(proc, script, args, kind) {
     if (!alive || !pluginDir || proc.running) return false
     var k = kind || "quick"
@@ -180,7 +200,9 @@ Item {
   function refreshProviders() {
     if (!runTunnels(providersProcess, ["providers"], "poll")) retryTimer.restart()
   }
-  function refreshTunnels() { runTunnels(tunnelStatusProcess, ["status"], "poll") }
+  function refreshTunnels() {
+    if (!activeAction) runTunnels(tunnelStatusProcess, ["status"], "poll")
+  }
 
   Timer {
     id: retryTimer
@@ -193,15 +215,15 @@ Item {
   function applyScan(text) {
     var parsed = parseJson(text)
     if (!parsed || !Array.isArray(parsed.ports)) {
-      lastError = "could not parse scan output"
+      scanError = "could not parse scan output"
       return
     }
     everScanned = true
     // A scan that reports an error (the scanner refused to describe a host
     // with more ports than it caps) keeps the previous snapshot: an empty
     // list would read as every server having vanished.
-    if (parsed.error) { lastError = String(parsed.error); return }
-    lastError = ""
+    if (parsed.error) { scanError = String(parsed.error); return }
+    scanError = ""
 
     var now = Date.now()
     var nextStats = ({})
@@ -212,13 +234,14 @@ Item {
     var seenPorts = ({})
     for (var i = 0; i < parsed.ports.length; i++) {
       var e = parsed.ports[i]
-      var prev = e.pid != null ? _cpuPrev[e.pid] : undefined
+      var cpuKey = e.pid != null && e.start != null ? String(e.pid) + ":" + String(e.start) : ""
+      var prev = cpuKey ? _cpuPrev[cpuKey] : undefined
       var cpuPct = null
       if (prev && e.cpuTicks != null && now > prev.t) {
         // ticks are USER_HZ (100/s); delta over wall time gives percent.
         cpuPct = Math.max(0, Math.round((e.cpuTicks - prev.ticks) / (now - prev.t) * 1000))
       }
-      if (e.pid != null && e.cpuTicks != null) nextCpu[e.pid] = { ticks: e.cpuTicks, t: now }
+      if (cpuKey && e.cpuTicks != null) nextCpu[cpuKey] = { ticks: e.cpuTicks, t: now }
       var st = {
         t: Math.round(now / 1000),
         conns: e.conns,
@@ -238,8 +261,8 @@ Item {
       history[e.port] = ring
       if (watchedPorts.indexOf(e.port) !== -1) watchedBatch[e.port] = sample
       seenPorts[e.port] = true
-      identity.push([e.port, e.addresses, e.pid, e.comm, e.cmdline, e.cwd,
-                     e.projectRoot, e.projectName, e.markers, e.deps])
+      identity.push([e.port, e.addresses, e.pid, e.start, e.comm, e.cmdline, e.argv,
+                     e.argvTruncated, e.cwd, e.projectRoot, e.projectName, e.markers, e.deps])
     }
     _cpuPrev = nextCpu
     stats = nextStats
@@ -265,7 +288,7 @@ Item {
     for (var j = 0; j < parsed.ports.length; j++) {
       var d = Detect.decorate(parsed.ports[j])
       out.push(d)
-      if (d.category === "dev") devPorts.push({ port: d.port, label: d.label })
+      if (d.category === "dev") devPorts.push({ port: d.port, process: d.process, label: d.label })
     }
 
     _notifyVanishedDev(devPorts)
@@ -284,7 +307,8 @@ Item {
     for (var k in tunnels) {
       var t = tunnels[k]
       if (t.reach === "public" && !live[t.port]) out.push({
-        port: t.port, pid: null, start: null, comm: "", cmdline: "", cwd: "", projectRoot: "", scope: "local",
+        port: t.port, pid: null, start: null, process: null,
+        comm: "", cmdline: "", cwd: "", projectRoot: "", scope: "local",
         addresses: [], kind: "orphan", label: "shared while nothing listens", icon: "broadcast",
         color: "", category: "dev", web: false, name: "port " + t.port, url: "", argv: [],
         argvTruncated: false
@@ -298,29 +322,44 @@ Item {
   // built only from the port number and the rule's own label, never from
   // process-controlled strings.
   property var _expectedGone: ({})
-  readonly property int expectedGoneMs: 20000
-  function _expectGone(port) { _expectedGone[port] = Date.now() }
+  readonly property int expectedGoneMs: 600000
+  function _expectGone(process) {
+    var key = processKey(process)
+    if (key) _expectedGone[key] = Date.now()
+  }
+
+  function _forgetGone(process) {
+    var key = processKey(process)
+    if (key) delete _expectedGone[key]
+  }
 
   function _notifyVanishedDev(devPorts) {
     if (_prevDevPorts === null) return
+    var liveProcesses = ({})
+    var consumedExpected = ({})
+    for (var i = 0; i < devPorts.length; i++) {
+      var liveKey = processKey(devPorts[i].process)
+      if (liveKey) liveProcesses[liveKey] = true
+    }
     for (var k = 0; k < _prevDevPorts.length; k++) {
       var was = _prevDevPorts[k]
-      var still = devPorts.some(function (d) { return d.port === was.port })
-      if (still) continue
+      var wasKey = processKey(was.process)
+      var samePort = devPorts.some(function (d) { return d.port === was.port })
+      if ((wasKey && liveProcesses[wasKey]) || (!wasKey && samePort)) continue
       // A stop or restart marks the port; the marker is honored whenever the
       // port finally disappears, however long the graceful shutdown took, and
       // consumed here so a later genuine crash is still announced.
-      if (_expectedGone[was.port]) { delete _expectedGone[was.port]; continue }
+      if (wasKey && _expectedGone[wasKey]) { consumedExpected[wasKey] = true; continue }
+      if (samePort) continue
       var shared = publicTunnelFor(was.port) ? "; its public tunnel is still open" : ""
       notify("Port " + was.port + " went quiet", was.label + " is no longer listening" + shared)
     }
-    // Drop a marker only once its port is gone from the list (handled above) or
-    // has lingered far past any real shutdown, never merely because the wall
-    // clock passed while the server was still closing its listener.
+    for (var consumed in consumedExpected) delete _expectedGone[consumed]
+    // Drop a marker once its exact process is gone or it has lingered far past
+    // any real shutdown.
     var nowT = Date.now()
     for (var g in _expectedGone) {
-      var listed = devPorts.some(function (d) { return String(d.port) === g })
-      if (!listed || nowT - _expectedGone[g] > 600000) delete _expectedGone[g]
+      if (!liveProcesses[g] || nowT - _expectedGone[g] > expectedGoneMs) delete _expectedGone[g]
     }
   }
 
@@ -330,7 +369,12 @@ Item {
 
   function applyProviders(text) {
     var parsed = parseJson(text)
-    if (parsed && Array.isArray(parsed.providers)) providers = parsed.providers
+    if (!parsed || !Array.isArray(parsed.providers)) {
+      providerError = parsed && parsed.error ? String(parsed.error).slice(0, 4096) : "could not parse provider status output"
+      return
+    }
+    providerError = ""
+    providers = parsed.providers
   }
 
   property string _lastTunnelsKey: ""
@@ -338,8 +382,12 @@ Item {
   function applyTunnels(text) {
     var parsed = parseJson(text)
     // A status that could not read its state says so; the last good snapshot stays.
-    if (parsed && parsed.error) { lastError = String(parsed.error).slice(0, 4096); return }
-    if (!parsed || !Array.isArray(parsed.tunnels)) return
+    if (parsed && parsed.error) { tunnelError = String(parsed.error).slice(0, 4096); return }
+    if (!parsed || !Array.isArray(parsed.tunnels)) {
+      tunnelError = "could not parse tunnel status output"
+      return
+    }
+    tunnelError = ""
     var key = JSON.stringify(parsed.tunnels)
     if (key === _lastTunnelsKey) return
     var first = _lastTunnelsKey === ""
@@ -360,7 +408,9 @@ Item {
     // provider and port is both. Not on the first status after a reload:
     // those are not news.
     for (var k in tunnels) {
-      if (tunnels[k].reach === "public" && _stoppingShare !== k && (!next[k] || next[k].url !== tunnels[k].url))
+      var stopping = _stoppingShare === k
+        || (activeAction && activeAction.shareStopKey === k)
+      if (tunnels[k].reach === "public" && !stopping && (!next[k] || next[k].url !== tunnels[k].url))
         notify("Port " + tunnels[k].port + " is no longer shared", tunnels[k].host + " went away")
     }
     if (!first) {
@@ -369,7 +419,9 @@ Item {
           notify("Port " + next[n].port + " is public", "reachable from the internet at " + next[n].host)
       }
     }
-    _stoppingShare = ""
+    if (_stoppingShare && tunnels[_stoppingShare]
+        && (!next[_stoppingShare] || next[_stoppingShare].url !== tunnels[_stoppingShare].url))
+      _stoppingShare = ""
     tunnels = next
   }
   property string _stoppingShare: ""
@@ -378,85 +430,131 @@ Item {
   // expose/unexpose/setup share one Process: they are UI-serialised through
   // busyAction anyway, and one exit handler means a failure can never be
   // silently swallowed by a copy that forgot the ok-check.
-  property string _actionFallback: ""
+  property var queuedAction: null
+  property bool cancellingTunnelPoll: false
 
-  function _runAction(busyKey, args, fallbackMessage) {
-    if (!runTunnels(actionProcess, args, "action")) {
-      actionHint("still working on " + busyAction + " — try again in a moment")
+  Timer {
+    id: actionLaunchTimer
+    interval: 50
+    onTriggered: {
+      if (tunnelStatusProcess.running) {
+        root.cancellingTunnelPoll = true
+        tunnelStatusProcess.running = false
+        restart()
+        return
+      }
+      var queued = root.queuedAction
+      if (!queued) return
+      root.queuedAction = null
+      var started = queued.script === "tunnels"
+        ? root.runTunnels(actionProcess, queued.args, "action")
+        : root.runScript(actionProcess, queued.script, queued.args, "quick")
+      if (!started) {
+        root.activeAction = null
+        root.actionMoment("still working — try again in a moment")
+        return
+      }
+      if (root.activeAction && root.activeAction.expectsGone) root._expectGone(root.activeAction.target)
+    }
+  }
+
+  function _queueAction(spec, args, fallbackMessage, script) {
+    if (actionProcess.running || activeAction || queuedAction) {
+      actionMoment("still working on " + busyAction + " — try again in a moment")
       return false
     }
-    busyAction = busyKey
-    _actionFallback = fallbackMessage
+    activeAction = Object.assign({ fallback: fallbackMessage }, spec)
+    queuedAction = { script: script, args: args }
+    actionLaunchTimer.restart()
     return true
   }
 
-  // Both doors (panel and IPC) land here; the shape is checked once, and
-  // tunnels.sh refuses anything not on its roster.
-  // Until the roster has loaded there is nothing to check a provider against,
-  // and a guess is not an answer; the roster arrives within seconds of start.
-  function shareTarget(port, provider) {
+  function _runAction(spec, args, fallbackMessage) {
+    return _queueAction(spec, args, fallbackMessage, "tunnels")
+  }
+
+  // New starts require the loaded provider roster. A listed exposure can still
+  // be stopped or renamed while that independent startup poll is unfinished.
+  function exposureKey(port, provider) {
     var s = String(port)
-    if (!/^[1-9][0-9]{0,4}$/.test(s)) return false
+    if (!/^[1-9][0-9]{0,4}$/.test(s)) return ""
     var n = parseInt(s, 10)
-    if (n < 1 || n > 65535) return false
-    if (!/^[a-z]{1,32}$/.test(String(provider))) return false
-    return providerFor(String(provider)) !== null
+    if (n < 1 || n > 65535) return ""
+    if (!/^[a-z]{1,32}$/.test(String(provider))) return ""
+    return String(provider) + ":" + n
+  }
+
+  function shareTarget(port, provider) {
+    return exposureKey(port, provider) !== "" && providerFor(String(provider)) !== null
+  }
+
+  function stopTarget(port, provider) {
+    var key = exposureKey(port, provider)
+    return key !== "" && (providerFor(String(provider)) !== null || tunnels[key] !== undefined)
   }
 
   // Both return whether the action was actually launched, so a caller (the
   // IPC surface) never reports success for a request the busy channel dropped.
-  // ownerPid, when the caller saw a process behind the port, makes the start
-  // refuse a port that another process has taken since.
-  function expose(port, provider, name, ownerPid) {
-    if (!shareTarget(port, provider)) return false
+  // target, when the caller saw a process behind the port, makes a public
+  // start refuse a port that another process has taken since.
+  function expose(port, provider, name, target) {
+    var key = exposureKey(port, provider)
+    if (!key) return false
     var n = parseInt(port, 10)
+    var p = providerFor(String(provider))
+    var existingLocal = String(provider) === "portless" && routeFor(n) !== null
+    if (!p && !existingLocal) return false
+    if (p && p.reach === "public" && !validProcessIdentity(target)) return false
     var args = ["start", String(provider), String(n)]
     if (name) args.push(String(name))
-    if (ownerPid !== undefined && ownerPid !== null && /^[1-9][0-9]*$/.test(String(ownerPid))) args.push("--owner", String(ownerPid))
-    return _runAction(provider + ":" + n, args, "could not expose that port")
+    if (p && p.reach === "public") args.push("--target", String(target.pid), String(target.start))
+    return _runAction({ key: key }, args, "could not expose that port")
   }
 
   function unexpose(port, provider) {
-    if (!shareTarget(port, provider)) return false
+    if (!stopTarget(port, provider)) return false
     var n = parseInt(port, 10)
-    _stoppingShare = provider + ":" + n
-    return _runAction(provider + ":" + n, ["stop", String(provider), String(n)],
+    var key = exposureKey(port, provider)
+    return _runAction({ key: key, shareStopKey: key }, ["stop", String(provider), String(n)],
                       "could not stop sharing")
   }
 
   // action: pause | resume | stop
   function signalProcess(entry, action) {
-    if (!entry || !entry.pid || entry.start == null) return
-    if (action === "stop") _expectGone(entry.port)
-    _runLifecycle(entry, [action, String(entry.pid), String(entry.start), String(entry.port)], "could not " + action)
+    if (!entry || !validProcessIdentity(entry.process)) return false
+    return _runLifecycle(entry, action,
+                         [action, String(entry.process.pid), String(entry.process.start), String(entry.port)],
+                         "could not " + action)
   }
 
   // A truncated command line must never be re-run: half a flag is a different
   // command. The row does not offer restart in that case; this is the backstop.
   function canRestart(entry) {
-    return !!(entry && entry.pid && entry.cwd && entry.argv.length > 0 && !entry.argvTruncated)
+    return !!(entry && validProcessIdentity(entry.process) && entry.cwd
+              && entry.argv.length > 0 && !entry.argvTruncated)
   }
 
   function restartProcess(entry) {
-    if (!canRestart(entry)) return
-    _expectGone(entry.port)
-    _runLifecycle(entry, ["restart", String(entry.pid), String(entry.start), String(entry.port),
-                          String(entry.cwd), JSON.stringify(entry.argv)],
-                  "could not restart")
+    if (!canRestart(entry)) return false
+    return _runLifecycle(entry, "restart",
+                         ["restart", String(entry.process.pid), String(entry.process.start), String(entry.port),
+                          String(entry.cwd), JSON.stringify(entry.argv)], "could not restart")
   }
 
-  function _runLifecycle(entry, args, fallbackMessage) {
-    if (!runScript(actionProcess, "lifecycle.sh", args, "quick")) { actionHint("still working on " + busyAction + " — try again in a moment"); return }
-    _actionFallback = fallbackMessage
-    restartDelay.restart()
+  function _runLifecycle(entry, action, args, fallbackMessage) {
+    var expectsGone = action === "stop" || action === "restart"
+    return _queueAction({ key: action + ":" + entry.port, lifecycle: true,
+                          target: entry.process, expectsGone: expectsGone }, args,
+                        fallbackMessage, "lifecycle.sh")
   }
 
   function setupProvider(provider) {
-    _runAction(provider + ":setup", ["setup", String(provider)], "setup failed")
+    _runAction({ key: provider + ":setup" }, ["setup", String(provider)], "setup failed")
   }
 
   function toggleWatched(port) {
-    runScript(watchProcess, "metrics.sh", [isWatched(port) ? "unwatch" : "watch", String(port)])
+    if (!runScript(watchProcess, "metrics.sh", [isWatched(port) ? "unwatch" : "watch", String(port)]))
+      actionMoment("still updating watched ports — try again in a moment")
   }
 
   function isWatched(port) { return watchedPorts.indexOf(port) !== -1 }
@@ -478,7 +576,7 @@ Item {
     Quickshell.execDetached(["wl-copy", "--", String(value)])
     // Quiet copies answer with the button's own animation instead: the step
     // row pops its icon, so no "copied <command>" line is ever shown.
-    if (!quiet) actionHint("copied " + String(value))
+    if (!quiet) actionMoment("copied " + String(value))
   }
 
   function openUrl(url) {
@@ -500,7 +598,7 @@ Item {
     onExited: function (exitCode) {
       if (!root.alive) return
       if (exitCode === 0) root.applyScan(scanOut.text)
-      else root.lastError = String(scanErr.text || "scan failed").slice(0, 4096).trim()   // its own diagnostics, never data
+      else root.scanError = String(scanErr.text || "scan failed").slice(0, 4096).trim()   // its own diagnostics, never data
     }
   }
 
@@ -510,6 +608,7 @@ Item {
     onExited: function (exitCode) {
       if (!root.alive) return
       if (exitCode === 0) root.applyProviders(provOut.text)
+      else root.providerError = "provider status failed; showing the last known state"
     }
   }
 
@@ -518,10 +617,15 @@ Item {
     stdout: StdioCollector { id: tunOut; waitForEnd: true }
     onExited: function (exitCode) {
       if (!root.alive) return
+      if (root.cancellingTunnelPoll) {
+        root.cancellingTunnelPoll = false
+        actionLaunchTimer.restart()
+        return
+      }
       if (exitCode === 0) root.applyTunnels(tunOut.text)
-      else root.lastError = exitCode === 124 ? "tunnel status timed out; showing the last known state"
-                          : exitCode === 125 ? "tunnel status produced too much output; showing the last known state"
-                          : "tunnel status failed; showing the last known state"
+      else root.tunnelError = exitCode === 124 ? "tunnel status timed out; showing the last known state"
+                                : exitCode === 125 ? "tunnel status produced too much output; showing the last known state"
+                                : "tunnel status failed; showing the last known state"
     }
   }
 
@@ -530,10 +634,17 @@ Item {
     stdout: StdioCollector { id: actionOut; waitForEnd: true }
     onExited: function () {
       if (!root.alive) return
-      root.busyAction = ""
+      var action = root.activeAction
+      root.activeAction = null
       var parsed = root.parseJson(actionOut.text)
-      if (!parsed || parsed.ok !== true) {
-        root.actionFailed(parsed && parsed.error ? String(parsed.error) : root._actionFallback)
+      var ok = parsed && parsed.ok === true
+      var targetStopped = parsed && (parsed.effect === "stopped" || parsed.effect === "restarted")
+      if (action && action.expectsGone && !ok && !targetStopped) root._forgetGone(action.target)
+      if (ok && action && action.shareStopKey && root.tunnels[action.shareStopKey])
+        root._stoppingShare = action.shareStopKey
+      if (!ok) {
+        root.actionFailed(parsed && parsed.error ? String(parsed.error)
+                          : (action ? action.fallback : "action failed"))
       } else if (parsed.hint) {
         // The action worked but needs one more step (e.g. a hosts entry for a
         // non-localhost TLD). Same channel as errors: it must be seen. A hint
@@ -541,6 +652,7 @@ Item {
         if (parsed.copy) root.actionCopy(String(parsed.hint), String(parsed.copy))
         else root.actionHint(String(parsed.hint))
       }
+      if (action && action.lifecycle) restartDelay.restart()
       root.refreshTunnels()
       root.refreshProviders()
     }
@@ -549,10 +661,11 @@ Item {
   Process {
     id: watchProcess
     stdout: StdioCollector { id: watchOut; waitForEnd: true }
-    onExited: function () {
+    onExited: function (exitCode) {
       if (!root.alive) return
       var parsed = root.parseJson(watchOut.text)
-      if (parsed && Array.isArray(parsed.ports)) root.watchedPorts = parsed.ports
+      if (exitCode === 0 && parsed && parsed.ok === true && Array.isArray(parsed.ports)) root.watchedPorts = parsed.ports
+      else root.actionFailed(parsed && parsed.error ? String(parsed.error) : "could not update watched ports")
     }
   }
 
@@ -656,12 +769,14 @@ Item {
       // silently exposing whatever took it.
       var n = parseInt(port, 10), owner = null
       for (var i = 0; i < root.ports.length; i++) if (root.ports[i].port === n) { owner = root.ports[i]; break }
-      if (!owner || owner.pid == null) return "error: nothing Portal scanned is listening on port " + port
-      return root.expose(port, provider, "", owner.pid) ? "ok" : "error: busy, try again"
+      if (!owner) return "error: nothing Portal scanned is listening on port " + port
+      if (p.reach === "public" && !root.validProcessIdentity(owner.process))
+        return "error: Portal could not identify the process listening on port " + port
+      return root.expose(port, provider, "", p.reach === "public" ? owner.process : null)
+        ? "ok" : "error: busy, try again"
     }
     function unexpose(provider: string, port: string): string {
-      if (root.providers.length === 0) return "error: providers not loaded yet, try again"
-      if (!root.shareTarget(port, provider)) return "error: bad provider or port"
+      if (!root.stopTarget(port, provider)) return "error: bad provider, port, or exposure"
       return root.unexpose(port, provider) ? "ok" : "error: busy, try again"
     }
   }
