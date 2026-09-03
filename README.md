@@ -7,7 +7,7 @@ open, name, share, pause, restart or stop it. An [Omarchy](https://omarchy.org)
 bar plugin.
 
 <p align="center">
-  <img src="docs/hero.png" width="800" alt="Portal's port list and charts page">
+  <img src="preview.png" width="800" alt="Portal's port list and charts page">
 </p>
 
 ```sh

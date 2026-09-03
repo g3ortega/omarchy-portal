@@ -2,7 +2,7 @@
 
 ## The list
 
-<img src="list.png" width="480" alt="The port list">
+<img src="images/list.png" width="480" alt="The port list">
 
 Every few seconds two `ss` calls list the TCP listeners and their established
 peers. Ports are grouped into your apps, services, and system ports (hidden
@@ -24,8 +24,8 @@ group.
 
 ## Actions
 
-<img src="actions.png" width="480" alt="A row unfolded into its verbs">
-<img src="confirm.png" width="480" alt="Inline confirmation">
+<img src="images/actions.png" width="480" alt="A row unfolded into its verbs">
+<img src="images/confirm.png" width="480" alt="Inline confirmation">
 
 A row shows open, copy and charts on hover. Click it (or press Enter) and it
 unfolds a line of verbs: name, share, pause, restart, stop. Pause is SIGSTOP.
@@ -40,7 +40,7 @@ pause, restart and stop act on that pid.
 
 ## Charts
 
-<img src="charts.png" width="480" alt="Latency, connections, CPU and memory">
+<img src="images/charts.png" width="480" alt="Latency, connections, CPU and memory">
 
 The chart icon (or `l`) opens latency, connections, CPU and memory over time.
 Every port keeps 720 samples in memory, an hour at the default 5-second
@@ -52,7 +52,7 @@ inventing a shape. Hovering any card reads all four out at that instant.
 
 ## Local names
 
-<img src="naming.png" width="480" alt="Renaming a port">
+<img src="images/naming.png" width="480" alt="Renaming a port">
 
 Name a port and it becomes `https://acme-web.localhost` through Portless. The
 name is the row's title, and it is what opens and what copies. In the name
@@ -66,7 +66,7 @@ sudo. Portal never runs sudo for you. It shows the command and you paste it.
 
 ## Sharing
 
-<img src="share.png" width="480" alt="Choosing a public provider">
+<img src="images/share.png" width="480" alt="Choosing a public provider">
 
 | Provider | Reach | URL | Needs |
 |---|---|---|---|
@@ -103,7 +103,7 @@ in the shell's environment if yours uses another `web_addr`.
 
 ## Settings
 
-<img src="settings.png" width="480" alt="Settings page">
+<img src="images/settings.png" width="480" alt="Settings page">
 
 The gear (or `,`) opens every setting in place. They persist to shell.json
 through the shell's own API, so `omarchy bar set g3ortega.portal <key> <value>`
@@ -123,7 +123,7 @@ unions the new suffix with every one the proxy already serves.
 
 ## Keyboard
 
-<img src="help.png" width="480" alt="The cheatsheet">
+<img src="images/help.png" width="480" alt="The cheatsheet">
 
 `j`/`k` (or arrows) move, `g`/`G` jump, Enter (or Space, or `a`) unfolds a
 row's verbs and `h`/`l` walk them. Every verb has a direct key: `o` open,
