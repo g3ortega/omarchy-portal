@@ -473,10 +473,12 @@ Item {
     runScript(diskReadProcess, "metrics.sh", ["read", String(port)])
   }
 
-  function copyText(value) {
+  function copyText(value, quiet) {
     if (!value) return
     Quickshell.execDetached(["wl-copy", "--", String(value)])
-    actionHint("copied " + String(value))
+    // Quiet copies answer with the button's own animation instead: the step
+    // row pops its icon, so no "copied <command>" line is ever shown.
+    if (!quiet) actionHint("copied " + String(value))
   }
 
   function openUrl(url) {

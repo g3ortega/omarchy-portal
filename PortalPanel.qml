@@ -838,6 +838,7 @@ Panel {
             // instead of letting it paint past the row.
             clip: true
             readonly property string portlessDocs: "https://github.com/vercel-labs/portless"
+            property bool copied: false
 
             function richStep(s) {
               var e = String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -849,7 +850,7 @@ Panel {
               width: parent.width - copyHit.width - parent.spacing
               textFormat: Text.RichText
               text: stepRow.richStep(root.toast)
-              linkColor: Color.accent
+              linkColor: Util.alpha(root.panelText, 0.75)
               color: Util.alpha(root.panelText, 0.75)
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -864,7 +865,17 @@ Panel {
               height: Style.font.bodySmall + Style.spacing.xs
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
-              onClicked: if (root.service) root.service.copyText(root.toastCopy)
+              onClicked: {
+                if (root.service) root.service.copyText(root.toastCopy, true)
+                stepRow.copied = true
+                copiedTimer.restart()
+              }
+
+              Timer {
+                id: copiedTimer
+                interval: 1200
+                onTriggered: stepRow.copied = false
+              }
 
               OpticalGlyph {
                 anchors.centerIn: parent
@@ -872,7 +883,9 @@ Panel {
                 height: Style.font.caption
                 text: Icons.g("copy")
                 fontSize: Style.font.bodySmall
-                color: copyHit.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.7)
+                scale: stepRow.copied ? 1.3 : 1
+                Behavior on scale { NumberAnimation { duration: 150 } }
+                color: stepRow.copied || copyHit.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.7)
               }
             }
           }
