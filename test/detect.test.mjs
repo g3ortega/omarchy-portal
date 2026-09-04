@@ -358,11 +358,12 @@ check("a wildcard bind still opens localhost", e({
       publicTunnelText(staleTunnel, true), "https://stale.trycloudflare.com · target offline")
   }
   const maxPorts = Number(scanSrc.match(/^MAX_PORTS=([0-9]+)/m)?.[1] ?? 0)
-  const argvB64Cutoff = Number(scanSrc.match(/\$\{#argv_b64\} -gt ([0-9]+)/)?.[1] ?? 0)
+  const argvLogicalCap = Number(scanSrc.match(/^ARGV_LOGICAL_CAP=([0-9]+)$/m)?.[1] ?? 0)
+  if (argvLogicalCap !== 8192) bad.push(`scanner argv logical cap is ${argvLogicalCap}`)
   const scanCap = Number(serviceSrc.match(/outputCaps:[^\n]*scan:\s*([0-9]+)/)?.[1] ?? 0)
-  const maxArgvValue = "\u0001".repeat(Math.floor(argvB64Cutoff * 3 / 4) - 1)
+  const maxArgvValue = "\u0001".repeat(argvLogicalCap + 1)
   const maximalArgvDocument = { version: 1, ports: Array.from({ length: maxPorts }, () => ({ argv: [maxArgvValue] })) }
-  eq(`scan cap holds ${maxPorts} maximally JSON-escaped argv values`, Buffer.byteLength(JSON.stringify(maximalArgvDocument)) <= scanCap, true)
+  eq(`scan cap holds ${maxPorts} maximally JSON-escaped sampled argv values`, Buffer.byteLength(JSON.stringify(maximalArgvDocument)) <= scanCap, true)
   const tunnelCap = Number(serviceSrc.match(/outputCaps:[^\n]*poll:\s*([0-9]+)/)?.[1] ?? 0)
   if (tunnelCap < 8 * 1024 * 1024) bad.push(`tunnel poll cap is only ${tunnelCap} bytes`)
 

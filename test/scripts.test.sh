@@ -12,12 +12,844 @@ ok()  { pass=$((pass+1)); echo "  ok   $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL $1"; }
 is()  { if [[ $2 == "$3" ]]; then ok "$1"; else bad "$1: expected [$3], got [$2]"; fi; }
 
+if [[ -z ${PORTAL_TEST_ONLY:-} || ${PORTAL_TEST_ONLY:-} == stage-ignored ]]; then
+STAGE_IGNORED="$T/stage-ignored"
+STAGE_SOURCE="$STAGE_IGNORED/source"
+STAGE_HOME="$STAGE_IGNORED/home"
+STAGE_INSTALL="$STAGE_HOME/.config/omarchy/plugins/g3ortega.portal"
+STAGE_TMP="$STAGE_IGNORED/tmp"
+mkdir -p "$STAGE_SOURCE/dev" "$STAGE_SOURCE/pkg" "$STAGE_HOME/.config/omarchy/plugins" "$STAGE_TMP"
+cp "$HERE/../.gitignore" "$STAGE_SOURCE/.gitignore"
+cp "$HERE/../dev/portal.sh" "$STAGE_SOURCE/dev/portal.sh"
+chmod 700 "$STAGE_SOURCE/dev/portal.sh"
+printf base > "$STAGE_SOURCE/tracked.txt"
+printf base > "$STAGE_SOURCE/pkg/base"
+git init -q "$STAGE_SOURCE"
+git -C "$STAGE_SOURCE" add -A
+git -C "$STAGE_SOURCE" -c user.name=Portal -c user.email=portal@example.invalid \
+  commit -qm fixture
+git clone -q "$STAGE_SOURCE" "$STAGE_INSTALL"
+printf staged > "$STAGE_SOURCE/tracked.txt"
+git -C "$STAGE_SOURCE" add tracked.txt
+
+stage_unsupported=(
+  normal.log
+  .venv/cache/value
+  nested/dev/unsafe.log
+  nested/tmp/unsafe
+  repo-only.ignore
+  global-only.ignore
+  $'literal\nnewline.log'
+)
+stage_allowed=(
+  dev/allowed.log
+  tmp
+  __pycache__
+  pkg/__pycache__/allowed
+  .venv/__pycache__/allowed
+)
+stage_success_allowed=(
+  dev/allowed.log
+  tmp
+  __pycache__
+  pkg/__pycache__/allowed
+)
+stage_scale_paths=(
+  node_modules/pkg/leaf
+  pkg/ignored-1.log
+  pkg/ignored-2.log
+  pkg/ignored-3.log
+)
+for i in "${!stage_unsupported[@]}"; do
+  mkdir -p "$(dirname -- "$STAGE_INSTALL/${stage_unsupported[$i]}")"
+  printf 'unsupported-%s' "$i" > "$STAGE_INSTALL/${stage_unsupported[$i]}"
+done
+for i in "${!stage_allowed[@]}"; do
+  mkdir -p "$(dirname -- "$STAGE_INSTALL/${stage_allowed[$i]}")"
+  printf 'allowed-%s' "$i" > "$STAGE_INSTALL/${stage_allowed[$i]}"
+done
+for i in "${!stage_scale_paths[@]}"; do
+  mkdir -p "$(dirname -- "$STAGE_INSTALL/${stage_scale_paths[$i]}")"
+  printf 'scale-%s' "$i" > "$STAGE_INSTALL/${stage_scale_paths[$i]}"
+done
+printf '/repo-only.ignore\n/tmp\n/__pycache__\n' >> "$STAGE_INSTALL/.git/info/exclude"
+printf '/global-only.ignore\n' > "$STAGE_IGNORED/global-excludes"
+HOME="$STAGE_HOME" git config --global core.excludesFile "$STAGE_IGNORED/global-excludes"
+
+cat > "$STAGE_IGNORED/digest.py" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+digest = hashlib.sha256()
+for name in sorted(sys.argv[2:], key=os.fsencode):
+    encoded = os.fsencode(name)
+    digest.update(len(encoded).to_bytes(8, "big"))
+    digest.update(encoded)
+    try:
+        content = (root / name).read_bytes()
+    except FileNotFoundError:
+        digest.update(b"missing")
+    else:
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+print(digest.hexdigest())
+PY
+
+mkdir "$STAGE_IGNORED/bin"
+cat > "$STAGE_IGNORED/bin/mktemp" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$MKTEMP_LOG"
+exec /usr/bin/mktemp "$@"
+SH
+cat > "$STAGE_IGNORED/bin/git" <<'SH'
+#!/bin/bash
+inventory=0
+if [[ ${1:-} == -C && ${2:-} == "$STAGE_INSTALL" && ${3:-} == ls-files ]]; then
+  for arg in "$@"; do
+    [[ $arg == --ignored ]] && inventory=1
+  done
+fi
+if (( inventory )); then
+  out=$(/usr/bin/mktemp) || exit 1
+  trap 'rm -f -- "$out"' EXIT
+  /usr/bin/git "$@" > "$out"
+  rc=$?
+  cp -- "$out" "${GIT_INVENTORY_OUT:-/dev/null}" || exit 1
+  cat -- "$out" || exit 1
+  printf drained > "${GIT_INVENTORY_DRAINED:-/dev/null}" || exit 1
+  [[ ${GIT_INVENTORY_FAIL:-0} == 1 ]] && exit 71
+  exit "$rc"
+fi
+exec /usr/bin/git "$@"
+SH
+cat > "$STAGE_IGNORED/bin/sed" <<'SH'
+#!/bin/bash
+if [[ ${1:-} == -n && ${2:-} == 1p && $# == 2 && -n ${SED_REDUCER_OUT:-} ]]; then
+  out=$(/usr/bin/sed "$@")
+  rc=$?
+  printf '%s' "$out" > "$SED_REDUCER_OUT" || exit 1
+  printf '%s' "$out" || exit 1
+  exit "$rc"
+fi
+exec /usr/bin/sed "$@"
+SH
+chmod 700 "$STAGE_IGNORED/bin/mktemp" "$STAGE_IGNORED/bin/git" "$STAGE_IGNORED/bin/sed"
+: > "$STAGE_IGNORED/mktemp.log"
+: > "$STAGE_IGNORED/fail.drained"
+: > "$STAGE_IGNORED/fail.reducer"
+stage_fixture_before=$(/usr/bin/python3 -I -S "$STAGE_IGNORED/digest.py" "$STAGE_INSTALL" \
+  "${stage_unsupported[@]}" "${stage_allowed[@]}" "${stage_scale_paths[@]}")
+stage_success_allowed_before=$(/usr/bin/python3 -I -S "$STAGE_IGNORED/digest.py" "$STAGE_INSTALL" \
+  "${stage_success_allowed[@]}")
+stage_tracked_before=$(/usr/bin/python3 -I -S "$STAGE_IGNORED/digest.py" "$STAGE_INSTALL" \
+  .gitignore dev/portal.sh pkg/base tracked.txt)
+stage_index_before=$(sha256sum "$STAGE_INSTALL/.git/index" | cut -d' ' -f1)
+HOME="$STAGE_HOME" TMPDIR="$STAGE_TMP" MKTEMP_LOG="$STAGE_IGNORED/mktemp.log" STAGE_INSTALL="$STAGE_INSTALL" \
+  GIT_INVENTORY_OUT="$STAGE_IGNORED/fail.inventory" GIT_INVENTORY_DRAINED="$STAGE_IGNORED/fail.drained" \
+  GIT_INVENTORY_FAIL=1 SED_REDUCER_OUT="$STAGE_IGNORED/fail.reducer" \
+  PATH="$STAGE_IGNORED/bin:/usr/bin:/bin" "$STAGE_SOURCE/dev/portal.sh" stage \
+  > "$STAGE_IGNORED/inventory-fail.out" 2>&1
+stage_inventory_fail_rc=$?
+stage_fixture_after=$(/usr/bin/python3 -I -S "$STAGE_IGNORED/digest.py" "$STAGE_INSTALL" \
+  "${stage_unsupported[@]}" "${stage_allowed[@]}" "${stage_scale_paths[@]}")
+stage_tracked_after=$(/usr/bin/python3 -I -S "$STAGE_IGNORED/digest.py" "$STAGE_INSTALL" \
+  .gitignore dev/portal.sh pkg/base tracked.txt)
+stage_index_after=$(sha256sum "$STAGE_INSTALL/.git/index" | cut -d' ' -f1)
+is "an ignored inventory failure rejects before snapshot and preserves bytes and index" \
+  "$stage_inventory_fail_rc|$(cat "$STAGE_IGNORED/inventory-fail.out")|$(wc -l < "$STAGE_IGNORED/mktemp.log")|$stage_fixture_after|$stage_tracked_after|$stage_index_after" \
+  "1|portal.sh: cannot inspect ignored paths in install|0|$stage_fixture_before|$stage_tracked_before|$stage_index_before"
+stage_fail_first=$(/usr/bin/sed -n '1p' "$STAGE_IGNORED/fail.inventory")
+is "a failed ignored inventory is fully drained and reduced before status 71 propagates" \
+  "$(cat "$STAGE_IGNORED/fail.drained")|$(cat "$STAGE_IGNORED/fail.reducer")" \
+  "drained|$stage_fail_first"
+
+: > "$STAGE_IGNORED/mktemp.log"
+: > "$STAGE_IGNORED/first.drained"
+: > "$STAGE_IGNORED/first.reducer"
+HOME="$STAGE_HOME" TMPDIR="$STAGE_TMP" MKTEMP_LOG="$STAGE_IGNORED/mktemp.log" STAGE_INSTALL="$STAGE_INSTALL" \
+  GIT_INVENTORY_OUT="$STAGE_IGNORED/first.inventory" GIT_INVENTORY_DRAINED="$STAGE_IGNORED/first.drained" \
+  SED_REDUCER_OUT="$STAGE_IGNORED/first.reducer" \
+  PATH="$STAGE_IGNORED/bin:/usr/bin:/bin" "$STAGE_SOURCE/dev/portal.sh" stage \
+  > "$STAGE_IGNORED/first.out" 2>&1
+stage_first_rc=$?
+stage_fixture_after=$(/usr/bin/python3 -I -S "$STAGE_IGNORED/digest.py" "$STAGE_INSTALL" \
+  "${stage_unsupported[@]}" "${stage_allowed[@]}" "${stage_scale_paths[@]}")
+stage_tracked_after=$(/usr/bin/python3 -I -S "$STAGE_IGNORED/digest.py" "$STAGE_INSTALL" \
+  .gitignore dev/portal.sh pkg/base tracked.txt)
+stage_index_after=$(sha256sum "$STAGE_INSTALL/.git/index" | cut -d' ' -f1)
+is "stage rejects unsupported ignored paths before creating a snapshot" \
+  "$stage_first_rc|$(cat "$STAGE_IGNORED/first.out")|$(wc -l < "$STAGE_IGNORED/mktemp.log")" \
+  '1|portal.sh: install has ignored paths outside stage exclusions; remove them first|0'
+is "rejected ignored paths preserve every fixture byte, tracked byte, and exact index byte" \
+  "$stage_fixture_after|$stage_tracked_after|$stage_index_after" \
+  "$stage_fixture_before|$stage_tracked_before|$stage_index_before"
+stage_inventory_shape=$(/usr/bin/python3 -I -S - "$STAGE_IGNORED/first.inventory" "$STAGE_IGNORED/first.reducer" <<'PY'
+from pathlib import Path
+import sys
+
+raw = Path(sys.argv[1]).read_bytes()
+lines = raw.decode().splitlines()
+reduced = Path(sys.argv[2]).read_bytes()
+first = raw.splitlines()[0]
+pkg_leaves = {f"pkg/ignored-{index}.log" for index in range(1, 4)}
+print(
+    f"{lines.count('.venv/')}:{lines.count('node_modules/')}:"
+    f"{len(pkg_leaves.intersection(lines))}:{int(len(lines) > 1)}:"
+    f"{int(reduced == first)}"
+)
+PY
+)
+is "stage keeps tracked-parent leaves raw while retaining only the first drained record" \
+  "$stage_inventory_shape|$(cat "$STAGE_IGNORED/first.drained")" '1:1:3:1:1|drained'
+
+rm -rf -- "$STAGE_INSTALL/.venv/cache" "$STAGE_INSTALL/node_modules"
+rm -f -- "$STAGE_INSTALL"/pkg/ignored-*.log
+
+stage_isolated_actual=""
+stage_isolated_expected=""
+for i in "${!stage_unsupported[@]}"; do
+  for path in "${stage_unsupported[@]}"; do rm -f -- "$STAGE_INSTALL/$path"; done
+  mkdir -p "$(dirname -- "$STAGE_INSTALL/${stage_unsupported[$i]}")"
+  printf 'unsupported-%s' "$i" > "$STAGE_INSTALL/${stage_unsupported[$i]}"
+  : > "$STAGE_IGNORED/mktemp.log"
+  HOME="$STAGE_HOME" TMPDIR="$STAGE_TMP" MKTEMP_LOG="$STAGE_IGNORED/mktemp.log" STAGE_INSTALL="$STAGE_INSTALL" \
+    GIT_INVENTORY_OUT="$STAGE_IGNORED/isolated-$i.inventory" \
+    PATH="$STAGE_IGNORED/bin:/usr/bin:/bin" "$STAGE_SOURCE/dev/portal.sh" stage \
+    > "$STAGE_IGNORED/isolated-$i.out" 2>&1
+  stage_isolated_rc=$?
+  if [[ -f $STAGE_INSTALL/${stage_unsupported[$i]} ]]; then
+    stage_isolated_bytes=$(cat "$STAGE_INSTALL/${stage_unsupported[$i]}")
+  else
+    stage_isolated_bytes=missing
+  fi
+  stage_isolated_actual+="$i:$stage_isolated_rc:$(wc -l < "$STAGE_IGNORED/mktemp.log"):$stage_isolated_bytes "
+  stage_isolated_expected+="$i:1:0:unsupported-$i "
+done
+is "each unsupported ignored path independently rejects before snapshot and preserves its bytes" \
+  "$stage_isolated_actual" "$stage_isolated_expected"
+is "an excluded pycache leaf does not retain its ignored parent" \
+  "$(cat "$STAGE_IGNORED/isolated-0.inventory")" "normal.log"
+
+for path in "${stage_unsupported[@]}"; do rm -f -- "$STAGE_INSTALL/$path"; done
+rm -rf -- "$STAGE_INSTALL/.venv"
+: > "$STAGE_IGNORED/mktemp.log"
+HOME="$STAGE_HOME" TMPDIR="$STAGE_TMP" MKTEMP_LOG="$STAGE_IGNORED/mktemp.log" \
+  STAGE_INSTALL="$STAGE_INSTALL" \
+  PATH="$STAGE_IGNORED/bin:/usr/bin:/bin" "$STAGE_SOURCE/dev/portal.sh" stage \
+  > "$STAGE_IGNORED/second.out" 2>&1
+stage_second_rc=$?
+stage_allowed_after=$(/usr/bin/python3 -I -S "$STAGE_IGNORED/digest.py" "$STAGE_INSTALL" \
+  "${stage_success_allowed[@]}")
+stage_staged_names=$(git -C "$STAGE_INSTALL" diff --cached --name-only)
+HOME="$STAGE_HOME" TMPDIR="$STAGE_TMP" PATH="$STAGE_IGNORED/bin:/usr/bin:/bin" \
+  "$STAGE_SOURCE/dev/portal.sh" parity > "$STAGE_IGNORED/parity.out" 2>&1
+stage_parity_rc=$?
+is "stage succeeds after removing only unsupported ignored paths and stages the source change" \
+  "$stage_second_rc|$(tail -1 "$STAGE_IGNORED/second.out")|$(wc -l < "$STAGE_IGNORED/mktemp.log")|$(cat "$STAGE_INSTALL/tracked.txt")|$stage_staged_names" \
+  '0|stage: IDENTICAL; install changes are staged|1|staged|tracked.txt'
+is "successful stage preserves every remaining allowed ignored byte and passes parity" \
+  "$stage_allowed_after|$stage_parity_rc|$(cat "$STAGE_IGNORED/parity.out")" \
+  "$stage_success_allowed_before|0|parity: IDENTICAL"
+
+printf ordinary > "$STAGE_INSTALL/ordinary-only"
+: > "$STAGE_IGNORED/mktemp.log"
+stage_tracked_before=$(/usr/bin/python3 -I -S "$STAGE_IGNORED/digest.py" "$STAGE_INSTALL" \
+  .gitignore dev/portal.sh pkg/base tracked.txt)
+stage_index_before=$(sha256sum "$STAGE_INSTALL/.git/index" | cut -d' ' -f1)
+HOME="$STAGE_HOME" TMPDIR="$STAGE_TMP" MKTEMP_LOG="$STAGE_IGNORED/mktemp.log" STAGE_INSTALL="$STAGE_INSTALL" \
+  PATH="$STAGE_IGNORED/bin:/usr/bin:/bin" "$STAGE_SOURCE/dev/portal.sh" stage \
+  > "$STAGE_IGNORED/ordinary.out" 2>&1
+stage_ordinary_rc=$?
+stage_tracked_after=$(/usr/bin/python3 -I -S "$STAGE_IGNORED/digest.py" "$STAGE_INSTALL" \
+  .gitignore dev/portal.sh pkg/base tracked.txt)
+stage_index_after=$(sha256sum "$STAGE_INSTALL/.git/index" | cut -d' ' -f1)
+is "ordinary installed-only files still reject before snapshot or mutation" \
+  "$stage_ordinary_rc|$(cat "$STAGE_IGNORED/ordinary.out")|$(wc -l < "$STAGE_IGNORED/mktemp.log")|$(cat "$STAGE_INSTALL/ordinary-only")|$stage_tracked_after|$stage_index_after" \
+  "1|portal.sh: install has untracked files; remove installed-only probes first|0|ordinary|$stage_tracked_before|$stage_index_before"
+
+if [[ ${PORTAL_TEST_ONLY:-} == stage-ignored ]]; then
+  echo; echo "$pass passed, $fail failed"
+  exit $((fail > 0))
+fi
+fi
+
+if [[ -z ${PORTAL_TEST_ONLY:-} || ${PORTAL_TEST_ONLY:-} == scan-argv ]]; then
+ARGV_SCAN="$T/scan-argv"; mkdir -p "$ARGV_SCAN/bin" "$ARGV_SCAN/spool"
+cat > "$ARGV_SCAN/holder.py" <<'PY'
+import os
+import signal
+import sys
+
+size = int(sys.argv[1])
+identities = sys.argv[2]
+alarm_seconds = int(sys.argv[3])
+
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+signal.alarm(alarm_seconds)
+
+with open("/proc/self/stat", "rb") as stream:
+    stat = stream.read()
+start = stat.rsplit(b") ", 1)[1].split()[19]
+line = f"{os.getpid()} {int(start)}\n".encode()
+fd = os.open(identities, os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC)
+try:
+    if os.write(fd, line) != len(line):
+        raise OSError("short identity write")
+finally:
+    os.close(fd)
+
+argv0 = "x" * (size - 10) + "sleep"
+os.execve("/usr/bin/sleep", [argv0, "300"], {"PATH": "/usr/bin:/bin"})
+PY
+cat > "$ARGV_SCAN/bin/ss" <<'SH'
+#!/bin/bash
+case "$*" in
+  -tlnpH)
+    if [[ $SCAN_ARGV_CASE == exact ]]; then
+      printf 'LISTEN 0 128 127.0.0.1:45191 0.0.0.0:* users:(("sleep",pid=%s,fd=3))\n' "$PID_8191"
+      printf 'LISTEN 0 128 127.0.0.1:45192 0.0.0.0:* users:(("sleep",pid=%s,fd=3))\n' "$PID_8192"
+      printf 'LISTEN 0 128 127.0.0.1:45193 0.0.0.0:* users:(("sleep",pid=%s,fd=3))\n' "$PID_8193"
+    elif [[ $SCAN_ARGV_CASE == boundary ]]; then
+      printf 'LISTEN 0 128 127.0.0.1:45201 0.0.0.0:* users:(("sleep",pid=%s,fd=3))\n' "$PID_SHARED"
+      printf 'LISTEN 0 128 127.0.0.1:45202 0.0.0.0:* users:(("sleep",pid=%s,fd=3))\n' "$PID_SHARED"
+    else
+      for ((i = 0; i < 512; i++)); do
+        printf 'LISTEN 0 128 127.0.0.1:%d 0.0.0.0:* users:(("sleep",pid=%s,fd=3))\n' "$((10000 + i))" "$PID_SHARED"
+      done
+    fi
+    ;;
+  '-tnH state established') ;;
+  *) exit 1 ;;
+esac
+SH
+cat > "$ARGV_SCAN/bin/head" <<'SH'
+#!/bin/bash
+last=${!#}
+if [[ -n ${ARGV_TARGET_PID:-} && $last == "/proc/$ARGV_TARGET_PID/cmdline" ]]; then
+  case ${ARGV_HEAD_MODE:-normal} in
+    partial) printf 'partial\0sample'; exit 23 ;;
+    empty) exit 0 ;;
+  esac
+fi
+exec /usr/bin/head "$@"
+SH
+cat > "$ARGV_SCAN/bin/base64" <<'SH'
+#!/bin/bash
+spool=$(mktemp -p "$BASE64_SPOOL_DIR" base64.XXXXXX) || exit 1
+trap 'rm -f -- "$spool"' EXIT
+cat > "$spool" || exit 1
+bytes=$(wc -c < "$spool") || exit 1
+printf '%s\n' "$bytes" >> "$BASE64_LOG" || exit 1
+if [[ ${ARGV_BASE64_MODE:-normal} == partial ]]; then
+  printf 'cGFydGlhbA=='
+  exit 29
+fi
+/usr/bin/base64 "$@" < "$spool"
+SH
+chmod 700 "$ARGV_SCAN/bin/ss" "$ARGV_SCAN/bin/head" "$ARGV_SCAN/bin/base64"
+
+scan_argv_start() {
+  local pid=$1 stat fields start
+  [[ $pid =~ ^[1-9][0-9]*$ ]] && (( pid > 1 )) || return 1
+  IFS= read -r stat 2>/dev/null < "/proc/$pid/stat" || return 1
+  read -ra fields <<<"${stat##*) }"
+  start=${fields[19]:-}
+  [[ $start =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$start"
+}
+
+scan_argv_reapable() {
+  local pid=$1 expected_start=$2 stat fields
+  [[ $pid =~ ^[1-9][0-9]*$ && $expected_start =~ ^[0-9]+$ ]] && (( pid > 1 )) || return 1
+  [[ -e /proc/$pid/stat ]] || return 0
+  IFS= read -r stat 2>/dev/null < "/proc/$pid/stat" || return 1
+  [[ $stat == *") "* ]] || return 1
+  read -ra fields <<<"${stat##*) }"
+  [[ ${fields[0]:-} == Z && ${fields[19]:-} == "$expected_start" ]]
+}
+
+cleanup_scan_argv() {
+  local identities=$1 pid start extra current i
+  while read -r pid start extra; do
+    [[ -z $extra && $pid =~ ^[1-9][0-9]*$ && $start =~ ^[0-9]+$ ]] || continue
+    (( pid > 1 )) || continue
+    current=$(scan_argv_start "$pid" 2>/dev/null || true)
+    if [[ $current == "$start" ]]; then
+      /usr/bin/python3 -I -S "$PR" signal "$pid" "$start" TERM >/dev/null 2>&1 || true
+    fi
+    for ((i = 0; i < 20; i++)); do
+      scan_argv_reapable "$pid" "$start" && break
+      sleep 0.01
+    done
+    if ! scan_argv_reapable "$pid" "$start"; then
+      current=$(scan_argv_start "$pid" 2>/dev/null || true)
+      if [[ $current == "$start" ]]; then
+        /usr/bin/python3 -I -S "$PR" signal "$pid" "$start" KILL >/dev/null 2>&1 || true
+      fi
+      for ((i = 0; i < 20; i++)); do
+        scan_argv_reapable "$pid" "$start" && break
+        sleep 0.01
+      done
+    fi
+    if scan_argv_reapable "$pid" "$start"; then
+      wait "$pid" 2>/dev/null || true
+    fi
+  done < "$identities"
+}
+
+launch_scan_argv_holder() {
+  local size=$1 identities=$2 pid identity_pid start extra actual current i
+  local matches=()
+  /usr/bin/python3 -I -S "$ARGV_SCAN/holder.py" "$size" "$identities" 30 >/dev/null 2>&1 &
+  pid=$!
+  for i in $(seq 1 200); do
+    mapfile -t matches < <(awk -v pid="$pid" '$1 == pid { print }' "$identities")
+    if (( ${#matches[@]} == 1 )); then
+      read -r identity_pid start extra <<<"${matches[0]}"
+      [[ -z $extra && $identity_pid == "$pid" && $start =~ ^[0-9]+$ ]] || return 1
+      current=$(scan_argv_start "$pid" 2>/dev/null || true)
+      [[ $current == "$start" ]] || return 1
+      break
+    fi
+    sleep 0.01
+  done
+  (( ${#matches[@]} == 1 )) || return 1
+  for i in $(seq 1 200); do
+    actual=$(wc -c < "/proc/$pid/cmdline" 2>/dev/null || true)
+    [[ $actual == "$size" ]] && break
+    sleep 0.01
+  done
+  [[ $actual == "$size" ]] || return 1
+  HOLDER_PID=$pid
+}
+
+scan_argv_alarm_probe() (
+  set -u
+  local identities="$ARGV_SCAN/fallback-identities"
+  local pid recorded start current wait_rc i
+  local records=()
+
+  : > "$identities"
+  trap 'cleanup_scan_argv "$identities"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  /usr/bin/python3 -I -S "$ARGV_SCAN/holder.py" 8191 "$identities" 1 >/dev/null 2>&1 &
+  pid=$!
+  for ((i = 0; i < 200; i++)); do
+    mapfile -t records < "$identities"
+    (( ${#records[@]} <= 1 )) || return 1
+    (( ${#records[@]} == 1 )) && break
+    sleep 0.01
+  done
+  (( ${#records[@]} == 1 )) || return 1
+  [[ ${records[0]} =~ ^([1-9][0-9]*)\ ([0-9]+)$ ]] || return 1
+  recorded=${BASH_REMATCH[1]}
+  start=${BASH_REMATCH[2]}
+  (( recorded > 1 )) || return 1
+  [[ $recorded == "$pid" ]] || return 1
+  current=$(scan_argv_start "$pid" 2>/dev/null || true)
+  [[ $current == "$start" ]] || return 1
+
+  for ((i = 0; i < 300; i++)); do
+    scan_argv_reapable "$pid" "$start" && break
+    sleep 0.01
+  done
+  scan_argv_reapable "$pid" "$start" || return 1
+  if wait "$pid"; then
+    wait_rc=0
+  else
+    wait_rc=$?
+  fi
+  trap - EXIT
+  [[ $wait_rc == 142 ]]
+)
+if scan_argv_alarm_probe 2>/dev/null; then
+  scan_argv_alarm_rc=0
+else
+  scan_argv_alarm_rc=$?
+fi
+is "the argv holder records its exact identity before its one-second alarm ends it" \
+  "$scan_argv_alarm_rc" "0"
+
+scan_argv_boundary_case() {
+  local name=$1 head_mode=$2 base64_mode=$3
+  : > "$ARGV_SCAN/$name-base64.log"
+  SCAN_ARGV_CASE=boundary ARGV_TARGET_PID="$PID_SHARED" \
+    ARGV_HEAD_MODE="$head_mode" ARGV_BASE64_MODE="$base64_mode" \
+    BASE64_LOG="$ARGV_SCAN/$name-base64.log" BASE64_SPOOL_DIR="$ARGV_SCAN/spool" \
+    PATH="$ARGV_SCAN/bin:/usr/bin:/bin" "$S/scan-ports.sh" > "$ARGV_SCAN/$name.json"
+}
+
+scan_argv_probe() (
+  set -euo pipefail
+  local identities="$ARGV_SCAN/identities" HOLDER_PID
+  : > "$identities"
+
+  trap 'cleanup_scan_argv "$identities"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  launch_scan_argv_holder 8191 "$identities"; PID_8191=$HOLDER_PID
+  launch_scan_argv_holder 8192 "$identities"; PID_8192=$HOLDER_PID
+  launch_scan_argv_holder 8193 "$identities"; PID_8193=$HOLDER_PID
+  export PID_8191 PID_8192 PID_8193
+  : > "$ARGV_SCAN/base64.log"
+  SCAN_ARGV_CASE=exact BASE64_LOG="$ARGV_SCAN/base64.log" BASE64_SPOOL_DIR="$ARGV_SCAN/spool" \
+    PATH="$ARGV_SCAN/bin:/usr/bin:/bin" "$S/scan-ports.sh" > "$ARGV_SCAN/exact.json"
+  cp "$ARGV_SCAN/base64.log" "$ARGV_SCAN/exact-base64.log"
+
+  launch_scan_argv_holder 65536 "$identities"; PID_SHARED=$HOLDER_PID
+  export PID_SHARED
+  : > "$ARGV_SCAN/base64.log"
+  SCAN_ARGV_CASE=shared BASE64_LOG="$ARGV_SCAN/base64.log" BASE64_SPOOL_DIR="$ARGV_SCAN/spool" \
+    PATH="$ARGV_SCAN/bin:/usr/bin:/bin" "$S/scan-ports.sh" > "$ARGV_SCAN/shared.json"
+
+  scan_argv_boundary_case partial-producer partial normal
+  scan_argv_boundary_case partial-base64 normal partial
+  scan_argv_boundary_case successful-empty empty normal
+)
+scan_argv_probe; scan_argv_probe_rc=$?
+is "the scanner argv probe completes against real processes" "$scan_argv_probe_rc" "0"
+is "exact 8,191, 8,192, and 8,193-byte command lines keep the truncation boundary" \
+  "$(jq -c '[.ports[] | .argvTruncated]' "$ARGV_SCAN/exact.json" 2>/dev/null)" '[false,false,true]'
+is "exact 8,191 and 8,192-byte command lines keep both NUL-delimited arguments" \
+  "$(jq -c '[.ports[0:2][] | [(.argv | length), (.argv[0] | length), .argv[1]]]' "$ARGV_SCAN/exact.json" 2>/dev/null)" \
+  '[[2,8186,"300"],[2,8187,"300"]]'
+is "exact argv samples feed Base64 once at each raw byte length" \
+  "$(sort -n "$ARGV_SCAN/exact-base64.log" 2>/dev/null | paste -sd, -)" '8191,8192,8193'
+is "one PID projected onto 512 ports feeds Base64 one bounded sample" \
+  "$(awk '{ calls++; total += $1; if ($1 > max) max = $1 } END { print calls + 0, total + 0, max + 0 }' "$ARGV_SCAN/base64.log" 2>/dev/null)" \
+  '1 8193 8193'
+is "all 512 shared-PID rows return with equal truncated argv" \
+  "$(jq -r '[(.ports | length), ([.ports[].argv] | unique | length), ([.ports[].argvTruncated] | all)] | @tsv' "$ARGV_SCAN/shared.json" 2>/dev/null)" \
+  $'512\t1\ttrue'
+is "the shared-PID scan keeps the public row key set" \
+  "$(jq -c '[.ports[] | keys] | unique' "$ARGV_SCAN/shared.json" 2>/dev/null)" \
+  '[["addresses","argv","argvTruncated","cmdline","comm","conns","cpuTicks","cwd","deps","exclusiveOwner","httpCode","latMs","markers","pid","port","procState","projectName","projectRoot","rssKb","scope","start","upSec"]]'
+
+for scan_argv_boundary_name in partial-producer partial-base64 successful-empty; do
+  is "$scan_argv_boundary_name caches empty argv after one scoped producer and encoder attempt" \
+    "$(jq -c '[(.ports | length), [.ports[].argv], [.ports[].argvTruncated]]' "$ARGV_SCAN/$scan_argv_boundary_name.json" 2>/dev/null)|$(wc -l < "$ARGV_SCAN/$scan_argv_boundary_name-base64.log")" \
+    '[2,[[],[]],[false,false]]|1'
+done
+if pgrep -f "sleep [3]00" >/dev/null; then bad "the scanner argv probe left a sleep 300 process"; else ok "the scanner argv probe leaves no sleep 300 process"; fi
+
+if [[ ${PORTAL_TEST_ONLY:-} == scan-argv ]]; then
+  echo; echo "$pass passed, $fail failed"
+  exit $((fail > 0))
+fi
+fi
+
 # ---- scripts/lib/portless.sh ----------------------------------------------
 export PORTLESS_STATE_DIR="$T/portless"; mkdir -p "$PORTLESS_STATE_DIR"
 export PORTAL_STATE_DIR="$T/runtime"
 export PORTAL_PORTLESS_TLD=test
 # shellcheck source=tunnels.sh
 source "$S/tunnels.sh"    # sources lib/portless.sh; returns before dispatch
+
+if [[ -z ${PORTAL_TEST_ONLY:-} || ${PORTAL_TEST_ONLY:-} == tunnel-targets ]]; then
+LOOPBACK="$T/loopback-endpoints"; mkdir -p "$LOOPBACK/state" "$LOOPBACK/portless"; : > "$LOOPBACK/effects"
+CASE_ROOT="$LOOPBACK" PORTAL_STATE_DIR="$LOOPBACK/state" PORTLESS_STATE_DIR="$LOOPBACK/portless" S="$S" bash -c '
+  source "$S/tunnels.sh"
+  kill() { printf "kill %s\n" "$*" >> "$CASE_ROOT/effects"; return 1; }
+  proc() {
+    if [[ ${1:-} == check ]]; then
+      PROC_CHECK_COUNT=$((PROC_CHECK_COUNT + 1))
+      case ${PROC_MODE:-pass} in
+        pass) return 0 ;;
+        fail) return 1 ;;
+        second-fail) (( PROC_CHECK_COUNT == 1 )) && return 0 || return 1 ;;
+      esac
+    fi
+    printf "proc-effect %s\n" "$*" >> "$CASE_ROOT/effects"
+    return 1
+  }
+  proc_start() { printf 1; }
+  stop_line() { printf "stop-line %s\n" "$*" >> "$CASE_ROOT/effects"; return 1; }
+  group_alive() { printf "group-alive %s\n" "$*" >> "$CASE_ROOT/effects"; return 1; }
+  provider_bin() { printf "provider-bin %s\n" "$*" >> "$CASE_ROOT/effects"; return 1; }
+  cloudflared_adopt() { :; }
+  ngrok_adopt() { :; }
+  portless_adopt() { :; }
+  cloudflared_stop_adopted() { printf "cloudflared-stop %s\n" "$*" >> "$CASE_ROOT/effects"; return 1; }
+  ngrok_stop_adopted() { printf "ngrok-stop %s\n" "$*" >> "$CASE_ROOT/effects"; return 1; }
+  cmd_stop() { printf "partial-stop %s\n" "$*" >> "$CASE_ROOT/effects"; printf "{\"ok\":true}"; }
+  stop_reconciled_share() {
+    printf "reconciled-stop %s\n" "$*" >> "$CASE_ROOT/effects"
+    printf "%s\t%s\t%s\t%s\n" "$@" >> "$CASE_ROOT/stops"
+    return 0
+  }
+  portless_state_load() { return 0; }
+  alive_line() { return 0; }
+  ss() {
+    if [[ ${1:-} == -tlnH ]]; then
+      printf "%b" "${RAW_SOCKETS:-}"
+      return 0
+    fi
+    if [[ ${1:-} == -tlnpH && $# == 1 ]]; then
+      printf "full\n" >> "$CASE_ROOT/socket-queries"
+      if [[ ${ATTRIBUTED_FAIL:-0} == 1 ]]; then
+        printf "LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"partial\",pid=999998,fd=3))\n"
+        return 1
+      fi
+      printf "%b" "${ATTRIBUTED_SOCKETS:-}"
+      return 0
+    fi
+    if [[ ${1:-} == -tlnpH ]]; then
+      printf "targeted\n" >> "$CASE_ROOT/socket-queries"
+      (( ${IDENTITY_FAIL:-0} == 0 )) || return 1
+      printf "%b" "${IDENTITY_SOCKETS:-}"
+      return 0
+    fi
+    return 1
+  }
+
+  for endpoint in \
+    127.0.0.1:4471 127.0.0.1%lo:4471 "*:4471" 0.0.0.0:4471 \
+    "[::]:4471" "[::1]:4471" "[::ffff:127.0.0.1]:4471" \
+    "[::ffff:127.0.0.1%lo]:4471" :::4471 ::1:4471; do
+    localhost_reachable_endpoint "$endpoint" && printf "%s\n" "$endpoint"
+  done > "$CASE_ROOT/accepted"
+  for endpoint in \
+    192.168.50.8:4471 0.0.0.0%lo:4471 "[::ffff:192.168.50.8]:4471" \
+    "[::1%lo]:4471" ::1%lo:4471 "[::%lo]:4471" ::%lo:4471 "[fe80::1]:4471"; do
+    localhost_reachable_endpoint "$endpoint" && printf "%s\n" "$endpoint"
+  done > "$CASE_ROOT/rejected-accepted"
+
+  eval "$(declare -f localhost_reachable_endpoint | sed "1s/localhost_reachable_endpoint/localhost_reachable_endpoint_real/")"
+  localhost_reachable_endpoint() {
+    printf "%s\n" "$1" >> "$CASE_ROOT/predicate-calls"
+    localhost_reachable_endpoint_real "$1"
+  }
+
+  target_case() {
+    local rows=$1 mode=$2 rc
+    SOCKS=$(printf "%b" "$rows")
+    SOCKS_READY=1
+    PROC_MODE=$mode
+    PROC_CHECK_COUNT=0
+    if target_owns_port "999999 1" 4471; then rc=0; else rc=$?; fi
+    printf "%s:%s\n" "$rc" "$PROC_CHECK_COUNT"
+  }
+  {
+    target_case "" pass
+    target_case "LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"server\",pid=999999,fd=3))" pass
+    target_case "LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"other\",pid=999998,fd=3))" pass
+    target_case "LISTEN 0 128 127.0.0.1:4471 0.0.0.0:*" pass
+    target_case "LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"server\",pid=999999,fd=3),(\"other\",pid=999998,fd=4))" pass
+    target_case "LISTEN 0 128 192.168.50.8:4471 0.0.0.0:* users:((\"other\",pid=999998,fd=3))" pass
+    target_case "LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"server\",pid=999999,fd=3))" second-fail
+  } > "$CASE_ROOT/target-matrix"
+
+  : > "$CASE_ROOT/socket-queries"
+  ATTRIBUTED_FAIL=1 SOCKS="partial" SOCKS_READY=0 PROC_MODE=pass PROC_CHECK_COUNT=0
+  if target_owns_port "999999 1" 4471; then target_query_rc=0; else target_query_rc=$?; fi
+  printf "%s:%s:%s\n" "$target_query_rc" "$SOCKS_READY" "$(wc -l < "$CASE_ROOT/socket-queries")" > "$CASE_ROOT/target-query-failure"
+
+  : > "$CASE_ROOT/socket-queries"
+  ATTRIBUTED_FAIL=0 ATTRIBUTED_SOCKETS="" SOCKS="" SOCKS_READY=0 PROC_MODE=fail PROC_CHECK_COUNT=0
+  if target_owns_port "999999 1" 4471; then dead_absent_rc=0; else dead_absent_rc=$?; fi
+  printf "%s:%s:%s\n" "$dead_absent_rc" "$PROC_CHECK_COUNT" "$(wc -l < "$CASE_ROOT/socket-queries")" > "$CASE_ROOT/dead-absent"
+
+  : > "$CASE_ROOT/socket-queries"
+  ATTRIBUTED_SOCKETS="LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"server\",pid=999999,fd=3))\n" SOCKS="" SOCKS_READY=0 PROC_MODE=fail PROC_CHECK_COUNT=0
+  if target_owns_port "999999 1" 4471; then dead_present_rc=0; else dead_present_rc=$?; fi
+  printf "%s:%s:%s\n" "$dead_present_rc" "$PROC_CHECK_COUNT" "$(wc -l < "$CASE_ROOT/socket-queries")" > "$CASE_ROOT/dead-present"
+
+  : > "$CASE_ROOT/socket-queries"
+  ATTRIBUTED_SOCKETS="" SOCKS="" SOCKS_READY=0 PROC_MODE=pass PROC_CHECK_COUNT=0
+  if target_owns_port "999999 1" 4471; then empty_first=0; else empty_first=$?; fi
+  if target_owns_port "999999 1" 4472; then empty_second=0; else empty_second=$?; fi
+  printf "%s:%s:%s\n" "$empty_first" "$empty_second" "$(wc -l < "$CASE_ROOT/socket-queries")" > "$CASE_ROOT/empty-cache"
+
+  : > "$CASE_ROOT/predicate-calls"
+  IDENTITY_FAIL=0
+  IDENTITY_SOCKETS="LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"server\",pid=999999,fd=3))\nLISTEN 0 128 192.168.50.8:4471 0.0.0.0:* users:((\"other\",pid=999998,fd=3))\n"
+  PROC_MODE=pass PROC_CHECK_COUNT=0
+  if identity=$(listener_identity 4471); then identity_rc=0; else identity_rc=$?; fi
+  printf "%s:%s\n" "$identity_rc" "$identity" > "$CASE_ROOT/mixed-identity"
+  cp "$CASE_ROOT/predicate-calls" "$CASE_ROOT/identity-predicate-calls"
+  IDENTITY_SOCKETS="LISTEN 0 128 127.0.0.1:4471 0.0.0.0:*\n"
+  if identity=$(listener_identity 4471); then identity_unattributed=0; else identity_unattributed=$?; fi
+  IDENTITY_SOCKETS="LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"one\",pid=999999,fd=3))\nLISTEN 0 128 127.0.0.2:4471 0.0.0.0:* users:((\"two\",pid=999998,fd=3))\n"
+  if identity=$(listener_identity 4471); then identity_multiple=0; else identity_multiple=$?; fi
+  IDENTITY_FAIL=1
+  if identity=$(listener_identity 4471); then identity_query=0; else identity_query=$?; fi
+  printf "%s:%s:%s\n" "$identity_unattributed" "$identity_multiple" "$identity_query" > "$CASE_ROOT/identity-refusals"
+
+  : > "$CASE_ROOT/effects"
+  IDENTITY_FAIL=1
+  ( set -e; cmd_start cloudflared 4471 ) > "$CASE_ROOT/start-implicit-query.json"
+  printf "%s\n" "$?" > "$CASE_ROOT/start-implicit-query.rc"
+  IDENTITY_FAIL=0 ATTRIBUTED_FAIL=1
+  ( set -e; cmd_start cloudflared 4471 --target 999999 1 ) > "$CASE_ROOT/start-explicit-query.json"
+  printf "%s\n" "$?" > "$CASE_ROOT/start-explicit-query.rc"
+  ATTRIBUTED_FAIL=0 ATTRIBUTED_SOCKETS=""
+  ( set -e; cmd_start cloudflared 4471 --target 999999 1 ) > "$CASE_ROOT/start-absent.json"
+  printf "%s\n" "$?" > "$CASE_ROOT/start-absent.rc"
+  ATTRIBUTED_SOCKETS="LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"other\",pid=999998,fd=3))\n"
+  ( cmd_start cloudflared 4471 --target 999999 1 ) > "$CASE_ROOT/start-unapproved.json"
+  printf "%s\n" "$?" > "$CASE_ROOT/start-unapproved.rc"
+  cp "$CASE_ROOT/effects" "$CASE_ROOT/start-effects"
+
+  reset_status_share() {
+    rm -f -- "$STATE_DIR"/*
+    printf "https://loopback.trycloudflare.com" > "$STATE_DIR/cloudflared-4471.url"
+    printf public > "$STATE_DIR/cloudflared-4471.reach"
+    printf "999997 1" > "$STATE_DIR/cloudflared-4471.pid"
+    printf "999999 1" > "$STATE_DIR/cloudflared-4471.target"
+    : > "$CASE_ROOT/stops"
+    : > "$CASE_ROOT/predicate-calls"
+    : > "$CASE_ROOT/socket-queries"
+    ATTRIBUTED_FAIL=0
+    PROC_MODE=pass
+    PROC_CHECK_COUNT=0
+  }
+
+  reset_status_share
+  rm -f -- "$STATE_DIR"/*
+  printf "999999 1" > "$STATE_DIR/cloudflared-4399.pid"
+  printf "999999 1" > "$STATE_DIR/cloudflared-4399.target"
+  printf "https://expired.trycloudflare.com" > "$STATE_DIR/cloudflared-4400.url"
+  printf "999999 1" > "$STATE_DIR/cloudflared-4400.pid"
+  printf 1 > "$STATE_DIR/cloudflared-4400.idle"
+  printf "https://fresh.trycloudflare.com" > "$STATE_DIR/cloudflared-4401.url"
+  printf "999999 1" > "$STATE_DIR/cloudflared-4401.pid"
+  printf "https://tracked.trycloudflare.com" > "$STATE_DIR/cloudflared-4471.url"
+  printf "999997 1" > "$STATE_DIR/cloudflared-4471.pid"
+  printf "999999 1" > "$STATE_DIR/cloudflared-4471.target"
+  state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" > "$CASE_ROOT/pre-effect-query-before.json"
+  pre_effect_lines=$(wc -l < "$CASE_ROOT/effects")
+  RAW_SOCKETS=""
+  ATTRIBUTED_FAIL=1
+  ( cmd_status ) > "$CASE_ROOT/pre-effect-query.json"
+  state dump "$STATE_DIR" 8192 "$STATE_FILES_CAP" > "$CASE_ROOT/pre-effect-query-after.json"
+  tail -n "+$((pre_effect_lines + 1))" "$CASE_ROOT/effects" > "$CASE_ROOT/pre-effect-query-effects"
+  cp "$CASE_ROOT/socket-queries" "$CASE_ROOT/pre-effect-query-socket-queries"
+  test -e "$STATE_DIR/cloudflared-4401.idle" && printf idle > "$CASE_ROOT/pre-effect-query-idle" || printf no-idle > "$CASE_ROOT/pre-effect-query-idle"
+
+  reset_status_share
+  rm -f -- "$STATE_DIR"/*
+  printf "999999 1" > "$STATE_DIR/ngrok-4399.pid"
+  printf "999999 1" > "$STATE_DIR/ngrok-4399.target"
+  printf "https://legacy.trycloudflare.com" > "$STATE_DIR/cloudflared-4401.url"
+  printf public > "$STATE_DIR/cloudflared-4401.reach"
+  printf "999999 1" > "$STATE_DIR/cloudflared-4401.pid"
+  pre_effect_lines=$(wc -l < "$CASE_ROOT/effects")
+  RAW_SOCKETS="LISTEN 0 128 192.168.50.8:4401 0.0.0.0:*\n"
+  ATTRIBUTED_FAIL=1
+  cmd_status > "$CASE_ROOT/partial-targetless.json"
+  tail -n "+$((pre_effect_lines + 1))" "$CASE_ROOT/effects" > "$CASE_ROOT/partial-targetless-effects"
+  cp "$CASE_ROOT/socket-queries" "$CASE_ROOT/partial-targetless-socket-queries"
+  printf "%s:%s\n" "$(cat "$STATE_DIR/cloudflared-4401.idle")" "$IDLE_CAP" > "$CASE_ROOT/partial-targetless-idle"
+
+  reset_status_share
+  RAW_SOCKETS=""
+  ATTRIBUTED_SOCKETS="LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"other\",pid=999998,fd=3))\n"
+  cmd_status > "$CASE_ROOT/replacement.json"
+  find "$STATE_DIR" -maxdepth 1 -name "*.idle" -type f -printf "%f\n" > "$CASE_ROOT/replacement-idles"
+  cp "$CASE_ROOT/stops" "$CASE_ROOT/replacement-stops"
+
+  reset_status_share
+  RAW_SOCKETS="LISTEN 0 128 127.0.0.1:4471 0.0.0.0:*\n"
+  ATTRIBUTED_SOCKETS=""
+  cmd_status > "$CASE_ROOT/disappeared.json"
+  find "$STATE_DIR" -maxdepth 1 -name "*.idle" -type f -printf "%f\n" > "$CASE_ROOT/disappeared-idles"
+  cp "$CASE_ROOT/stops" "$CASE_ROOT/disappeared-stops"
+
+  reset_status_share
+  RAW_SOCKETS=""
+  ATTRIBUTED_FAIL=1
+  ( cmd_status ) > "$CASE_ROOT/status-query.json"
+  printf "%s\n" "$?" > "$CASE_ROOT/status-query.rc"
+  find "$STATE_DIR" -maxdepth 1 -name "*.idle" -type f -printf "%f\n" > "$CASE_ROOT/status-query-idles"
+  cp "$CASE_ROOT/stops" "$CASE_ROOT/status-query-stops"
+
+  reset_status_share
+  printf 1 > "$STATE_DIR/cloudflared-4471.idle"
+  RAW_SOCKETS="LISTEN 0 128 127.0.0.1:4471 0.0.0.0:*\n"
+  ATTRIBUTED_SOCKETS="LISTEN 0 128 127.0.0.1:4471 0.0.0.0:* users:((\"server\",pid=999999,fd=3))\n"
+  cmd_status > "$CASE_ROOT/approved.json"
+  find "$STATE_DIR" -maxdepth 1 -name "*.idle" -type f -printf "%f\n" > "$CASE_ROOT/approved-idles"
+  cp "$CASE_ROOT/stops" "$CASE_ROOT/approved-stops"
+
+  reset_status_share
+  RAW_SOCKETS="LISTEN 0 128 192.168.50.8:4471 0.0.0.0:*\n"
+  ATTRIBUTED_SOCKETS="LISTEN 0 128 192.168.50.8:4471 0.0.0.0:* users:((\"server\",pid=999999,fd=3))\n"
+  cmd_status > "$CASE_ROOT/lan-only.json"
+  find "$STATE_DIR" -maxdepth 1 -name "*.idle" -type f -printf "%f\n" > "$CASE_ROOT/lan-only-idles"
+  cp "$CASE_ROOT/predicate-calls" "$CASE_ROOT/lan-only-predicate-calls"
+  cp "$CASE_ROOT/stops" "$CASE_ROOT/lan-only-stops"
+
+  reset_status_share
+  RAW_SOCKETS=""
+  ATTRIBUTED_SOCKETS=""
+  ( set -e; cmd_status ) > "$CASE_ROOT/status-errexit.json"
+  printf "%s\n" "$?" > "$CASE_ROOT/status-errexit.rc"
+'
+is "localhost reachability keeps the exact accepted endpoint policy" \
+  "$(paste -sd, "$LOOPBACK/accepted")" \
+  '127.0.0.1:4471,127.0.0.1%lo:4471,*:4471,0.0.0.0:4471,[::]:4471,[::1]:4471,[::ffff:127.0.0.1]:4471,[::ffff:127.0.0.1%lo]:4471,:::4471,::1:4471'
+is "localhost reachability rejects LAN and scoped IPv6 endpoint forms" \
+  "$(wc -l < "$LOOPBACK/rejected-accepted")" "0"
+is "target ownership returns approved, absent, unapproved, and post-check states" \
+  "$(paste -sd, "$LOOPBACK/target-matrix")" \
+  '1:1,0:2,3:1,3:1,3:1,1:1,3:2'
+is "target ownership reports query failure without consuming partial output" \
+  "$(cat "$LOOPBACK/target-query-failure")" '2:0:1'
+is "a failed target precheck still queries and distinguishes absence from replacement" \
+  "$(cat "$LOOPBACK/dead-absent")|$(cat "$LOOPBACK/dead-present")" '1:1:1|3:1:1'
+is "a successful empty attributed snapshot is reused" \
+  "$(cat "$LOOPBACK/empty-cache")" '1:1:1'
+is "implicit identity ignores an unrelated LAN-only owner" \
+  "$(cat "$LOOPBACK/mixed-identity")" '0:999999 1'
+is "implicit identity rejects unsafe eligible ownership and distinguishes query failure" \
+  "$(cat "$LOOPBACK/identity-refusals")" '1:1:2'
+is "listener identity calls the shared endpoint predicate on complete rows" \
+  "$(sort "$LOOPBACK/identity-predicate-calls" | paste -sd,)" '127.0.0.1:4471,192.168.50.8:4471'
+is "start preserves query and consent errors under sourced errexit" \
+  "$(cat "$LOOPBACK/start-implicit-query.rc"):$(jq -r .error "$LOOPBACK/start-implicit-query.json" 2>/dev/null)|$(cat "$LOOPBACK/start-explicit-query.rc"):$(jq -r .error "$LOOPBACK/start-explicit-query.json" 2>/dev/null)|$(cat "$LOOPBACK/start-absent.rc"):$(jq -r .error "$LOOPBACK/start-absent.json" 2>/dev/null)|$(cat "$LOOPBACK/start-unapproved.rc"):$(jq -r .error "$LOOPBACK/start-unapproved.json" 2>/dev/null)" \
+  '0:could not query attributed listening sockets|0:could not query attributed listening sockets|0:port 4471 is no longer served by the approved process|0:port 4471 is no longer served by the approved process'
+is "rejected starts have no provider or signal effect" "$(wc -l < "$LOOPBACK/start-effects")" '0'
+is "an attributed query failure precedes every partial, idle, and stop effect" \
+  "$(jq -r .error "$LOOPBACK/pre-effect-query.json" 2>/dev/null)|$(wc -l < "$LOOPBACK/pre-effect-query-socket-queries")|$(wc -l < "$LOOPBACK/pre-effect-query-effects")|$(cmp -s "$LOOPBACK/pre-effect-query-before.json" "$LOOPBACK/pre-effect-query-after.json"; echo $?)|$(cat "$LOOPBACK/pre-effect-query-idle")" \
+  'could not query attributed listening sockets|1|0|0|no-idle'
+partial_targetless_idle=$(cut -d: -f1 "$LOOPBACK/partial-targetless-idle")
+is "partial and targetless state skips attribution and keeps the fixed reapproval deadline" \
+  "$(wc -l < "$LOOPBACK/partial-targetless-socket-queries")|$(grep -c '^partial-stop ' "$LOOPBACK/partial-targetless-effects")|$(cut -d: -f2 "$LOOPBACK/partial-targetless-idle")|$(jq -r '(.tunnels[0].targetHealthy | tostring) + "\t" + .tunnels[0].dns' "$LOOPBACK/partial-targetless.json" 2>/dev/null)|$([[ $partial_targetless_idle =~ ^[0-9]+$ ]] && echo timestamp)" \
+  $'0|1|600|null\t|timestamp'
+is "a raw-empty attributed replacement stops immediately without idle or output row" \
+  "$(wc -l < "$LOOPBACK/replacement-stops")|$(wc -l < "$LOOPBACK/replacement-idles")|$(jq -c '[.ok, (.tunnels | length)]' "$LOOPBACK/replacement.json" 2>/dev/null)" \
+  '1|0|[true,0]'
+is "a raw-present attributed absence gets the fixed idle path without a stop" \
+  "$(wc -l < "$LOOPBACK/disappeared-stops")|$(cat "$LOOPBACK/disappeared-idles")|$(jq -c '[.ok, (.tunnels | length), .tunnels[0].targetHealthy]' "$LOOPBACK/disappeared.json" 2>/dev/null)" \
+  '0|cloudflared-4471.idle|[true,1,false]'
+is "an attributed query failure makes no idle or stop mutation" \
+  "$(cat "$LOOPBACK/status-query.rc"):$(jq -r .error "$LOOPBACK/status-query.json" 2>/dev/null)|$(wc -l < "$LOOPBACK/status-query-stops")|$(wc -l < "$LOOPBACK/status-query-idles")" \
+  '0:could not query attributed listening sockets|0|0'
+is "approved status clears idle and reports healthy" \
+  "$(wc -l < "$LOOPBACK/approved-stops")|$(wc -l < "$LOOPBACK/approved-idles")|$(jq -c '.tunnels[0].targetHealthy' "$LOOPBACK/approved.json" 2>/dev/null)" \
+  '0|0|true'
+is "fresh LAN-only status uses the shared predicate twice and starts one idle deadline" \
+  "$(wc -l < "$LOOPBACK/lan-only-stops")|$(cat "$LOOPBACK/lan-only-idles")|$(sort "$LOOPBACK/lan-only-predicate-calls" | paste -sd,)|$(jq -r '[.tunnels[0].targetHealthy, .tunnels[0].dns] | @tsv' "$LOOPBACK/lan-only.json" 2>/dev/null)" \
+  $'0|cloudflared-4471.idle|192.168.50.8:4471,192.168.50.8:4471|false\t'
+is "status classifies an absent target under sourced errexit" \
+  "$(cat "$LOOPBACK/status-errexit.rc"):$(jq -c '[.ok, .tunnels[0].targetHealthy]' "$LOOPBACK/status-errexit.json" 2>/dev/null)" \
+  '0:[true,false]'
+is "the tunnel target regressions invoke no provider or signal effect" \
+  "$(grep -Ec '^(kill|proc-effect|stop-line|group-alive|provider-bin|cloudflared-stop|ngrok-stop) ' "$LOOPBACK/effects" || true)" '0'
+
+if [[ ${PORTAL_TEST_ONLY:-} == tunnel-targets ]]; then
+  echo; echo "$pass passed, $fail failed"
+  exit $((fail > 0))
+fi
+fi
 
 portal_status_fixture_file() {
   local root=$1 port=$2 suffix=$3 spec=$4 kind value target
@@ -1488,50 +2320,6 @@ real_stub_env "$R2" 'cmd_status >/dev/null'
 proc check ${tunnel_identity%% *} ${tunnel_identity#* } >/dev/null 2>&1 && tunnel_state=alive || tunnel_state=gone
 is "a replacement listener cannot inherit a public share" "$tunnel_state" "gone"
 kill "$replacement_listener" 2>/dev/null; wait "$replacement_listener" 2>/dev/null
-
-LAN_TARGET="$T/target-lan"; mkdir -p "$LAN_TARGET"; : > "$LAN_TARGET/effects"
-printf 'https://stale.trycloudflare.com' > "$LAN_TARGET/cloudflared-4471.url"
-printf 'public' > "$LAN_TARGET/cloudflared-4471.reach"
-printf '999999 1' > "$LAN_TARGET/cloudflared-4471.pid"
-printf '888888 1' > "$LAN_TARGET/cloudflared-4471.target"
-lan_status=$(PORTAL_STATE_DIR="$LAN_TARGET" PORTLESS_STATE_DIR="$PORTLESS_STATE_DIR" \
-  EFFECTS="$LAN_TARGET/effects" S="$S" bash -c '
-  source "$S/tunnels.sh"
-  ss() { printf "LISTEN 0 128 192.168.50.8:4471 0.0.0.0:*\n"; }
-  portless_state_load() { return 0; }
-  alive_line() { return 0; }
-  target_owns_port() { return 1; }
-  cloudflared_adopt() { :; }
-  ngrok_adopt() { :; }
-  portless_adopt() { :; }
-  kill() { printf "kill %s\n" "$*" >> "$EFFECTS"; return 1; }
-  proc() { printf "proc %s\n" "$*" >> "$EFFECTS"; return 1; }
-  cmd_status
-')
-is "status marks a tracked tunnel whose localhost target is offline" \
-  "$(jq -r '.tunnels[] | select(.provider == "cloudflared" and .port == 4471) | [.targetHealthy, .dns] | @tsv' <<<"$lan_status") $(test -e "$LAN_TARGET/cloudflared-4471.idle" && echo idle || echo no-idle) $(wc -l < "$LAN_TARGET/effects")" \
-  $'false\t idle 0'
-
-LEGACY_TARGET="$T/targetless-legacy"; mkdir -p "$LEGACY_TARGET"; : > "$LEGACY_TARGET/effects"
-printf 'https://legacy.trycloudflare.com' > "$LEGACY_TARGET/cloudflared-4473.url"
-printf 'public' > "$LEGACY_TARGET/cloudflared-4473.reach"
-printf '999999 1' > "$LEGACY_TARGET/cloudflared-4473.pid"
-legacy_status=$(PORTAL_STATE_DIR="$LEGACY_TARGET" PORTLESS_STATE_DIR="$PORTLESS_STATE_DIR" \
-  EFFECTS="$LEGACY_TARGET/effects" S="$S" bash -c '
-  source "$S/tunnels.sh"
-  ss() { printf "LISTEN 0 128 127.0.0.1:4473 0.0.0.0:*\n"; }
-  portless_state_load() { return 0; }
-  alive_line() { return 0; }
-  cloudflared_adopt() { :; }
-  ngrok_adopt() { :; }
-  portless_adopt() { :; }
-  kill() { printf "kill %s\n" "$*" >> "$EFFECTS"; return 1; }
-  proc() { printf "proc %s\n" "$*" >> "$EFFECTS"; return 1; }
-  cmd_status
-')
-is "a legacy targetless share gets a fixed reapproval deadline" \
-  "$(jq -r '.tunnels[] | select(.provider == "cloudflared" and .port == 4473) | .targetHealthy' <<<"$legacy_status") $(test -e "$LEGACY_TARGET/cloudflared-4473.idle" && echo idle || echo no-idle) $(wc -l < "$LEGACY_TARGET/effects")" \
-  "null idle 0"
 
 R3="$T/idle-write"; mkdir -p "$R3"
 python3 -m http.server 4472 --bind 127.0.0.1 >/dev/null 2>&1 & idle_listener=$!; sleep 0.4
