@@ -1313,8 +1313,8 @@ routes=$PORTLESS_STATE_DIR/routes.json
 pause() {
   [[ $PORTLESS_TEST_PAUSE == "$1" && ! -e $PORTLESS_TEST_SYNC.used ]] || return 0
   : > "$PORTLESS_TEST_SYNC.used"
-  printf '%s' "$1" > "$PORTLESS_TEST_SYNC"
   trap 'exit 143' TERM INT HUP
+  printf '%s' "$1" > "$PORTLESS_TEST_SYNC"
   while :; do sleep 1; done
 }
 [[ ${1:-} == alias ]] || exit 2
