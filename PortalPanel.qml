@@ -1160,8 +1160,8 @@ Panel {
 
         // Setup guidance stays visible while the user checks another page.
         // The command stays off-screen until pasted.
-        Row {
-          id: stepRow
+        Column {
+          id: stepBlock
           visible: root.feedback !== null && root.feedback.kind === "copy"
           width: parent.width
           spacing: Style.spacing.sm
@@ -1170,52 +1170,63 @@ Panel {
           property bool copied: false
           onVisibleChanged: if (!visible) copied = false
 
-          function richStep(s) {
-            var e = String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-            return e.replace(/portless/i, "<a href=\"" + portlessDocs + "\">$&</a>")
-          }
-
           Text {
-            anchors.verticalCenter: parent.verticalCenter
-            width: parent.width - copyHit.width - parent.spacing
-            textFormat: Text.RichText
-            text: stepRow.richStep(root.feedback ? root.feedback.text : "")
-            linkColor: Util.alpha(root.panelText, 0.75)
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.feedback ? root.feedback.text : ""
             color: Util.alpha(root.panelText, 0.75)
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
-            elide: Text.ElideRight
-            onLinkActivated: function (link) { if (root.service) root.service.openUrl(link) }
+            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
           }
 
-          MouseArea {
-            id: copyHit
-            anchors.verticalCenter: parent.verticalCenter
-            width: Style.font.bodySmall + Style.spacing.xs
-            height: Style.font.bodySmall + Style.spacing.xs
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: {
-              if (root.service && root.feedback) root.service.copyText(root.feedback.command, true)
-              stepRow.copied = true
-              copiedTimer.restart()
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(docsLink.implicitHeight, copyHit.height)
+
+            LinkText {
+              id: docsLink
+              anchors.left: parent.left
+              anchors.right: copyHit.left
+              anchors.rightMargin: Style.spacing.lg
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Portless documentation"
+              color: Util.alpha(root.panelText, 0.75)
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+              onClicked: if (root.service) root.service.openUrl(stepBlock.portlessDocs)
             }
 
-            Timer {
-              id: copiedTimer
-              interval: 1200
-              onTriggered: stepRow.copied = false
-            }
+            MouseArea {
+              id: copyHit
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.font.bodySmall + Style.spacing.xs
+              height: Style.font.bodySmall + Style.spacing.xs
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                if (root.service && root.feedback) root.service.copyText(root.feedback.command, true)
+                stepBlock.copied = true
+                copiedTimer.restart()
+              }
 
-            OpticalGlyph {
-              anchors.centerIn: parent
-              width: Style.font.caption + Style.spacing.xs
-              height: Style.font.caption
-              text: Icons.g("copy")
-              fontSize: Style.font.bodySmall
-              scale: stepRow.copied ? 1.3 : 1
-              Behavior on scale { NumberAnimation { duration: 150 } }
-              color: stepRow.copied || copyHit.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.7)
+              Timer {
+                id: copiedTimer
+                interval: 1200
+                onTriggered: stepBlock.copied = false
+              }
+
+              OpticalGlyph {
+                anchors.centerIn: parent
+                width: Style.font.caption + Style.spacing.xs
+                height: Style.font.caption
+                text: Icons.g("copy")
+                fontSize: Style.font.bodySmall
+                scale: stepBlock.copied ? 1.3 : 1
+                Behavior on scale { NumberAnimation { duration: 150 } }
+                color: stepBlock.copied || copyHit.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.7)
+              }
             }
           }
         }

@@ -377,10 +377,72 @@ check("a wildcard bind still opens localhost", e({
   const showGuidance = feedbackFn("showGuidance", ["message", "command"])
   showGuidance(state, timer, "run this", "sudo true")
   eq("copy guidance carries one command", state.feedback, { kind: "copy", text: "run this", error: false, command: "sudo true" })
+  eq("copy guidance remains until replacement or dismissal", timer.stopped, 1)
   showMoment(state, timer, "copied", false)
   eq("a moment replaces copy guidance", state.feedback, { kind: "moment", text: "copied", error: false })
   showMoment(state, timer, "failed", true)
   eq("an action failure stays urgent", state.feedback, { kind: "moment", text: "failed", error: true })
+
+  const extract = (src, re) => src.match(re)?.[0] ?? ""
+  if (panelSrc.includes("Text.RichText")) bad.push("PortalPanel.qml still renders rich text")
+  if (/\bfunction\s+richStep\s*\(/.test(panelSrc)) bad.push("PortalPanel.qml still declares richStep")
+  const stepBlockSrc = extract(panelSrc,
+    /^        Column \{\n          id: stepBlock\n[\s\S]*?^        \}$/m)
+  if (!stepBlockSrc) {
+    bad.push("copy guidance is not a Column named stepBlock")
+  } else {
+    const guidanceTextSrc = extract(stepBlockSrc,
+      /^          Text \{\n[\s\S]*?^          \}$/m)
+    if (!/^[ \t]*textFormat:[ \t]*Text\.PlainText[ \t]*$/m.test(guidanceTextSrc)
+        || !/^[ \t]*text:[ \t]*root\.feedback[ \t]*\?[ \t]*root\.feedback\.text[ \t]*:[ \t]*""[ \t]*$/m.test(guidanceTextSrc)
+        || !/^[ \t]*wrapMode:[ \t]*Text\.WrapAtWordBoundaryOrAnywhere[ \t]*$/m.test(guidanceTextSrc)
+        || /^[ \t]*elide[ \t]*:/m.test(guidanceTextSrc))
+      bad.push("copy guidance does not render feedback text literally with fallback wrapping")
+    if (!/^[ \t]*clip:[ \t]*true[ \t]*$/m.test(stepBlockSrc))
+      bad.push("copy guidance no longer clips to its block")
+    const actionRowSrc = extract(stepBlockSrc,
+      /^          Item \{\n[\s\S]*?^          \}$/m)
+    const docsLinkSrc = extract(actionRowSrc,
+      /^            LinkText \{\n[\s\S]*?^            \}$/m)
+    const linkCount = (actionRowSrc.match(/^            LinkText \{$/gm) || []).length
+    if (linkCount !== 1
+        || !/^[ \t]*anchors\.left:[ \t]*parent\.left[ \t]*$/m.test(docsLinkSrc)
+        || !/^[ \t]*anchors\.right:[ \t]*copyHit\.left[ \t]*$/m.test(docsLinkSrc)
+        || !/^[ \t]*anchors\.rightMargin:[ \t]*Style\.spacing\.lg[ \t]*$/m.test(docsLinkSrc)
+        || !/^[ \t]*text:[ \t]*"Portless documentation"[ \t]*$/m.test(docsLinkSrc)
+        || !/^[ \t]*onClicked:[ \t]*if \(root\.service\) root\.service\.openUrl\(stepBlock\.portlessDocs\)[ \t]*$/m.test(docsLinkSrc))
+      bad.push("copy guidance does not have one fixed, separated Portless documentation link")
+    const copyHitSrc = extract(actionRowSrc,
+      /^            MouseArea \{\n              id: copyHit\n[\s\S]*?^            \}$/m)
+    if (!/^[ \t]*width:[ \t]*parent\.width[ \t]*$/m.test(actionRowSrc)
+        || !/^[ \t]*implicitHeight:[ \t]*Math\.max\(docsLink\.implicitHeight, copyHit\.height\)[ \t]*$/m.test(actionRowSrc)
+        || !/^[ \t]*anchors\.right:[ \t]*parent\.right[ \t]*$/m.test(copyHitSrc))
+      bad.push("copy guidance actions do not span the row with copy anchored right")
+    const copyClickSrc = extract(copyHitSrc,
+      /^              onClicked: \{\n[\s\S]*?^              \}$/m)
+    if (!/^[ \t]*if \(root\.service && root\.feedback\) root\.service\.copyText\(root\.feedback\.command, true\)[ \t]*$/m.test(copyClickSrc))
+      bad.push("copy guidance changed the quiet command copy")
+    if (!/^[ \t]*stepBlock\.copied[ \t]*=[ \t]*true[ \t]*$/m.test(copyClickSrc)
+        || !/^[ \t]*copiedTimer\.restart\(\)[ \t]*$/m.test(copyClickSrc))
+      bad.push("copy guidance click no longer starts copied state and its timer")
+    const copiedTimerSrc = extract(copyHitSrc,
+      /^              Timer \{\n                id: copiedTimer\n[\s\S]*?^              \}$/m)
+    if (!/^[ \t]*interval:[ \t]*1200[ \t]*$/m.test(copiedTimerSrc)
+        || !/^[ \t]*onTriggered:[ \t]*stepBlock\.copied[ \t]*=[ \t]*false[ \t]*$/m.test(copiedTimerSrc)
+        || !/^[ \t]*onVisibleChanged:[ \t]*if \(!visible\) copied[ \t]*=[ \t]*false[ \t]*$/m.test(stepBlockSrc))
+      bad.push("copy guidance changed its reset or copied animation lifetime")
+    if (/^[ \t]*linkColor[ \t]*:/m.test(stepBlockSrc)
+        || /^[ \t]*onLinkActivated[ \t]*:/m.test(stepBlockSrc))
+      bad.push("copy guidance still contains rich-text link handling")
+  }
+  const closeHandlerSrc = extract(panelSrc,
+    /^      onCloseRequested: \{\n[\s\S]*?^      \}$/m)
+  if (!/^        if \(root\.feedback !== null && root\.feedback\.kind !== "moment"\) \{\n          root\.feedback = null\n          return\n        \}$/m.test(closeHandlerSrc))
+    bad.push("Escape no longer clears persistent guidance first")
+  const openedHandlerSrc = extract(panelSrc,
+    /^  onOpenedChanged: \{\n[\s\S]*?^  \}$/m)
+  if (!/^    if \(!opened\) return\n[\s\S]*?^    feedback = null$/m.test(openedHandlerSrc))
+    bad.push("panel reopen no longer clears feedback")
 
   const probeList = fn(serviceSrc, "probeList", ["ports", "watchedPorts", "focusPort"])
   const p = (n, cat, web) => ({ port: n, category: cat, web: web })

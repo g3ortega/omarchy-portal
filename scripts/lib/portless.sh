@@ -24,26 +24,106 @@ firefox_profiles() {
 # loads for itself. Reload after anything that changes routes.
 PORTLESS_STATE=""
 PORTLESS_STATE_ERROR=""
+portless_routes_valid() {
+  /usr/bin/python3 -I -S -c '
+import json
+import re
+import sys
+from decimal import Decimal, InvalidOperation
+
+CAP = 1048576
+LABEL = re.compile(rb"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?").fullmatch
+ONE = Decimal("1")
+MAX_PORT = Decimal("65535")
+
+def reject_constant(_value):
+    raise ValueError
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError
+        result[key] = value
+    return result
+
+def strict_loads(value):
+    return json.loads(
+        value,
+        parse_int=Decimal,
+        parse_float=Decimal,
+        parse_constant=reject_constant,
+        object_pairs_hook=unique_object,
+        strict=True,
+    )
+
+def mathematical_integer(value):
+    return type(value) is Decimal and value.is_finite() and value == value.to_integral_value()
+
+def canonical_hostname(value):
+    if type(value) is not str:
+        return False
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return 1 <= len(encoded) <= 253 and all(
+        1 <= len(label) <= 63 and LABEL(label) is not None
+        for label in encoded.split(b".")
+    )
+
+def valid_routes(routes):
+    if type(routes) is not list:
+        return False
+    hostnames = set()
+    for route in routes:
+        if type(route) is not dict:
+            return False
+        hostname = route.get("hostname")
+        port = route.get("port")
+        pid = route.get("pid")
+        if not canonical_hostname(hostname) or hostname in hostnames:
+            return False
+        if not mathematical_integer(port) or not ONE <= port <= MAX_PORT:
+            return False
+        if not mathematical_integer(pid) or pid.is_signed() and not pid.is_zero():
+            return False
+        hostnames.add(hostname)
+    return True
+
+try:
+    snapshot = strict_loads(sys.stdin.buffer.read().decode("utf-8"))
+    if type(snapshot) is not dict or type(snapshot.get("files")) is not dict:
+        raise ValueError
+    if "routes.json" not in snapshot["files"]:
+        raise SystemExit(0)
+    document = snapshot["files"]["routes.json"]
+    if type(document) is not str or len(document.encode("utf-8")) > CAP:
+        raise ValueError
+    routes = strict_loads(document)
+except (InvalidOperation, UnicodeDecodeError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if valid_routes(routes) else 1)
+'
+}
 # Returns nonzero when the read was refused (for example the directory is over
 # its entry cap), so a caller can tell "refused" from "empty" instead of acting
 # as if every route vanished.
 portless_state_load() {
+  local snapshot
+  PORTLESS_STATE=""
   PORTLESS_STATE_ERROR=""
   if [[ ! -e $PORTLESS_DIR && ! -L $PORTLESS_DIR ]]; then
     PORTLESS_STATE='{"files":{},"refused":[]}'
     return 0
   fi
-  PORTLESS_STATE=$(state dump "$PORTLESS_DIR" 1048576 512 routes.json proxy.port proxy.tlds proxy.tld 2>/dev/null) \
-    || { PORTLESS_STATE=''; PORTLESS_STATE_ERROR="state directory refused"; return 1; }
-  jq -e '(.files | type == "object") and ((.refused // []) | length == 0)' <<<"$PORTLESS_STATE" >/dev/null 2>&1 \
+  snapshot=$(state dump "$PORTLESS_DIR" 1048576 512 routes.json proxy.port proxy.tlds proxy.tld 2>/dev/null) \
+    || { PORTLESS_STATE_ERROR="state directory refused"; return 1; }
+  jq -e '(.files | type == "object") and ((.refused // []) | length == 0)' <<<"$snapshot" >/dev/null 2>&1 \
     || { PORTLESS_STATE_ERROR="requested state leaf refused"; return 1; }
-  if jq -e '.files | has("routes.json")' <<<"$PORTLESS_STATE" >/dev/null 2>&1; then
-    jq -er '.files["routes.json"]' <<<"$PORTLESS_STATE" \
-      | jq -e 'type == "array" and all(.[];
-          (type == "object") and (.hostname | type == "string")
-          and (.port | type == "number") and (.pid | type == "number"))' >/dev/null 2>&1 \
-      || { PORTLESS_STATE_ERROR="routes.json is malformed"; return 1; }
-  fi
+  portless_routes_valid < <(printf '%s' "$snapshot") >/dev/null 2>&1 \
+    || { PORTLESS_STATE_ERROR="routes.json is malformed"; return 1; }
+  PORTLESS_STATE=$snapshot
   return 0
 }
 portless_file() {  # <name>: contents, or empty
@@ -117,8 +197,9 @@ configured_tld() {
 
 # The bare name portless holds for a port, if any.
 portless_route_name() {  # <port>
-  local n
-  n=$(routes_json | jq -r --argjson p "$1" 'first(.[] | select(.port == $p) | .hostname) // empty' 2>/dev/null) || return 1
+  local n port
+  port=$(canonical_port "${1:-}") || return 1
+  n=$(routes_json | jq -r --argjson p "$port" 'first(.[] | select(.port == $p) | .hostname) // empty' 2>/dev/null) || return 1
   printf '%s' "${n%%.*}"
 }
 

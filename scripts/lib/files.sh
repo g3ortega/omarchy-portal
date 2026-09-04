@@ -33,7 +33,16 @@ lifecycle_mutation() {  # <nowait|wait> <absolute-command> [args...]
   exit $?
 }
 
-valid_port() { [[ ${1:-} =~ ^[0-9]+$ ]] && (( $1 > 0 && $1 < 65536 )); }
+canonical_port() {
+  local LC_ALL=C
+  local port=${1:-}
+  [[ $port =~ ^[0-9]+$ ]] || return 1
+  port=${port#"${port%%[!0]*}"}
+  [[ -n $port && ${#port} -le 5 ]] || return 1
+  (( 10#$port < 65536 )) || return 1
+  printf '%s' "$port"
+}
+valid_port() { canonical_port "${1:-}" >/dev/null; }
 
 # The executable a provider action runs: resolved to an absolute path that is
 # a regular file owned by root or the user and not writable by anyone else,

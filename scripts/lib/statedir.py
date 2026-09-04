@@ -12,7 +12,7 @@ mode 0600, fsync it, renameat it into place and fsync the directory. Appends
 and truncation go through the validated descriptor, never the path again.
 
   ensure   <dir>...                       create (0700) and verify directories
-  dump     <dir> [maxbytes] [maxfiles] [name...]  JSON {"files":{name:text}} of every leaf, or only the named ones
+  dump     <dir> [maxbytes] [maxfiles] [name...]  JSON text and SHA-256 of every leaf, or only the named ones
   read     <path> [maxbytes]              raw bytes to stdout
   write    <path> [mode]                  stdin -> atomic replace
   create   <path> [mode]                  stdin -> atomic no-replace create
@@ -22,7 +22,7 @@ and truncation go through the validated descriptor, never the path again.
   remove-digest <dir> <name> <sha256> <maxbytes>  remove only the bound matching file
   truncate <path> <maxbytes>              empty the file once it is past the cap
   lock     <dir> <nowait|wait> <name> -- <argv...>  run argv under a stable lock
-  lock-clean <dir> <nowait|wait> <name> [--prune-to <dir>] -- <argv...> run argv; remove empty lock roots after success
+  lock-clean <dir> <nowait|wait> <name> [--keep-existing-root] [--prune-to <dir>] -- <argv...> run argv; remove empty lock roots after success
   launch   <dir> <logname> -- <argv...>   daemonize argv with the log as stdio;
                                            prints "pid starttime". The executable
                                            is walked to by descriptor (every
@@ -42,6 +42,7 @@ import errno
 import fcntl
 import hashlib
 import os
+import signal
 import stat
 import sys
 import time
@@ -52,10 +53,36 @@ LEAF_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 MAX_FILES = 512
 MAX_BYTES = 1 << 20
 WRITE_CAP = 128 << 20   # the largest thing ever written: a provider binary
+HANDLED_SIGNALS = frozenset((signal.SIGHUP, signal.SIGINT, signal.SIGTERM))
+CLI_SIGNAL_HANDLERS_INSTALLED = False
+DirIdentity = tuple[int, int]
+CreationLedger = dict[DirIdentity, int]
+HeldLock = tuple[int, int, CreationLedger]
 
 
 class Refused(Exception):
     pass
+
+
+class AtomicTemp:
+    def __init__(self, name):
+        self.name = name
+        self.fd = None
+        self.created = False
+
+
+def handled_signal_exit(signum, _frame):
+    signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
+    for handled in HANDLED_SIGNALS:
+        signal.signal(handled, signal.SIG_IGN)
+    raise SystemExit(128 + signum)
+
+
+def install_signal_handlers():
+    global CLI_SIGNAL_HANDLERS_INSTALLED
+    for handled in HANDLED_SIGNALS:
+        signal.signal(handled, handled_signal_exit)
+    CLI_SIGNAL_HANDLERS_INSTALLED = True
 
 
 def swappable(st):
@@ -64,7 +91,176 @@ def swappable(st):
     return st.st_uid not in (0, UID) or ((st.st_mode & 0o022) and not (st.st_mode & stat.S_ISVTX))
 
 
-def open_dir(path, create=False):
+def directory_identity(fd):
+    st = os.fstat(fd)
+    return st.st_dev, st.st_ino
+
+
+def close_creation_ledger(created: CreationLedger) -> None:
+    while created:
+        _, fd = created.popitem()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def remember_created(created: CreationLedger | None, dirfd: int) -> None:
+    if created is None:
+        return
+    identity = directory_identity(dirfd)
+    if identity not in created:
+        created[identity] = fcntl.fcntl(dirfd, fcntl.F_DUPFD_CLOEXEC, 0)
+
+
+def private_entry_matches(parentfd, name, dirfd):
+    held = os.fstat(dirfd)
+    try:
+        current = os.stat(name, dir_fd=parentfd, follow_symlinks=False)
+    except OSError as e:
+        raise Refused(f"could not verify private directory {name}: {e.strerror}")
+    return (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino)
+
+
+def discard_private_directory(parentfd, name, dirfd):
+    if not private_entry_matches(parentfd, name, dirfd):
+        raise Refused(f"private directory changed before cleanup: {name}")
+    try:
+        os.rmdir(name, dir_fd=parentfd)
+    except OSError as e:
+        raise Refused(f"could not remove private directory {name}: {e.strerror}")
+    if os.fstat(dirfd).st_nlink != 0:
+        raise Refused(f"could not verify removal of private directory {name}")
+    try:
+        os.fsync(parentfd)
+    except OSError as e:
+        raise Refused(f"could not sync private directory cleanup: {e.strerror}")
+
+
+def restore_signal_mask(previous_mask):
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def close_atomic_fd(temp):
+    if temp.fd is None:
+        return
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
+    try:
+        fd = temp.fd
+        temp.fd = None
+        os.close(fd)
+    finally:
+        restore_signal_mask(previous_mask)
+
+
+def cleanup_atomic_temp(dirfd, temp):
+    try:
+        close_atomic_fd(temp)
+    except OSError:
+        pass
+    if not temp.created:
+        return
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
+    try:
+        try:
+            os.unlink(temp.name, dir_fd=dirfd)
+        except FileNotFoundError:
+            temp.created = False
+        except OSError:
+            pass
+        else:
+            temp.created = False
+    finally:
+        restore_signal_mask(previous_mask)
+
+
+def create_dir_component(parentfd, name, path, created):
+    for _ in range(16):
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
+        private_name = None
+        privatefd = None
+        published = False
+        try:
+            private_name = f".portal-{os.urandom(16).hex()}"
+            try:
+                os.mkdir(private_name, 0o700, dir_fd=parentfd)
+            except FileExistsError:
+                restore = previous_mask
+                previous_mask = None
+                restore_signal_mask(restore)
+                continue
+            except OSError as e:
+                raise Refused(f"could not create {path}: {e.strerror}")
+
+            try:
+                privatefd = os.open(private_name, DIR_FLAGS, dir_fd=parentfd)
+            except OSError as e:
+                raise Refused(f"could not bind private directory for {path}: {e.strerror}")
+
+            bound = os.fstat(privatefd)
+            if (not stat.S_ISDIR(bound.st_mode) or bound.st_uid != UID
+                    or (bound.st_mode & 0o022)):
+                raise Refused(f"could not validate private directory for {path}")
+            if not private_entry_matches(parentfd, private_name, privatefd):
+                raise Refused(f"private directory changed before publication: {path}")
+
+            try:
+                rename_noreplace(parentfd, private_name, name)
+            except FileExistsError:
+                discard_private_directory(parentfd, private_name, privatefd)
+                oldfd = privatefd
+                privatefd = None
+                os.close(oldfd)
+                restore = previous_mask
+                previous_mask = None
+                restore_signal_mask(restore)
+                try:
+                    return os.open(name, DIR_FLAGS, dir_fd=parentfd)
+                except OSError as e:
+                    raise Refused(f"refused {path}: {e.strerror} at {name}")
+            except OSError as e:
+                raise Refused(f"could not publish {path}: {e.strerror}")
+
+            published = True
+            if not private_entry_matches(parentfd, name, privatefd):
+                raise Refused(f"directory changed after publication: {path}")
+            remember_created(created, privatefd)
+            restore = previous_mask
+            previous_mask = None
+            restore_signal_mask(restore)
+            try:
+                os.fsync(parentfd)
+            except OSError as e:
+                raise Refused(f"could not sync directory creation for {path}: {e.strerror}")
+            result = privatefd
+            privatefd = None
+            return result
+        except BaseException:
+            cleanup_error = None
+            if privatefd is not None and not published:
+                try:
+                    discard_private_directory(parentfd, private_name, privatefd)
+                except BaseException as e:
+                    cleanup_error = e
+            if privatefd is not None:
+                try:
+                    os.close(privatefd)
+                except OSError as e:
+                    if cleanup_error is None:
+                        cleanup_error = Refused(f"could not close private directory for {path}: {e.strerror}")
+                privatefd = None
+            if cleanup_error is not None:
+                raise cleanup_error
+            raise
+        finally:
+            if previous_mask is not None:
+                restore = previous_mask
+                previous_mask = None
+                restore_signal_mask(restore)
+    raise Refused(f"could not create {path}: private names did not stabilize")
+
+
+def open_dir(path, create=False, created: CreationLedger | None = None):
     """Walk from / component by component; return an fd for the final directory.
     Every ancestor must be root's or ours and not renamable by another user, so
     no component of the path can be swapped between two helper calls; the final
@@ -79,11 +275,7 @@ def open_dir(path, create=False):
             except FileNotFoundError:
                 if not create:
                     raise Refused(f"missing: {path}")
-                try:
-                    os.mkdir(comp, 0o700, dir_fd=fd)
-                except FileExistsError:
-                    pass          # another helper created it first; open what is there
-                nfd = os.open(comp, DIR_FLAGS, dir_fd=fd)
+                nfd = create_dir_component(fd, comp, path, created)
             except OSError as e:
                 raise Refused(f"refused {path}: {e.strerror} at {comp}")
             os.close(fd)
@@ -260,33 +452,39 @@ def hash_fd(fd, cap):
 
 def atomic_write(dirfd, name, data, mode=0o600, replace=True):
     """data is bytes, or a callable that writes to the descriptor and returns the byte count."""
-    tmp = f".{name}.{os.urandom(8).hex()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+    temp = AtomicTemp(f".{name}.{os.urandom(8).hex()}.tmp")
     try:
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
+        try:
+            temp.fd = os.open(temp.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+            temp.created = True
+        finally:
+            restore_signal_mask(previous_mask)
         if callable(data):
-            data(fd)
+            data(temp.fd)
         else:
-            write_all(fd, data)
-        os.fsync(fd)
-        os.fchmod(fd, mode)
-        os.close(fd)
-        if replace:
-            os.rename(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
-        else:
-            try:
-                rename_noreplace(dirfd, tmp, name)
-            except FileExistsError:
-                raise Refused(f"refused {name}: already exists")
+            write_all(temp.fd, data)
+        os.fsync(temp.fd)
+        os.fchmod(temp.fd, mode)
+        close_atomic_fd(temp)
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
+        try:
+            if replace:
+                os.rename(temp.name, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+            else:
+                try:
+                    rename_noreplace(dirfd, temp.name, name)
+                except FileExistsError:
+                    raise Refused(f"refused {name}: already exists")
+            temp.created = False
+        finally:
+            restore_signal_mask(previous_mask)
         os.fsync(dirfd)
     except BaseException:
         try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            os.unlink(tmp, dir_fd=dirfd)
-        except OSError:
-            pass
+            cleanup_atomic_temp(dirfd, temp)
+        finally:
+            cleanup_atomic_temp(dirfd, temp)
         raise
 
 
@@ -364,6 +562,7 @@ def cmd_dump(a):
             names = [n for n in names if n in a[3:]]
         files = {}
         refused = []
+        sha256 = {}
         for name in names:
             try:
                 data = read_leaf(dirfd, name, cap)
@@ -372,7 +571,8 @@ def cmd_dump(a):
                 continue          # a directory, link, FIFO or oversized file is simply not state
             if data is not None:
                 files[name] = data.decode("utf-8", "replace")
-        sys.stdout.write(json.dumps({"files": files, "refused": refused}))
+                sha256[name] = hashlib.sha256(data).hexdigest()
+        sys.stdout.write(json.dumps({"files": files, "refused": refused, "sha256": sha256}))
     finally:
         os.close(dirfd)
 
@@ -422,45 +622,54 @@ def cmd_create(a):
         os.close(dirfd)
 
 
-def acquire_lock(path, mode, name):
+def acquire_lock(path, mode, name) -> HeldLock | None:
     flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if mode == "nowait" else 0)
+    created = {}
+    transferred = False
     # A cleanup owner can retire a lock while a waiter still has that inode
     # open. Only the current root and lock entries serialize new callers.
-    for _ in range(16):
-        dirfd = open_dir(path, create=True)
-        lockfd = None
-        keep = False
-        try:
-            parentfd, dirname = open_lock_parent(path, dirfd)
+    try:
+        for _ in range(16):
+            dirfd = open_dir(path, create=True, created=created)
+            lockfd = None
+            keep = False
             try:
-                if not lock_namespace(parentfd, mode):
+                parentfd, dirname = open_lock_parent(path, dirfd)
+                try:
+                    if not lock_namespace(parentfd, mode):
+                        return None
+                    if not lock_root_current(parentfd, dirname, dirfd):
+                        continue
+                    lockfd = open_lock(dirfd, name)
+                finally:
+                    os.close(parentfd)
+                try:
+                    fcntl.flock(lockfd, flags)
+                except BlockingIOError:
                     return None
-                if not lock_root_current(parentfd, dirname, dirfd):
-                    continue
-                lockfd = open_lock(dirfd, name)
+                parentfd, dirname = open_lock_parent(path, dirfd)
+                try:
+                    if not lock_namespace(parentfd, mode):
+                        return None
+                    current = (lock_root_current(parentfd, dirname, dirfd)
+                               and lock_entry_current(dirfd, name, lockfd))
+                finally:
+                    os.close(parentfd)
+                if current:
+                    keep = True
+                    transferred = True
+                    return dirfd, lockfd, created
             finally:
-                os.close(parentfd)
-            try:
-                fcntl.flock(lockfd, flags)
-            except BlockingIOError:
-                return None
-            parentfd, dirname = open_lock_parent(path, dirfd)
-            try:
-                if not lock_namespace(parentfd, mode):
-                    return None
-                current = (lock_root_current(parentfd, dirname, dirfd)
-                           and lock_entry_current(dirfd, name, lockfd))
-            finally:
-                os.close(parentfd)
-            if current:
-                keep = True
-                return dirfd, lockfd
-        finally:
-            if not keep:
-                if lockfd is not None:
-                    os.close(lockfd)
-                os.close(dirfd)
-    raise Refused(f"refused {name}: lock namespace did not stabilize")
+                if not keep:
+                    try:
+                        if lockfd is not None:
+                            os.close(lockfd)
+                    finally:
+                        os.close(dirfd)
+        raise Refused(f"refused {name}: lock namespace did not stabilize")
+    finally:
+        if not transferred:
+            close_creation_ledger(created)
 
 
 def lock_prune_intermediates(path, prune_to):
@@ -471,7 +680,7 @@ def lock_prune_intermediates(path, prune_to):
     return os.path.relpath(path, prune_to).split(os.sep)[:-1]
 
 
-def prune_lock_parents(intermediates, parentfd, mode):
+def prune_lock_parents(intermediates, parentfd, mode, created):
     currentfd = os.dup(parentfd)
     grandfd = None
     try:
@@ -489,6 +698,8 @@ def prune_lock_parents(intermediates, parentfd, mode):
                 locked = True
                 if not lock_root_current(grandfd, dirname, currentfd):
                     raise Refused("nested state directory changed before cleanup")
+                if directory_identity(currentfd) not in created:
+                    return
                 try:
                     os.rmdir(dirname, dir_fd=grandfd)
                 except OSError as e:
@@ -516,7 +727,7 @@ def prune_lock_parents(intermediates, parentfd, mode):
         os.close(currentfd)
 
 
-def cleanup_lock(path, mode, name, dirfd, lockfd, intermediates=None):
+def cleanup_lock(path, mode, name, dirfd, lockfd, created, keep_existing_root=False, intermediates=None):
     parentfd, dirname = open_lock_parent(path, dirfd)
     try:
         if not lock_namespace(parentfd, mode, cleanup=True):
@@ -537,6 +748,8 @@ def cleanup_lock(path, mode, name, dirfd, lockfd, intermediates=None):
             raise Refused(f"could not sync lock removal: {e.strerror}")
         if not lock_root_current(parentfd, dirname, dirfd):
             raise Refused("lock directory changed during cleanup")
+        if keep_existing_root and directory_identity(dirfd) not in created:
+            return
         try:
             os.rmdir(dirname, dir_fd=parentfd)
         except OSError as e:
@@ -551,41 +764,68 @@ def cleanup_lock(path, mode, name, dirfd, lockfd, intermediates=None):
             raise Refused(f"could not sync lock directory removal: {e.strerror}")
         if intermediates is not None:
             fcntl.flock(parentfd, fcntl.LOCK_UN)
-            prune_lock_parents(intermediates, parentfd, mode)
+            prune_lock_parents(intermediates, parentfd, mode, created)
     finally:
         os.close(parentfd)
 
 
 def run_locked(a, clean):
     prune_to = None
-    if len(a) >= 5 and a[1] in ("nowait", "wait") and a[3] == "--":
-        argv = a[4:]
-    elif clean and len(a) >= 7 and a[1] in ("nowait", "wait") and a[3] == "--prune-to" and a[5] == "--":
-        prune_to = a[4]
-        argv = a[6:]
-    else:
-        verb = "lock-clean <dir> <nowait|wait> <name> [--prune-to <dir>]" if clean else "lock <dir> <nowait|wait> <name>"
+    keep_existing_root = False
+    index = 3
+    if len(a) < 5 or a[1] not in ("nowait", "wait"):
+        index = -1
+    if clean and index >= 0 and index < len(a) and a[index] == "--keep-existing-root":
+        keep_existing_root = True
+        index += 1
+    if clean and index >= 0 and index + 1 < len(a) and a[index] == "--prune-to":
+        prune_to = a[index + 1]
+        index += 2
+    if index < 0 or index >= len(a) or a[index] != "--" or index + 1 >= len(a):
+        verb = "lock-clean <dir> <nowait|wait> <name> [--keep-existing-root] [--prune-to <dir>]" if clean else "lock <dir> <nowait|wait> <name>"
         raise Refused(f"usage: {verb} -- <argv...>")
+    argv = a[index + 1:]
     if not os.path.isabs(argv[0]):
         raise Refused("lock needs an absolute command path")
     intermediates = lock_prune_intermediates(a[0], prune_to) if prune_to is not None else None
     held = acquire_lock(a[0], a[1], a[2])
     if held is None:
         return 75
-    dirfd, lockfd = held
+    dirfd, lockfd, created = held
     try:
         import subprocess
         try:
-            result = subprocess.run(argv, close_fds=True)
+            if CLI_SIGNAL_HANDLERS_INSTALLED:
+                previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
+                child_mask = previous_mask
+                try:
+                    with subprocess.Popen(
+                            argv, close_fds=True,
+                            preexec_fn=lambda: restore_signal_mask(child_mask)) as process:
+                        restore = previous_mask
+                        previous_mask = None
+                        restore_signal_mask(restore)
+                        returncode = process.wait()
+                finally:
+                    if previous_mask is not None:
+                        restore_signal_mask(previous_mask)
+            else:
+                returncode = subprocess.run(argv, close_fds=True).returncode
         except OSError as e:
             raise Refused(f"could not run {argv[0]}: {e.strerror}")
-        code = result.returncode if result.returncode >= 0 else 128 - result.returncode
+        code = returncode if returncode >= 0 else 128 - returncode
         if clean and code == 0:
-            cleanup_lock(a[0], a[1], a[2], dirfd, lockfd, intermediates)
+            cleanup_lock(a[0], a[1], a[2], dirfd, lockfd, created,
+                         keep_existing_root, intermediates)
         return code
     finally:
-        os.close(dirfd)
-        os.close(lockfd)
+        try:
+            os.close(dirfd)
+        finally:
+            try:
+                os.close(lockfd)
+            finally:
+                close_creation_ledger(created)
 
 
 def cmd_lock(a):
@@ -922,4 +1162,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    install_signal_handlers()
     sys.exit(main(sys.argv[1:]))

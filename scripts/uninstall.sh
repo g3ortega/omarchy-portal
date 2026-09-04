@@ -18,14 +18,26 @@ case "${1:-}" in
   *) echo "usage: uninstall.sh [--dry]" >&2; exit 2 ;;
 esac
 run() { if (( DRY )); then echo "would: $*"; else "$@"; fi; }
-runtime_root=$(/usr/bin/realpath -ms -- "$PORTAL_RUNTIME_DIR") || exit 1
-state_root=$(/usr/bin/realpath -ms -- "$PORTAL_STATE_HOME") || exit 1
-lifecycle_prune=()
-metrics_prune=()
+runtime_override=0
+metrics_override=0
+[[ -n ${PORTAL_STATE_DIR:-} ]] && runtime_override=1
+[[ -n ${PORTAL_METRICS_DIR:-} ]] && metrics_override=1
+PORTAL_RUNTIME_DIR=$(/usr/bin/realpath -ms -- "$PORTAL_RUNTIME_DIR") || exit 1
+PORTAL_STATE_HOME=$(/usr/bin/realpath -ms -- "$PORTAL_STATE_HOME") || exit 1
+runtime_root=$PORTAL_RUNTIME_DIR
+state_root=$PORTAL_STATE_HOME
+if [[ $runtime_root == "$state_root" ]] && (( runtime_override || metrics_override )); then
+  runtime_override=1
+  metrics_override=1
+fi
+lifecycle_cleanup=()
+metrics_cleanup=()
+(( runtime_override )) && lifecycle_cleanup+=(--keep-existing-root)
+(( metrics_override )) && metrics_cleanup+=(--keep-existing-root)
 if [[ $runtime_root == "$state_root"/* ]]; then
-  lifecycle_prune=(--prune-to "$state_root")
+  lifecycle_cleanup+=(--prune-to "$state_root")
 elif [[ $state_root == "$runtime_root"/* ]]; then
-  metrics_prune=(--prune-to "$runtime_root")
+  metrics_cleanup+=(--prune-to "$runtime_root")
 fi
 outermost=0
 if [[ ${PORTAL_LIFECYCLE_LOCKED:-} != "$PORTAL_RUNTIME_DIR" \
@@ -33,34 +45,41 @@ if [[ ${PORTAL_LIFECYCLE_LOCKED:-} != "$PORTAL_RUNTIME_DIR" \
   outermost=1
 fi
 report_remaining_state() {
-  local runtime=$1 state=$2 normalized_runtime=$3 normalized_state=$4
-  [[ -d $runtime ]] && echo "left in place: $runtime holds files that are not Portal's"
-  [[ $normalized_runtime != "$normalized_state" && -d $state ]] \
-    && echo "left in place: $state holds files that are not Portal's"
+  local runtime=$1 state=$2 runtime_kept=$3 state_kept=$4
+  report_remaining_root "$runtime" "$runtime_kept"
+  [[ $runtime == "$state" ]] || report_remaining_root "$state" "$state_kept"
+}
+report_remaining_root() {
+  local dir=$1 kept=$2
+  [[ -d $dir ]] || return 0
+  if [[ -n $(find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) ]]; then
+    echo "left in place: $dir holds files that are not Portal's"
+  elif (( kept )); then
+    echo "left in place: $dir is an explicit state root"
+  fi
 }
 
 if (( ! DRY )); then
   if [[ $runtime_root == "$state_root"/* && ${PORTAL_METRICS_LOCKED:-} != "$PORTAL_STATE_HOME" ]]; then
-    own_dir "$PORTAL_STATE_HOME" || { echo "could not open Portal state; nothing was removed" >&2; exit 1; }
-    PORTAL_METRICS_LOCKED="$PORTAL_STATE_HOME" state lock-clean "$PORTAL_STATE_HOME" nowait .metrics.lock -- \
+    PORTAL_METRICS_LOCKED="$PORTAL_STATE_HOME" state lock-clean "$PORTAL_STATE_HOME" nowait .metrics.lock \
+      "${metrics_cleanup[@]}" -- \
       /usr/bin/bash "$HERE/uninstall.sh" "$@"
     rc=$?
-    (( rc == 0 && outermost )) && report_remaining_state "$PORTAL_RUNTIME_DIR" "$PORTAL_STATE_HOME" "$runtime_root" "$state_root"
+    (( rc == 0 && outermost )) && report_remaining_state "$PORTAL_RUNTIME_DIR" "$PORTAL_STATE_HOME" "$runtime_override" "$metrics_override"
     exit "$rc"
   fi
   if [[ ${PORTAL_LIFECYCLE_LOCKED:-} != "$PORTAL_RUNTIME_DIR" ]]; then
     PORTAL_LIFECYCLE_LOCKED="$PORTAL_RUNTIME_DIR" state lock-clean "$PORTAL_RUNTIME_DIR" nowait .lifecycle.lock \
-      "${lifecycle_prune[@]}" -- /usr/bin/bash "$HERE/uninstall.sh" "$@"
+      "${lifecycle_cleanup[@]}" -- /usr/bin/bash "$HERE/uninstall.sh" "$@"
     rc=$?
-    (( rc == 0 && outermost )) && report_remaining_state "$PORTAL_RUNTIME_DIR" "$PORTAL_STATE_HOME" "$runtime_root" "$state_root"
+    (( rc == 0 && outermost )) && report_remaining_state "$PORTAL_RUNTIME_DIR" "$PORTAL_STATE_HOME" "$runtime_override" "$metrics_override"
     exit "$rc"
   fi
   if [[ ${PORTAL_METRICS_LOCKED:-} != "$PORTAL_STATE_HOME" ]]; then
-    own_dir "$PORTAL_STATE_HOME" || { echo "could not open Portal state; nothing was removed" >&2; exit 1; }
     PORTAL_METRICS_LOCKED="$PORTAL_STATE_HOME" state lock-clean "$PORTAL_STATE_HOME" nowait .metrics.lock \
-      "${metrics_prune[@]}" -- /usr/bin/bash "$HERE/uninstall.sh" "$@"
+      "${metrics_cleanup[@]}" -- /usr/bin/bash "$HERE/uninstall.sh" "$@"
     rc=$?
-    (( rc == 0 && outermost )) && report_remaining_state "$PORTAL_RUNTIME_DIR" "$PORTAL_STATE_HOME" "$runtime_root" "$state_root"
+    (( rc == 0 && outermost )) && report_remaining_state "$PORTAL_RUNTIME_DIR" "$PORTAL_STATE_HOME" "$runtime_override" "$metrics_override"
     exit "$rc"
   fi
 fi
@@ -79,14 +98,16 @@ fi
 echo "shares and names created by Portal"
 if (( DRY )); then run "$HERE/tunnels.sh" stop-own
 else
-  out=$("$HERE/tunnels.sh" stop-own)
+  out=$(PORTAL_STATE_DIR="$PORTAL_RUNTIME_DIR" PORTAL_METRICS_DIR="$PORTAL_STATE_HOME" \
+    "$HERE/tunnels.sh" stop-own)
   jq -e .ok <<<"$out" >/dev/null || { echo "$(jq -r '.error' <<<"$out"); their records are kept; nothing else was removed" >&2; exit 1; }
 fi
 
 echo "browser trust Portal added for the Portless CA"
 if (( DRY )); then run "$HERE/portless-setup.sh" untrust
 else
-  out=$("$HERE/portless-setup.sh" untrust)
+  out=$(PORTAL_STATE_DIR="$PORTAL_RUNTIME_DIR" PORTAL_METRICS_DIR="$PORTAL_STATE_HOME" \
+    "$HERE/portless-setup.sh" untrust)
   jq -e .ok <<<"$out" >/dev/null || { echo "$(jq -r '.error + (if (.remaining // []) | length > 0 then ": " + (.remaining | join(", ")) else "" end)' <<<"$out"); the record is kept; nothing else was removed" >&2; exit 1; }
 fi
 
@@ -115,26 +136,80 @@ fi
 echo "Portal state"
 # Only entries Portal writes, by name, then the directory if that emptied it:
 # a state root pointed at a directory holding other things keeps them.
+portal_leaf_in_scope() {
+  local scope=$1 name=$2 port
+  case $scope in
+    runtime)
+      [[ $name == ngrok.ok ]] && return 0
+      if [[ $name =~ ^(cloudflared|ngrok)-([0-9]+)\.(pid|url|reach|dns|idle|log|target)$ ]]; then
+        port=${BASH_REMATCH[2]}
+      elif [[ $name =~ ^portless-([0-9]+)\.(url|reach|name)$ ]]; then
+        port=${BASH_REMATCH[1]}
+      elif [[ $name =~ ^\.restart-([0-9]+)\.pid$ ]]; then
+        port=${BASH_REMATCH[1]}
+      else
+        return 1
+      fi
+      ;;
+    metrics)
+      [[ $name =~ ^([0-9]+)\.jsonl$ ]] || return 1
+      port=${BASH_REMATCH[1]}
+      ;;
+    state)
+      case $name in
+        trusted-stores|watched.json|ca-import.pem) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+  valid_port "$port"
+}
 remove_known() {
-  local dir="$1" pattern="$2"
-  [[ -d $dir && ! -L $dir && -O $dir ]] || return 0
+  local dir="$1" scope="$2" dry_remove_dir="${3:-1}" path name
+  [[ -e $dir || -L $dir ]] || return 0
+  [[ -d $dir && ! -L $dir && -O $dir && -r $dir && -x $dir ]] || return 1
   local names=()
-  mapfile -t names < <(find "$dir" -mindepth 1 -maxdepth 1 ! -type d -printf '%f\n' 2>/dev/null | grep -E -- "$pattern")
+  for path in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [[ -e $path || -L $path ]] || continue
+    [[ -d $path && ! -L $path ]] && continue
+    name=${path##*/}
+    portal_leaf_in_scope "$scope" "$name" && names+=("$name")
+  done
   if (( ${#names[@]} )); then
     run state_remove "$dir" "${names[@]}" || return 1
   fi
-  if (( DRY )); then run rmdir --ignore-fail-on-non-empty -- "$dir"
+  if (( DRY )); then
+    if (( dry_remove_dir )); then run rmdir --ignore-fail-on-non-empty -- "$dir"; fi
   else rmdir --ignore-fail-on-non-empty -- "$dir" 2>/dev/null || true
   fi
 }
-runtime_leaf='((cloudflared|ngrok)-[0-9]{1,5}\.(pid|url|reach|dns|idle|log|target)|portless-[0-9]{1,5}\.(url|reach|name)|ngrok\.ok)'
-remove_known "$PORTAL_RUNTIME_DIR" "^${runtime_leaf}$|^\.${runtime_leaf}\.[0-9a-f]{16}\.tmp$" \
+dry_plan_root() {
+  local dir=$1 keep=$2
+  (( keep )) && return 0
+  [[ -d $dir && ! -L $dir && -O $dir ]] || return 0
+  run rmdir --ignore-fail-on-non-empty -- "$dir"
+}
+remove_known "$PORTAL_RUNTIME_DIR" runtime 0 \
   || { echo "could not remove Portal runtime state" >&2; exit 1; }
-remove_known "$PORTAL_STATE_HOME/metrics" '^([0-9]{1,5}\.jsonl|\.[0-9]{1,5}\.jsonl\.[0-9a-f]{16}\.tmp)$' \
+remove_known "$PORTAL_STATE_HOME/metrics" metrics \
   || { echo "could not remove Portal metrics" >&2; exit 1; }
-state_leaf='(trusted-stores|watched\.json|ca-import\.pem)'
-remove_known "$PORTAL_STATE_HOME" "^${state_leaf}$|^\.${state_leaf}\.[0-9a-f]{16}\.tmp$|^\.installed-cloudflared\.[0-9a-f]{16}\.tmp$" \
+remove_known "$PORTAL_STATE_HOME" state 0 \
   || { echo "could not remove Portal state" >&2; exit 1; }
+if (( DRY )); then
+  if [[ $runtime_root == "$state_root" ]]; then
+    dry_plan_root "$PORTAL_RUNTIME_DIR" "$runtime_override"
+  elif [[ $runtime_root == "$state_root"/* ]]; then
+    dry_plan_root "$PORTAL_RUNTIME_DIR" "$runtime_override"
+    dry_plan_root "$PORTAL_STATE_HOME" "$metrics_override"
+  elif [[ $state_root == "$runtime_root"/* ]]; then
+    dry_plan_root "$PORTAL_STATE_HOME" "$metrics_override"
+    dry_plan_root "$PORTAL_RUNTIME_DIR" "$runtime_override"
+  else
+    dry_plan_root "$PORTAL_RUNTIME_DIR" "$runtime_override"
+    dry_plan_root "$PORTAL_STATE_HOME" "$metrics_override"
+  fi
+fi
 
 echo
 echo "left in place: the portless package (npm uninstall -g portless), ~/.portless,"
