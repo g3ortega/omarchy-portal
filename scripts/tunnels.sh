@@ -410,35 +410,61 @@ alive_line() {  # <"pid start"> <comm>
 alive() { alive_line "$(cat_own "$1" 64)" "$2"; }   # <pidfile> <comm>
 group_alive() { (( ${1:-0} > 1 )) && kill -0 -- "-$1" 2>/dev/null; }   # <pid>: its process group still has members
 
+localhost_reachable_endpoint() {
+  case ${1%:*} in
+    127.*|'*'|0.0.0.0|'[::]'|'[::1]'|'[::ffff:127.'*|::|::1) return 0 ;;
+  esac
+  return 1
+}
+
 listener_identity() {  # <port>: one currently attributed listener as "pid start"
-  local sockets pids pid start
-  sockets=$(ss -tlnpH "sport = :$1" 2>/dev/null) || return 1
-  pids=$(grep -oE 'pid=[0-9]+' <<<"$sockets" | cut -d= -f2 | sort -u)
-  [[ $(grep -c . <<<"$pids") == 1 ]] || return 1
-  pid=$pids; start=$(proc_start "$pid") || return 1
+  local sockets pid="" start _state _rq _sq local_addr _peer procinfo socket_pid row_attributed
+  sockets=$(ss -tlnpH "sport = :$1" 2>/dev/null) || return 2
+  while read -r _state _rq _sq local_addr _peer procinfo; do
+    [[ ${local_addr##*:} == "$1" ]] || continue
+    localhost_reachable_endpoint "$local_addr" || continue
+    row_attributed=0
+    while read -r socket_pid; do
+      row_attributed=1
+      if [[ -z $pid ]]; then
+        pid=$socket_pid
+      elif [[ $socket_pid != "$pid" ]]; then
+        return 1
+      fi
+    done < <(grep -oE 'pid=[0-9]+' <<<"$procinfo" | cut -d= -f2)
+    (( row_attributed )) || return 1
+  done <<<"$sockets"
+  [[ -n $pid ]] || return 1
+  start=$(proc_start "$pid") || return 1
   valid_identity_line "$pid $start" || return 1
   proc check "$pid" "$start" >/dev/null 2>&1 || return 1
   printf '%s %s' "$pid" "$start"
 }
 
 target_owns_port() {  # <"pid start"> <port>, using the attributed status snapshot
-  local pid start _state _rq _sq local_addr _peer procinfo socket_pid matched=0
+  local pid start _state _rq _sq local_addr _peer procinfo socket_pid row_attributed
+  local target_live=0 eligible=0 unapproved=0
   read -r pid start <<<"$1"
-  proc check "$pid" "$start" >/dev/null 2>&1 || return 1
+  proc check "$pid" "$start" >/dev/null 2>&1 && target_live=1
   if (( ! SOCKS_READY )); then
     SOCKS=$(ss -tlnpH 2>/dev/null) || return 2
     SOCKS_READY=1
   fi
   while read -r _state _rq _sq local_addr _peer procinfo; do
     [[ ${local_addr##*:} == "$2" ]] || continue
-    [[ $procinfo == *pid=* ]] || return 1
+    localhost_reachable_endpoint "$local_addr" || continue
+    eligible=1
+    row_attributed=0
     while read -r socket_pid; do
-      [[ $socket_pid == "$pid" ]] || return 1
-      matched=1
+      row_attributed=1
+      [[ $socket_pid == "$pid" ]] || unapproved=1
     done < <(grep -oE 'pid=[0-9]+' <<<"$procinfo" | cut -d= -f2)
+    (( row_attributed )) || unapproved=1
   done <<<"$SOCKS"
-  (( matched )) || return 1
-  proc check "$pid" "$start" >/dev/null 2>&1
+  (( eligible )) || return 1
+  (( target_live && ! unapproved )) || return 3
+  proc check "$pid" "$start" >/dev/null 2>&1 || return 3
+  return 0
 }
 
 # A fresh public hostname is published a beat after it appears in the log.
@@ -607,7 +633,7 @@ cmd_start_portless() {  # <port> <name>
 }
 
 cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
-  local provider="$1" port="$2" name="" target=""; shift 2
+  local provider="$1" port="$2" name="" target="" listener_rc target_rc; shift 2
   while (( $# )); do
     case $1 in
       --target) (( $# >= 3 )) || die "invalid target identity"; target="$2 $3"; shift 3 ;;
@@ -620,11 +646,23 @@ cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
   if [[ -n $target ]]; then
     valid_identity_line "$target" || die "invalid target identity"
   else
-    target=$(listener_identity "$port") \
-      || die "port $port has no single safely attributed listener to approve"
+    if target=$(listener_identity "$port"); then
+      listener_rc=0
+    else
+      listener_rc=$?
+    fi
+    case $listener_rc in
+      0) ;;
+      2) die "could not query attributed listening sockets" ;;
+      1) die "port $port has no single safely attributed listener to approve" ;;
+    esac
   fi
-  local SOCKS="" SOCKS_READY=0 target_rc
-  target_owns_port "$target" "$port"; target_rc=$?
+  local SOCKS="" SOCKS_READY=0
+  if target_owns_port "$target" "$port"; then
+    target_rc=0
+  else
+    target_rc=$?
+  fi
   (( target_rc == 0 )) || {
     (( target_rc == 2 )) && die "could not query attributed listening sockets"
     die "port $port is no longer served by the approved process"
@@ -992,20 +1030,11 @@ cmd_status() {
   local internal=0
   [[ ${1:-} == internal ]] && internal=1
   local dns_until=$((SECONDS + STATUS_DNS_BUDGET))
-  # Runs every poll. State files first — one descriptor-relative dump of the
-  # state directory, no PATH work, no provider binaries — then each provider's
-  # _adopt, which is responsible for its own cheap bail.
-  # One cheap socket dump answers "is anything on this port", which is all
-  # most adopters need. Process attribution costs ~4x more (the kernel walks
-  # /proc to name each socket's owner), so it is computed at most once, on
-  # demand, by the one adopter that cannot work without it.
-  # Live means reachable through localhost, which is what every tunnel and
-  # the proxy target: a listener bound only to a LAN address does not count.
   command -v ss >/dev/null 2>&1 || die "ss not found"
   local ss_raw; ss_raw=$(ss -tlnH 2>/dev/null) || die "could not query listening sockets"
   local LIVE_PORTS=" " SOCKS="" SOCKS_READY=0 _l
   while read -r _ _ _ _l _; do
-    case ${_l%:*} in 127.*|'*'|0.0.0.0|'[::]'|'[::1]'|'[::ffff:127.'*|::|::1) LIVE_PORTS+="${_l##*:} " ;; esac
+    localhost_reachable_endpoint "$_l" && LIVE_PORTS+="${_l##*:} "
   done <<<"$ss_raw"
 
   local dump
@@ -1021,6 +1050,23 @@ cmd_status() {
   portal_portless_refused "$dump" && portless_ok=0
   [[ -z $refused ]] \
     || die "could not read Portal ownership state safely: $(tr '\n' ' ' <<<"$refused")"
+  local needs_attributed
+  needs_attributed=$(jq -r '
+    .files as $f
+    | any(
+        $f | keys[];
+        . as $name
+        | ($name | test("\\A(cloudflared|ngrok)-[0-9]+\\.target\\z"))
+          and (($name | sub("\\.target\\z"; "")) as $base
+            | ($f | has($base + ".pid"))
+              and ($f | has($base + ".url")))
+      )
+  ' <<<"$dump" 2>/dev/null) || die "could not list Portal's state"
+  if [[ $needs_attributed == true ]]; then
+    SOCKS=$(ss -tlnpH 2>/dev/null) \
+      || die "could not query attributed listening sockets"
+    SOCKS_READY=1
+  fi
   local partial_provider partial_port partial_state_port partial_out
   while IFS=$'\t' read -r partial_provider partial_state_port; do
     [[ -n $partial_provider ]] || continue
@@ -1083,14 +1129,20 @@ cmd_status() {
       if [[ $target_present == 1 ]]; then
         valid_identity_line "$target" \
           || die "$provider on port $port has a malformed target record; its records were kept"
-        target_owns_port "$target" "$port"; target_rc=$?
-        if (( target_rc == 0 )); then healthy=1
-        elif (( target_rc == 2 )); then die "could not query attributed listening sockets"
+        if target_owns_port "$target" "$port"; then
+          target_rc=0
+        else
+          target_rc=$?
         fi
-        (( healthy )) && target_health=true || target_health=false
+        case $target_rc in
+          0) healthy=1; target_health=true ;;
+          1) target_health=false ;;
+          2) die "could not query attributed listening sockets" ;;
+          3) ;;
+        esac
       fi
       snapshot_current "$provider" "$state_port" "$pidline" || continue
-      if [[ $target_present == 1 && $healthy == 0 && $LIVE_PORTS == *" $port "* ]]; then
+      if [[ $target_present == 1 && $target_rc == 3 ]]; then
         stop_reconciled_share "$provider" "$port" "$state_port" "a different process took port $port" \
           || die "$RECONCILE_STOP_ERROR"
         continue

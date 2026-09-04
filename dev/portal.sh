@@ -61,7 +61,7 @@ cmd_status() {
 
 cmd_stage() {
   require_install
-  local source_head install_head tmp
+  local source_head install_head ignored tmp
 
   git -C "$ROOT" diff --quiet \
     || fail "worktree has unstaged changes; stage the complete change first"
@@ -80,6 +80,15 @@ cmd_stage() {
     || fail "install has untracked files; remove installed-only probes first"
   git -C "$INSTALL" diff --cached --quiet -- dev \
     || fail "install has staged changes under dev"
+  ignored=$(git -C "$INSTALL" ls-files --others --ignored --exclude-standard \
+    --directory --no-empty-directory -- . \
+    ':(exclude,top)dev' ':(exclude,top)dev/**' \
+    ':(exclude,top)tmp' ':(exclude,top)tmp/**' \
+    ':(exclude,glob)**/__pycache__' ':(exclude,glob)**/__pycache__/**' | \
+    sed -n '1p') \
+    || fail "cannot inspect ignored paths in install"
+  [[ -z $ignored ]] \
+    || fail "install has ignored paths outside stage exclusions; remove them first"
 
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/portal-stage.XXXXXX") \
     || fail "cannot create a private staging directory"

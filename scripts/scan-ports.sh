@@ -4,13 +4,6 @@
 # evidence only, and only from an allowlist, so nothing unexpected leaves the
 # process.
 #
-# This runs on every poll (default 5s), so the fork budget matters: the whole
-# scan is two `ss` (listeners, established peers), one `tr`+`readlink` per
-# port, one `jq` per unique project
-# root (name + allowlisted deps in a single pass, memoized), and ONE final jq
-# that assembles the document from a tab-separated stream. Markers are plain
-# bash -e tests.
-#
 # Contract: { "version": 1, "ports": [ ... ] }
 # projectName is the raw package.json name (or empty) — display fallbacks such
 # as "use the directory basename" belong to Detect.js, where they are testable.
@@ -19,6 +12,9 @@ set -o pipefail
 set -f          # addresses contain '*'; never let the shell glob them
 MAX_PORTS=512   # past this the scan reports an error, not a growing document
 MAX_PROBES=64   # direct callers stay bounded; Service normally requests eight
+ARGV_LOGICAL_CAP=8192
+ARGV_SAMPLE_CAP=$((ARGV_LOGICAL_CAP + 1))
+ARGV_SAMPLE_B64_LEN=$((4 * ((ARGV_SAMPLE_CAP + 2) / 3)))
 
 command -v ss >/dev/null 2>&1 || { echo '{"version":1,"error":"ss not found","ports":[]}'; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo '{"version":1,"error":"jq not found","ports":[]}'; exit 0; }
@@ -134,6 +130,20 @@ project_info() {
   ROOT_CACHE[$root]="${PROJ_NAME}"$'\x1f'"${PROJ_DEPS}"$'\x1f'"${PROJ_MARKERS}"
 }
 
+declare -A ARGV_CACHE
+argv_info() {
+  local pid=$1 encoded cut=0
+  if [[ -z ${ARGV_CACHE[$pid]+x} ]]; then
+    encoded=$(head -c "$ARGV_SAMPLE_CAP" -- "/proc/$pid/cmdline" 2>/dev/null \
+      | base64 -w0 2>/dev/null) || encoded=""
+    if (( ${#encoded} == ARGV_SAMPLE_B64_LEN )) && [[ ${encoded: -1} != "=" ]]; then
+      cut=1
+    fi
+    ARGV_CACHE[$pid]="${encoded}"$'\x1f'"${cut}"
+  fi
+  IFS=$'\x1f' read -r ARGV_B64 ARGV_CUT <<<"${ARGV_CACHE[$pid]}"
+}
+
 # ---- gather listening sockets -------------------------------------------------
 raw=$(ss -tlnpH 2>/dev/null) \
   || { echo '{"version":1,"error":"could not query listening sockets","ports":[]}'; exit 0; }
@@ -204,11 +214,9 @@ emit() {
     if [[ -n $pid && -r /proc/$pid/comm ]]; then
       { comm=$(< "/proc/$pid/comm"); } 2>/dev/null
       comm="${comm%-MainThread}"   # node names its main thread; the process is still node
-      # Base64 keeps NUL argument boundaries distinct from every byte an
-      # argument itself may contain, including U+001E. 10,924 encoded bytes
-      # represent the first 8,193 raw bytes, enough to flag an over-cap argv.
-      argv_b64=$(base64 -w0 < "/proc/$pid/cmdline" 2>/dev/null)
-      [[ ${#argv_b64} -gt 10924 ]] && { argv_b64="${argv_b64:0:10924}"; argv_cut=1; }
+      argv_info "$pid"
+      argv_b64=$ARGV_B64
+      argv_cut=$ARGV_CUT
       cwd=$(readlink -- "/proc/$pid/cwd" 2>/dev/null); cwd="${cwd:0:4096}"
       # stat: field 3 is run state; utime+stime are 14+15; starttime is 22 —
       # but comm (field 2) may contain spaces, so parse after the closing paren.
