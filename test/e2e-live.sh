@@ -1,19 +1,15 @@
 #!/bin/bash
-# Live end-to-end: stand up a farm of REAL listening processes carrying the
-# exact evidence profile of ~14 stacks (cwd markers, package.json deps,
-# comm/cmdline), then drive the whole pipeline against them — scan →
-# detection → latency probes → traffic → metric retention → lifecycle — and,
-# when the shell is up, assert the same truths through the running plugin's
-# IPC.
+# Live end-to-end checks for 19 listener fixtures, plus Ruby and Deno when
+# available. The fixtures carry the command, directory, marker, and dependency
+# evidence that the scanner uses. The test covers scanning, detection, probes,
+# traffic, metric retention, lifecycle actions, and matching local IPC.
 #
-# Everything generated lives in tmp/ (gitignored). Detection is evidence-
-# based on purpose, which is what lets one python/node binary impersonate a
-# dozen stacks honestly: a real server in a directory whose package.json
-# declares `next` IS what Next.js looks like to the scanner. Marker-detected
-# stacks (go, rust, phoenix, java) get the python binary copied under a
-# stack-appropriate process name so no earlier comm rule shadows the marker.
+# Everything generated lives in tmp/. Several fixtures use the same Python or
+# Node HTTP server because detection reads process and project evidence. The
+# marker fixtures copy Python under a stack-specific process name so an earlier
+# process-name rule does not hide the marker rule.
 #
-# Usage: scripts/e2e-live.sh [--keep]   (--keep leaves servers running)
+# Usage: test/e2e-live.sh [--keep]
 set -uo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -23,28 +19,84 @@ FARM="$TMP/farm"
 BIN="$TMP/bin"
 PIDS="$TMP/pids"
 export PORTAL_METRICS_DIR="$TMP/state"
+export PORTAL_STATE_DIR="$TMP/runtime"
+PROC="$S/lib/proc.py"
 
 fails=0
 say()  { printf '\033[1m== %s\033[0m\n' "$1"; }
 ok()   { printf '  ok   %s\n' "$1"; }
 bad()  { printf '  FAIL %s\n' "$1"; fails=$((fails+1)); }
+skip() { printf '  skip %s\n' "$1"; }
 
 command -v jq >/dev/null || { echo "jq required"; exit 1; }
 command -v node >/dev/null || { echo "node required"; exit 1; }
 PY=$(command -v python3) || { echo "python3 required"; exit 1; }
 
-# ---- teardown is unconditional and pid-file exact: never pattern-kills -------
+process_start() {
+  local pid="$1" stat fields start
+  [[ $pid =~ ^[1-9][0-9]*$ ]] && (( pid > 1 )) || return 1
+  IFS= read -r stat 2>/dev/null < "/proc/$pid/stat" || return 1
+  read -ra fields <<<"${stat##*) }"
+  start="${fields[19]:-}"
+  [[ $start =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$start"
+}
+
+record_pid() {
+  local pid="$1" start i
+  for i in $(seq 1 10); do
+    if start=$(process_start "$pid"); then
+      printf '%s %s\n' "$pid" "$start" >> "$PIDS"
+      return 0
+    fi
+    sleep 0.01
+  done
+  return 1
+}
+
+recorded_process_alive() {
+  local pid start extra
+  while read -r pid start extra; do
+    [[ -z $extra && $pid =~ ^[1-9][0-9]*$ && $start =~ ^[0-9]+$ ]] || continue
+    (( pid > 1 )) || continue
+    [[ $(process_start "$pid") == "$start" ]] && return 0
+  done < "$PIDS"
+  return 1
+}
+
+# Teardown checks both fields before either signal. Never pattern-kill here.
 teardown() {
+  local pid start extra i
   if [[ -f $PIDS ]]; then
-    while read -r pid; do kill "$pid" 2>/dev/null; done < "$PIDS"
+    while read -r pid start extra; do
+      [[ -z $extra && $pid =~ ^[1-9][0-9]*$ && $start =~ ^[0-9]+$ ]] || continue
+      (( pid > 1 )) || continue
+      [[ $(process_start "$pid") == "$start" ]] \
+        && /usr/bin/python3 -I -S "$PROC" signal "$pid" "$start" TERM >/dev/null 2>&1
+    done < "$PIDS"
+    for i in $(seq 1 20); do
+      recorded_process_alive || return 0
+      sleep 0.05
+    done
+    while read -r pid start extra; do
+      [[ -z $extra && $pid =~ ^[1-9][0-9]*$ && $start =~ ^[0-9]+$ ]] || continue
+      (( pid > 1 )) || continue
+      [[ $(process_start "$pid") == "$start" ]] \
+        && /usr/bin/python3 -I -S "$PROC" signal "$pid" "$start" KILL >/dev/null 2>&1
+    done < "$PIDS"
+    recorded_process_alive && bad "a recorded fixture survived teardown"
   fi
 }
 [[ ${1:-} == --keep ]] || trap teardown EXIT
 
 say "building the farm in tmp/"
-rm -rf "$FARM" "$BIN" "$PIDS" "$PORTAL_METRICS_DIR"
-mkdir -p "$FARM" "$BIN" "$PORTAL_METRICS_DIR"
+rm -rf "$FARM" "$BIN" "$PIDS" "$PORTAL_METRICS_DIR" "$PORTAL_STATE_DIR"
+mkdir -p "$FARM" "$BIN" "$PORTAL_METRICS_DIR" "$PORTAL_STATE_DIR"
 : > "$PIDS"
+# The private copy has no file capabilities that could hide socket ownership
+# from ss.
+cp "$(readlink -f "$(command -v node)")" "$BIN/node"
+export PATH="$BIN:$PATH"
 
 # One real HTTP server, reused by every fixture.
 cat > "$TMP/srv.py" <<'PYEOF'
@@ -64,7 +116,8 @@ JSEOF
 
 start() {  # start <port> <cwd> <argv...>
   local cwd="$2"; shift 2   # the port is the table's business, not ours
-  ( cd "$cwd" && setsid "$@" >/dev/null 2>&1 & echo $! >> "$PIDS" ) </dev/null >/dev/null 2>&1
+  ( cd "$cwd" && setsid "$@" >/dev/null 2>&1 & record_pid "$!" ) </dev/null >/dev/null 2>&1 \
+    || bad "could not record a fixture process in $cwd"
 }
 
 fixture() { mkdir -p "$FARM/$1"; echo "$FARM/$1"; }
@@ -119,7 +172,7 @@ d=$(fixture v6-app); start 45923 "$d" "$PY" -m http.server 45923 --bind ::1;    
 # --- a launcher only the process's own PATH knows, plus a marker variable ---
 mkdir -p "$FARM/hookbin"; cp "$PY" "$FARM/hookbin/srvlauncher"
 d=$(fixture hook-app); PATH="$FARM/hookbin:$PATH" PORTAL_E2E_MARK=carried start 45924 "$d" srvlauncher "$TMP/srv.py" 45924 hook; EXPECT[45924]=unknown
-d=$(fixture nl-app); start 45925 "$d" "$PY" "$TMP/srv.py" 45925 "$(printf 'two\nlines and spaces')"; EXPECT[45925]=python
+d=$(fixture nl-app); start 45925 "$d" "$PY" "$TMP/srv.py" 45925 "$(printf 'two\nlines and spaces')" "$(printf 'record\036separator')"; EXPECT[45925]=python
 # --- deno, when present ---
 if command -v deno >/dev/null; then
   d=$(fixture deno-app)
@@ -142,13 +195,20 @@ for _ in $(seq 1 40); do
 done
 [[ $up -eq ${#EXPECT[@]} ]] && ok "$up/${#EXPECT[@]} listening" || bad "only $up/${#EXPECT[@]} listening"
 
-# $! is the server itself (setsid does not fork for a non-leader), but a
-# runtime that re-execs itself gets a second pid: harvest by port, through the
+# $! is the server itself because setsid does not fork for a non-leader. A
+# runtime that re-execs itself can get a second PID. Harvest by port through the
 # same attribution the product uses, so teardown never pattern-kills.
 for port in "${!EXPECT[@]}"; do
-  ss -tlnpH "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+' >> "$PIDS"
+  while read -r pid; do record_pid "$pid" || bad "could not record PID $pid from port $port"; done \
+    < <(ss -tlnpH "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+')
 done
 sort -u -o "$PIDS" "$PIDS"
+for port in "${!EXPECT[@]}"; do
+  while read -r pid; do
+    start=$(process_start "$pid")
+    grep -qxF "$pid $start" "$PIDS" || bad "port $port has untracked process $pid"
+  done < <(ss -tlnpH "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+')
+done
 
 say "detection across the farm (scan → Detect)"
 PROBES=$(printf '%s ' "${!EXPECT[@]}")
@@ -171,6 +231,7 @@ if [[ $c0 == *$'\033'* || $c0 == *$'\t'* ]]; then bad "control bytes survived in
 [[ $(row 45923 | jq -c .addresses) == '["::1"]' ]] && ok "IPv6 loopback bind reported as ::1" || bad "45923 addresses: $(row 45923 | jq -c .addresses)"
 [[ $(row 45923 | jq -r .scope) == local ]] && ok "::1 is scope local" || bad "45923 scope: $(row 45923 | jq -r .scope)"
 [[ $(row 45925 | jq -r '.argv[3]') == $'two\nlines and spaces' ]] && ok "an argument with a newline survives the scan" || bad "45925 argv[3]: $(row 45925 | jq -c '.argv[3]')"
+[[ $(row 45925 | jq -r '.argv[4]') == $'record\x1eseparator' ]] && ok "an argument with U+001E survives the scan" || bad "45925 argv[4]: $(row 45925 | jq -c '.argv[4]')"
 
 say "traffic + latency probes"
 for _ in $(seq 1 10); do
@@ -199,79 +260,141 @@ lat_ok=$("$S/metrics.sh" read 45901 | jq '[.samples[] | select(.httpCode == 200)
 [[ $got -ge 3 && $lat_ok -ge 3 ]] && ok "45901: $got samples persisted, probes recorded" \
   || bad "retention: got=$got lat_ok=$lat_ok"
 
-say "lifecycle e2e (pause / resume / restart the next fixture)"
+say "lifecycle e2e (pause / resume / restart the Next.js fixture)"
 NPID=$(jq -r '.[] | select(.port == 45901) | .pid' <<<"$DECORATED" | head -1)
 if [[ -z $NPID || $NPID == null ]]; then
-  bad "no attributable pid on :45901 — a file capability on node makes it non-dumpable (fix: sudo setcap -r \"\$(readlink -f \"\$(command -v node)\")\")"
+  bad "no attributable PID on :45901 from the private Node copy"
 else
 # procState comes from the scanner, so a parsing regression here fails the
 # same way the panel would see it.
 state_of() { "$S/scan-ports.sh" | jq -r --argjson p 45901 '.ports[] | select(.port == $p) | .procState'; }
-out=$("$S/lifecycle.sh" stop "$((NPID + 1))" 45901)
+NSTART=$(jq -r '.[] | select(.port == 45901) | .start' <<<"$DECORATED" | head -1)
+[[ $NSTART =~ ^[0-9]+$ ]] && ok "the scan carries the kernel start time" || bad "no start time in the scan: $NSTART"
+out=$("$S/lifecycle.sh" stop "$((NPID + 1))" "$NSTART" 45901)
 [[ $(jq -r .ok <<<"$out") == false ]] && ok "a pid that does not own the port is refused" || bad "ownership check: $out"
+out=$("$S/lifecycle.sh" stop "$NPID" "$((NSTART + 1))" 45901)
+[[ $(jq -r .ok <<<"$out") == false ]] && ok "a start time that is not the process's is refused" || bad "identity check: $out"
 kill -0 "$NPID" 2>/dev/null && ok "and the real process was not signalled" || bad "the real process died"
-"$S/lifecycle.sh" pause "$NPID" 45901 >/dev/null
+"$S/lifecycle.sh" pause "$NPID" "$NSTART" 45901 >/dev/null
 st=$(state_of)
 [[ $st == T ]] && ok "paused (state T)" || bad "pause: state=$st"
-"$S/lifecycle.sh" resume "$NPID" 45901 >/dev/null
+"$S/lifecycle.sh" resume "$NPID" "$NSTART" 45901 >/dev/null
 st=$(state_of)
 [[ $st == S || $st == R ]] && ok "resumed (state $st)" || bad "resume: state=$st"
 ARGV=$(jq -r --argjson p 45901 '.[] | select(.port == $p) | .argv | @json' <<<"$DECORATED")
 CWD="$FARM/next-app"
-"$S/lifecycle.sh" restart "$NPID" 45901 "$CWD" "$ARGV" >/dev/null
+"$S/lifecycle.sh" restart "$NPID" "$NSTART" 45901 "$CWD" "$ARGV" >/dev/null
 sleep 1
 NEW=$("$S/scan-ports.sh" | jq -r --argjson p 45901 '.ports[] | select(.port == $p) | .pid')
-if [[ -n $NEW && $NEW != "$NPID" ]]; then ok "restarted ($NPID -> $NEW)"; echo "$NEW" >> "$PIDS"
+if [[ -n $NEW && $NEW != "$NPID" ]]; then ok "restarted ($NPID -> $NEW)"; record_pid "$NEW" || bad "could not record restarted PID $NEW"
 else bad "restart failed"; fi
 fi
 
 say "restart keeps every byte of an argument"
-LPID=$("$S/scan-ports.sh" | jq -r '.ports[] | select(.port == 45925) | .pid')
-LARGV=$("$S/scan-ports.sh" | jq -c '.ports[] | select(.port == 45925) | .argv')
-"$S/lifecycle.sh" restart "$LPID" 45925 "$FARM/nl-app" "$LARGV" >/dev/null; sleep 1
+LSCAN=$("$S/scan-ports.sh" | jq -c '.ports[] | select(.port == 45925)')
+LPID=$(jq -r .pid <<<"$LSCAN"); LSTART=$(jq -r .start <<<"$LSCAN"); LARGV=$(jq -c .argv <<<"$LSCAN")
+"$S/lifecycle.sh" restart "$LPID" "$LSTART" 45925 "$FARM/nl-app" "$LARGV" >/dev/null; sleep 1
 LNEW=$("$S/scan-ports.sh" | jq -r '.ports[] | select(.port == 45925) | .pid')
 if [[ -n $LNEW && $LNEW != "$LPID" ]]; then
-  echo "$LNEW" >> "$PIDS"
+  record_pid "$LNEW" || bad "could not record restarted PID $LNEW"
   [[ $(tr '\0' '\n' < "/proc/$LNEW/cmdline" | sed -n 4,5p) == $'two\nlines and spaces' ]] && ok "the newline argument came back intact" || bad "argv[3] after restart: $(tr '\0' '|' < /proc/$LNEW/cmdline)"
+  [[ $(python3 -c 'import sys; print(open(f"/proc/{sys.argv[1]}/cmdline", "rb").read().split(b"\0")[4].hex())' "$LNEW") == 7265636f72641e736570617261746f72 ]] \
+    && ok "the U+001E argument came back intact" || bad "argv[4] changed across restart"
 else bad "no new pid on 45925"; fi
 
 say "restart carries the process's own environment"
-HPID=$("$S/scan-ports.sh" | jq -r '.ports[] | select(.port == 45924) | .pid')
-HARGV=$("$S/scan-ports.sh" | jq -c '.ports[] | select(.port == 45924) | .argv')
-out=$("$S/lifecycle.sh" restart "$HPID" 45924 "$FARM/hook-app" "$HARGV")
+HSCAN=$("$S/scan-ports.sh" | jq -c '.ports[] | select(.port == 45924)')
+HPID=$(jq -r .pid <<<"$HSCAN"); HSTART=$(jq -r .start <<<"$HSCAN"); HARGV=$(jq -c .argv <<<"$HSCAN")
+out=$("$S/lifecycle.sh" restart "$HPID" "$HSTART" 45924 "$FARM/hook-app" "$HARGV")
 [[ $(jq -r .ok <<<"$out") == true ]] && ok "a launcher off this shell's PATH restarts" || bad "restart via process PATH: $out"
 sleep 1
 HNEW=$("$S/scan-ports.sh" | jq -r '.ports[] | select(.port == 45924) | .pid')
 if [[ -n $HNEW && $HNEW != "$HPID" ]]; then
-  echo "$HNEW" >> "$PIDS"
+  record_pid "$HNEW" || bad "could not record restarted PID $HNEW"
   tr '\0' '\n' < "/proc/$HNEW/environ" | grep -qx 'PORTAL_E2E_MARK=carried' && ok "the marker variable survived the restart" || bad "environment not carried"
   tr '\0' '\n' < "/proc/$HNEW/environ" | grep -q "^PATH=$FARM/hookbin:" && ok "and so did its PATH" || bad "PATH not carried"
 else bad "no new pid on 45924"; fi
 
 say "through the running plugin (IPC), when available"
-if command -v omarchy-shell >/dev/null && [[ $(omarchy-shell shell ping 2>/dev/null) == ok ]]; then
-  omarchy-shell g3ortega.portal refresh >/dev/null 2>&1
-  sleep 7
-  LIVE=$(omarchy-shell g3ortega.portal ports 2>/dev/null)
-  hits=0
+shell_live=0
+ipc_ready=0
+ipc_fixture_hits() {
+  local live="$1" hits=0 port kind
+  jq -e 'type == "array"' <<<"$live" >/dev/null 2>&1 || { printf '0'; return; }
   for port in "${!EXPECT[@]}"; do
-    k=$(jq -r --argjson p "$port" '.[] | select(.port == $p) | .kind' <<<"$LIVE")
-    [[ $k == "${EXPECT[$port]}" ]] && hits=$((hits+1))
+    kind=$(jq -r --argjson p "$port" '.[] | select(.port == $p) | .kind' <<<"$live")
+    [[ $kind == "${EXPECT[$port]}" ]] && hits=$((hits+1))
   done
-  [[ $hits -eq ${#EXPECT[@]} ]] && ok "running shell agrees on all $hits fixtures" \
-    || bad "shell agrees on $hits/${#EXPECT[@]}"
+  printf '%s' "$hits"
+}
+
+if command -v omarchy-shell >/dev/null && [[ $(omarchy-shell shell ping 2>/dev/null) == ok ]]; then
+  shell_live=1
+  if "$ROOT/dev/portal.sh" parity >/dev/null 2>&1; then
+    ipc_ready=1
+    omarchy-shell g3ortega.portal refresh >/dev/null 2>&1 || bad "running shell refused refresh"
+    LIVE=""
+    hits=0
+    for _ in $(seq 1 30); do
+      LIVE=$(omarchy-shell g3ortega.portal ports 2>/dev/null)
+      hits=$(ipc_fixture_hits "$LIVE")
+      [[ $hits -eq ${#EXPECT[@]} ]] && break
+      sleep 0.5
+    done
+    [[ $hits -eq ${#EXPECT[@]} ]] && ok "running shell agrees on all $hits fixtures" \
+      || bad "shell agrees on $hits/${#EXPECT[@]}"
+
+    tunnels_before=$(omarchy-shell g3ortega.portal tunnels 2>/dev/null)
+    invalid_expose=$(omarchy-shell g3ortega.portal expose not-a-provider 0 2>/dev/null)
+    invalid_unexpose=$(omarchy-shell g3ortega.portal unexpose not-a-provider 0 2>/dev/null)
+    tunnels_after=$(omarchy-shell g3ortega.portal tunnels 2>/dev/null)
+    [[ $invalid_expose == error:* ]] && ok "invalid expose IPC is refused" \
+      || bad "invalid expose IPC returned: ${invalid_expose:-<empty>}"
+    [[ $invalid_unexpose == error:* ]] && ok "invalid unexpose IPC is refused" \
+      || bad "invalid unexpose IPC returned: ${invalid_unexpose:-<empty>}"
+    if jq -e . <<<"$tunnels_before" >/dev/null 2>&1 && [[ $tunnels_before == "$tunnels_after" ]]; then
+      ok "invalid IPC leaves tunnel state unchanged"
+    else
+      bad "invalid IPC changed tunnel state"
+    fi
+  else
+    skip "installed plugin differs from this checkout; IPC stage"
+  fi
 else
-  ok "shell not running — IPC stage skipped"
+  skip "shell not running; IPC stage"
 fi
 
-# After the IPC stage: the CLI prefers the running shell, whose list is only
-# fresh after the refresh above.
+# The CLI uses IPC only after the same parity check. Otherwise a small shim
+# forces its documented offline path.
 say "the CLI"
-if out=$("$S/portal" list --all 2>&1); then
+CLI_PATH="$PATH"
+if (( shell_live == 1 && ipc_ready == 0 )); then
+  mkdir -p "$BIN/offline"
+  printf '#!/bin/sh\nexit 1\n' > "$BIN/offline/omarchy-shell"
+  chmod +x "$BIN/offline/omarchy-shell"
+  CLI_PATH="$BIN/offline:$PATH"
+fi
+if out=$(PATH="$CLI_PATH" "$S/portal" list --all 2>&1); then
   miss=0; for port in "${!EXPECT[@]}"; do grep -q "^$port " <<<"$out" || miss=$((miss+1)); done
   [[ $miss -eq 0 ]] && ok "portal list --all shows every fixture" || bad "portal list is missing $miss fixtures"
 else bad "portal list failed: $out"; fi
-"$S/portal" shared >/dev/null 2>&1 && ok "portal shared runs" || bad "portal shared failed"
+PATH="$CLI_PATH" "$S/portal" shared >/dev/null 2>&1 && ok "portal shared runs" || bad "portal shared failed"
+
+if [[ ${1:-} != --keep ]]; then
+  say "teardown"
+  trap - EXIT
+  teardown
+  if stray=$(pgrep -f "sleep [3]00"); then
+    bad "sleep 300 process remains after teardown: $(tr '\n' ' ' <<<"$stray")"
+  else
+    ok "no sleep 300 process remains"
+  fi
+  for port in "${!EXPECT[@]}"; do
+    ss -tlnH "sport = :$port" 2>/dev/null | grep -q . && bad "port $port still listens after teardown"
+  done
+else
+  skip "--keep left the farm running; teardown and stray check"
+fi
 
 printf '\n'
 if [[ $fails -eq 0 ]]; then echo "e2e-live: all checks passed"; else echo "e2e-live: $fails failed"; fi

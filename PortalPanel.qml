@@ -33,8 +33,8 @@ Panel {
   // Anything that disrupts a running process — stop, pause, restart — goes
   // through one confirmation. Resume does not: it is the recovery action, and
   // friction on the way back out is friction in the wrong place.
-  // { kind, entry, label?, clause?, provider? }. kind is the verb the answer
-  // wears: stop | pause | restart | install.
+  // { kind, entry, provider?, label?, clause? }. Accepting resolves the row
+  // again and dispatches from this data, so no callback retains a stale process.
   property var pendingAction: null
   property bool helpOpen: false
   property bool settingsOpen: false
@@ -43,13 +43,22 @@ Panel {
   // the verbs while a row's actions are open.
   property int shareIndex: 0
   property int verbIndex: 0
-  property string toast: ""
-  property bool toastIsHint: false
+  // null | { kind: "moment" | "guidance" | "copy", text, error, command? }
+  property var feedback: null
 
-  function showToast(message, hint) { toast = message; toastIsHint = hint === true; toastTimer.restart() }
+  function showMoment(message, error) {
+    feedback = { kind: "moment", text: String(message), error: error === true }
+    feedbackTimer.restart()
+  }
 
-  // A toast is a moment, not a status line.
-  Timer { id: toastTimer; interval: 5000; onTriggered: root.toast = "" }
+  function showGuidance(message, command) {
+    feedback = command
+      ? { kind: "copy", text: String(message), error: false, command: String(command) }
+      : { kind: "guidance", text: String(message), error: false }
+    feedbackTimer.stop()
+  }
+
+  Timer { id: feedbackTimer; interval: 5000; onTriggered: root.feedback = null }
 
   function expand(port, kind) {
     // Moving anywhere abandons an unanswered question — Enter must never act
@@ -138,7 +147,7 @@ Panel {
   function applySetting(def, value) {
     if (value === settingValue(def)) return              // nothing to write
     if (!hostWidget.saveSetting(def.key, def.type === "integer" ? Number(value) : value))
-      showToast("Could not save " + def.label + " — check ~/.config/omarchy/shell.json")
+      showMoment("Could not save " + def.label + " — check ~/.config/omarchy/shell.json", true)
   }
 
   function cycleSetting(def, dir) {
@@ -169,7 +178,7 @@ Panel {
     if (!opened) return
     query = ""
     selectedPort = -1
-    toast = ""
+    feedback = null
     pendingAction = null
     helpOpen = false
     settingsOpen = false
@@ -178,8 +187,10 @@ Panel {
 
   Connections {
     target: root.service
-    function onActionFailed(message) { root.showToast(message) }
-    function onActionHint(message) { root.showToast(message, true) }
+    function onActionFailed(message) { root.showMoment(message, true) }
+    function onActionMoment(message) { root.showMoment(message) }
+    function onActionHint(message) { root.showGuidance(message) }
+    function onActionCopy(message, command) { root.showGuidance(message, command) }
   }
 
   // ---- model ---------------------------------------------------------------
@@ -188,8 +199,26 @@ Panel {
   readonly property var viewData: buildViewData()
   readonly property var rows: viewData.rows
   readonly property var visibleEntries: viewData.entries
-  // A row that vanishes under its own expansion takes the expansion with it.
-  onVisibleEntriesChanged: if (expandedKind !== "" && indexOfPort(selectedPort) < 0) collapse()
+  // A row that vanishes takes its expansion and any unanswered question with
+  // it: an answer must never land on a port that stopped listening.
+  onVisibleEntriesChanged: {
+    if (expandedKind !== "" && indexOfPort(selectedPort) < 0) collapse()
+    if (pendingAction !== null && !pendingStillValid(pendingAction)) pendingAction = null
+  }
+
+  function stillListed(entry) {
+    var now = entryForPort(entry.port)
+    return !!(now && service && service.sameProcess(now.process, entry.process))
+  }
+
+  function pendingStillValid(action) {
+    if (!action || !service) return false
+    if (action.kind === "install") {
+      var provider = service.providerFor(action.provider)
+      return entryForPort(action.entry.port) !== null && provider !== null && provider.status === "setup"
+    }
+    return stillListed(action.entry)
+  }
 
   readonly property var groupOrder: [
     { key: "dev", label: "YOUR APPS" },
@@ -240,10 +269,7 @@ Panel {
     return -1
   }
 
-  function selectedEntry() {
-    var i = indexOfPort(selectedPort)
-    return i < 0 ? null : visibleEntries[i]
-  }
+  function selectedEntry() { return entryForPort(selectedPort) }
 
   function selectedOrFirst() {
     if (indexOfPort(selectedPort) < 0 && visibleEntries.length > 0)
@@ -296,12 +322,13 @@ Panel {
     var tunnel = service.publicTunnelFor(entry.port)
     var st = service.stats[entry.port]
     var paused = st ? st.paused === true : false
-    var stoppable = entry.pid && entry.category !== "system"
+    var stoppable = service.validProcessIdentity(entry.process) && entry.category !== "system"
     var expandedHere = selectedPort === entry.port
     if ((portlessReady || named) && entry.category !== "system" && entry.kind !== "orphan")
       out.push({ id: "name", label: named ? "rename" : "name",
                  on: expandedHere && expandedKind === "naming", urgent: false })
-    if (service.urlFor(entry.port, entry.url) !== "" && entry.category !== "system")
+    if (service.urlFor(entry.port, entry.url) !== "" && entry.category !== "system"
+        && (tunnel !== null || service.validProcessIdentity(entry.process)))
       out.push({ id: "share", label: tunnel ? "stop sharing" : "share",
                  on: expandedHere && expandedKind === "sharing", urgent: tunnel !== null })
     if (stoppable)
@@ -353,10 +380,16 @@ Panel {
 
   function confirmAccept() {
     var a = pendingAction
+    if (!pendingStillValid(a)) { pendingAction = null; return }
+    var entry = entryForPort(a.entry.port)
     pendingAction = null
-    if (a.kind === "install") service.setupProvider(a.provider)
-    else if (a.kind === "restart") service.restartProcess(a.entry)
-    else service.signalProcess(a.entry, a.kind)
+    switch (a.kind) {
+    case "restart": service.restartProcess(entry); break
+    case "pause":
+    case "stop": service.signalProcess(entry, a.kind); break
+    case "share": service.expose(entry.port, a.provider, "", entry.process); break
+    case "install": service.setupProvider(a.provider); break
+    }
   }
 
   // j/k on the detail page walk sibling ports without leaving the charts.
@@ -368,16 +401,29 @@ Panel {
   }
 
   // One activation body for the keyboard and the row's own chips.
-  // A provider's one-click fix may put a binary on the machine; that is asked
-  // first, in the row, like any other consequential action.
+  // Reaching the internet, or putting something on the machine, is asked
+  // first, in the row, like any other consequential action. What a setup
+  // does comes from the provider itself (setupClause), so no provider is
+  // named here.
   function chooseProvider(port, provider) {
     if (!service || !provider) return
-    if (provider.status === "ready") { service.expose(port, provider.id, ""); return }
-    if (provider.status !== "setup") return
-    if (provider.id === "cloudflared")
-      requestAction("install", selectedEntry(), { provider: provider.id, label: "cloudflared",
-        clause: "a checksum-pinned release, into ~/.local/bin" })
-    else service.setupProvider(provider.id)
+    var entry = entryForPort(port)
+    if (!entry) return
+    if (provider.status === "ready") {
+      if (!service.validProcessIdentity(entry.process)) return
+      requestAction("share", entry, { provider: provider.id, label: entry.name,
+                                      clause: "publicly, via " + provider.label })
+    } else if (provider.status === "setup" && provider.setupClause) {
+      requestAction("install", entry, { provider: provider.id, label: provider.id,
+                                        clause: provider.setupClause })
+    } else if (provider.status === "setup") {
+      service.setupProvider(provider.id)   // nothing to do here; the provider says what to run
+    }
+  }
+
+  function entryForPort(port) {
+    var i = indexOfPort(port)
+    return i < 0 ? null : visibleEntries[i]
   }
 
   function activateShareChip() {
@@ -402,8 +448,13 @@ Panel {
       // inline name editor both need plain letters, including j/k/x/space.
       // A confirmation is not blocked: y/n/enter are routed below.
       blocked: search.activeFocus || root.mode === "naming"
-      // Esc steps back one level, in mode precedence order.
+      // Esc steps back one level, in mode precedence order. Persistent
+      // guidance is the topmost level: it goes first, the rest is untouched.
       onCloseRequested: {
+        if (root.feedback !== null && root.feedback.kind !== "moment") {
+          root.feedback = null
+          return
+        }
         switch (root.mode) {
         case "help":     root.helpOpen = false; return
         case "confirm":  root.pendingAction = null; return
@@ -712,31 +763,30 @@ Panel {
                 color: Color.accent
               }
 
-              Text {
+              TickerText {
                 anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: stripLink.armed
-                  ? "installs portless with npm, trusts its CA in Chrome and Firefox, starts the proxy"
+                text: stripLink.armed && root.portlessProvider
+                  ? root.portlessProvider.setupClause
                   : (root.portlessProvider ? root.portlessProvider.detail : "")
                 color: root.panelText
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
                 width: Math.min(implicitWidth, stripRow.width - stripGlyph.width - stripRow.spacing)
-                elide: Text.ElideRight
+                // Setup status always animates while truncated: no hover needed.
+                hovered: true
               }
             }
 
             // Two shapes of "needs setup": something this plugin may do itself
-            // (after saying exactly what: an npm install and a CA trusted in
-            // the browsers), and something only the user's terminal should do
-            // (anything with elevation) — that one is copy, never execute.
+            // (after saying what, in the provider's own words), and something
+            // only the user's terminal should do — copy, never execute.
             Row {
               id: stripLink
               anchors.right: parent.right
               anchors.rightMargin: Style.spacing.lg
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.spacing.sm
-              readonly property bool needsSudo: !!(root.portlessProvider && root.portlessProvider.fix)
+              readonly property bool copyOnly: !!(root.portlessProvider && root.portlessProvider.fix)
               readonly property bool busy: root.service && root.service.busyAction === "portless:setup"
               property bool armed: false
               onVisibleChanged: armed = false
@@ -745,14 +795,14 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 text: {
                   if (stripLink.busy) return "setting up…"
-                  if (stripLink.needsSudo) return "Copy fix"
+                  if (stripLink.copyOnly) return "Copy fix"
                   return stripLink.armed ? "set up" : "Set up"
                 }
                 color: Color.accent
                 font.pixelSize: Style.font.bodySmall
                 onClicked: {
                   if (!root.service || stripLink.busy) return
-                  if (stripLink.needsSudo) {
+                  if (stripLink.copyOnly) {
                     root.service.copyText(root.portlessProvider.fix)
                   } else if (stripLink.armed) {
                     stripLink.armed = false
@@ -1108,14 +1158,86 @@ Panel {
           }
         }
 
-        // ---- error / toast --------------------------------------------------
+        // Setup guidance stays visible while the user checks another page.
+        // The command stays off-screen until pasted.
+        Column {
+          id: stepBlock
+          visible: root.feedback !== null && root.feedback.kind === "copy"
+          width: parent.width
+          spacing: Style.spacing.sm
+          clip: true
+          readonly property string portlessDocs: "https://github.com/vercel-labs/portless"
+          property bool copied: false
+          onVisibleChanged: if (!visible) copied = false
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.feedback ? root.feedback.text : ""
+            color: Util.alpha(root.panelText, 0.75)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+          }
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(docsLink.implicitHeight, copyHit.height)
+
+            LinkText {
+              id: docsLink
+              anchors.left: parent.left
+              anchors.right: copyHit.left
+              anchors.rightMargin: Style.spacing.lg
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Portless documentation"
+              color: Util.alpha(root.panelText, 0.75)
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+              onClicked: if (root.service) root.service.openUrl(stepBlock.portlessDocs)
+            }
+
+            MouseArea {
+              id: copyHit
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.font.bodySmall + Style.spacing.xs
+              height: Style.font.bodySmall + Style.spacing.xs
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                if (root.service && root.feedback) root.service.copyText(root.feedback.command, true)
+                stepBlock.copied = true
+                copiedTimer.restart()
+              }
+
+              Timer {
+                id: copiedTimer
+                interval: 1200
+                onTriggered: stepBlock.copied = false
+              }
+
+              OpticalGlyph {
+                anchors.centerIn: parent
+                width: Style.font.caption + Style.spacing.xs
+                height: Style.font.caption
+                text: Icons.g("copy")
+                fontSize: Style.font.bodySmall
+                scale: stepBlock.copied ? 1.3 : 1
+                Behavior on scale { NumberAnimation { duration: 150 } }
+                color: stepBlock.copied || copyHit.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.7)
+              }
+            }
+          }
+        }
+
         Text {
           width: parent.width
           visible: text.length > 0
           textFormat: Text.PlainText
-          text: root.toast || (root.service ? root.service.lastError : "")
-          // A hint is guidance, not an alarm.
-          color: root.toast && root.toastIsHint ? Color.accent : Color.urgent
+          text: root.feedback !== null && root.feedback.kind !== "copy"
+            ? root.feedback.text : (root.feedback === null && root.service ? root.service.lastError : "")
+          color: root.feedback !== null && root.feedback.error !== true ? Color.accent : Color.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap

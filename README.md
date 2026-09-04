@@ -7,7 +7,7 @@ open, name, share, pause, restart or stop it. An [Omarchy](https://omarchy.org)
 bar plugin.
 
 <p align="center">
-  <img src="docs/hero.png" width="800" alt="Portal's port list and charts page">
+  <img src="preview.png" width="800" alt="Portal's port list and charts page">
 </p>
 
 ```sh
@@ -22,7 +22,15 @@ Bind it to a key (pick one that's free in `omarchy menu keybindings --print`):
 o.bind("SUPER + ALT + P", "Portal", "omarchy-shell g3ortega.portal toggle")
 ```
 
-Remove with `omarchy plugin remove g3ortega.portal`.
+Remove with `scripts/portal uninstall` first (it disables the plugin, stops
+every share and name Portal created, drops the Portless CA from the browser
+stores Portal added it to, deletes cloudflared if it is still Portal's copy,
+and removes Portal's state), then `omarchy plugin remove g3ortega.portal`.
+
+Portal probes listed ports on `localhost` and calls the local Portless proxy
+and ngrok agent. It checks new tunnel hostnames through `1.1.1.1` or
+`dns.google` over HTTPS. A confirmed Cloudflared install downloads the pinned
+release from GitHub. Cloudflared and ngrok connect to their own services.
 
 ## What it does
 

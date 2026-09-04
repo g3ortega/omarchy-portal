@@ -25,7 +25,7 @@ function check(name, entry, expect) {
   }
 }
 
-const base = { addresses: ["127.0.0.1"], scope: "local", markers: [], deps: [], cmdline: "", comm: "", cwd: "", projectRoot: "", projectName: "" }
+const base = { addresses: ["127.0.0.1"], scope: "local", markers: [], deps: [], cmdline: "", comm: "", cwd: "", projectRoot: "", projectName: "", exclusiveOwner: true }
 const e = (o) => ({ ...base, ...o })
 
 console.log("Detect.js")
@@ -128,6 +128,10 @@ check("443 uses https", e({ port: 443, comm: "caddy" }), { url: "https://localho
 check("all-interfaces scope preserved", e({
   port: 8000, comm: "java", addresses: ["*"], scope: "all"
 }), { scope: "all" })
+
+check("a shared listener keeps identity without process authority", e({
+  port: 8000, pid: 10, start: 20, exclusiveOwner: false
+}), { pid: 10, start: 20, process: null })
 
 // --- displayName fallback chain lives in Detect.js, not the scanner
 check("directory basename names the row when package.json has no name", e({
@@ -242,6 +246,8 @@ check("a wildcard bind still opens localhost", e({
 {
   const panelSrc = readFileSync(join(here, "..", "PortalPanel.qml"), "utf8")
   const serviceSrc = readFileSync(join(here, "..", "Service.qml"), "utf8")
+  const rowSrc = readFileSync(join(here, "..", "PortRow.qml"), "utf8")
+  const scanSrc = readFileSync(join(here, "..", "scripts", "scan-ports.sh"), "utf8")
   const fn = (src, name, params) => {
     const m = src.match(new RegExp("\\n  function " + name + "\\([^)]*\\) \\{\\n([\\s\\S]*?)\\n  \\}\\n"))
     if (!m) throw new Error(`no function ${name}`)
@@ -264,14 +270,16 @@ check("a wildcard bind still opens localhost", e({
   const svc = (o) => ({
     routeFor: () => o.route || null, publicTunnelFor: () => o.tunnel || null,
     stats: o.stats || {}, urlFor: () => o.url === undefined ? "http://localhost:1" : o.url,
-    canRestart: (e) => !!(e.pid && e.argv.length && !e.argvTruncated)
+    validProcessIdentity: (p) => !!(p && p.pid > 1 && Number(p.start) > 0),
+    canRestart: (e) => !!(e.process && e.argv.length && !e.argvTruncated)
   })
   const ids = (vs) => vs.map((v) => v.id)
-  const dev = { port: 3000, pid: 10, category: "dev", url: "http://localhost:3000", argv: ["node"], argvTruncated: false }
+  const dev = { port: 3000, pid: 10, start: 20, process: { pid: 10, start: "20" }, category: "dev", url: "http://localhost:3000", argv: ["node"], argvTruncated: false }
   eq("a dev server offers every verb", ids(verbsFor(svc({}), true, -1, "", dev)), ["name", "share", "pause", "restart", "stop"])
   eq("a service is not restartable", ids(verbsFor(svc({}), true, -1, "", { ...dev, category: "service" })), ["name", "share", "pause", "stop"])
   eq("a system port gets no verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, category: "system" })), [])
-  eq("no pid means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, pid: null })), ["name", "share"])
+  eq("no pid means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, pid: null, process: null })), ["name"])
+  eq("no start means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, start: null, process: null })), ["name"])
   eq("no proxy and no name means no name verb", ids(verbsFor(svc({}), false, -1, "", dev)), ["share", "pause", "restart", "stop"])
   eq("an existing name can be renamed without the proxy", verbsFor(svc({ route: {} }), false, -1, "", dev)[0].label, "rename")
   eq("a truncated command line cannot be restarted", ids(verbsFor(svc({}), true, -1, "", { ...dev, argvTruncated: true })), ["name", "share", "pause", "stop"])
@@ -279,6 +287,163 @@ check("a wildcard bind still opens localhost", e({
   eq("a shared port offers to stop sharing, urgently", verbsFor(svc({ tunnel: { url: "x" } }), true, -1, "", dev)[1], { id: "share", label: "stop sharing", on: false, urgent: true })
   eq("the open section's verb is marked on", verbsFor(svc({}), true, 3000, "naming", dev)[0].on, true)
   eq("no URL means no share verb", ids(verbsFor(svc({ url: "" }), true, -1, "", dev)), ["name", "pause", "restart", "stop"])
+
+  const stillListed = fn(panelSrc, "stillListed", ["service", "entryForPort", "entry"])
+  const current = { ...dev, name: "app", cwd: "/tmp/app" }
+  const processService = { sameProcess: (a, b) => !!(a && b && a.pid === b.pid && a.start === b.start) }
+  eq("an exact process keeps its confirmation", stillListed(processService, () => current, current), true)
+  eq("a replacement process cancels its confirmation", stillListed(processService, () => ({ ...current, pid: 11, start: 21, process: { pid: 11, start: "21" } }), current), false)
+  eq("two unattributed rows do not retain public consent", stillListed(processService, () => ({ ...current, pid: null, start: null, process: null }), { ...current, pid: null, start: null, process: null }), false)
+
+  const validProcessIdentity = fn(serviceSrc, "validProcessIdentity", ["process"])
+  eq("pid and start make a process identity", validProcessIdentity({ pid: 2, start: "1" }), true)
+  eq("pid 1 is not a process identity", validProcessIdentity({ pid: 1, start: "1" }), false)
+  eq("start zero is not a process identity", validProcessIdentity({ pid: 2, start: "0" }), false)
+  if (!serviceSrc.includes('property string scanError: ""') || !serviceSrc.includes('property string tunnelError: ""'))
+    bad.push("scan and tunnel errors do not have independent state")
+  const lifecycleBody = serviceSrc.match(/function _runLifecycle\([^)]*\) \{([\s\S]*?)\n  \}/)?.[1] ?? ""
+  if (!lifecycleBody.includes("_queueAction") || lifecycleBody.includes("_expectGone"))
+    bad.push("lifecycle disappearance is not delegated to the queued launch")
+  const launchCheck = serviceSrc.indexOf("if (!started)")
+  const expectGone = serviceSrc.indexOf("_expectGone(root.activeAction.target)")
+  if (launchCheck === -1 || expectGone < launchCheck)
+    bad.push("lifecycle disappearance is marked before the helper launches")
+  if (!serviceSrc.includes("_forgetGone(action.target)"))
+    bad.push("failed lifecycle actions do not clear disappearance state")
+
+  const scanKeyFields = serviceSrc.match(/identity\.push\(\[([\s\S]*?)\]\)/)?.[1] ?? ""
+  for (const field of ["e.start", "e.argv", "e.argvTruncated", "e.exclusiveOwner"])
+    if (!scanKeyFields.includes(field)) bad.push(`scan identity omits ${field}`)
+
+  const notifyVanishedDev = fn(serviceSrc, "_notifyVanishedDev",
+    ["devPorts", "_prevDevPorts", "processKey", "_expectedGoneAt", "expectedGoneMs", "publicTunnelFor", "notify"])
+  const runVanished = (markers, now, devPorts = [], previous = [
+    { port: 3000, process: { pid: 10, start: "20" }, label: "Node" }
+  ]) => {
+    const notices = [], state = { ...markers }, realNow = Date.now
+    Date.now = () => now
+    try {
+      notifyVanishedDev(devPorts, previous, (p) => p ? `${p.pid}:${p.start}` : "", state, 600000, () => null,
+        (...a) => notices.push(a))
+    } finally { Date.now = realNow }
+    return { notices, markers: state }
+  }
+  eq("a fresh expected-stop marker suppresses the crash notice",
+    runVanished({ "10:20": 700000 - 60000 }, 700000),
+    { notices: [], markers: {} })
+  eq("an expired expected-stop marker does not suppress a crash",
+    runVanished({ "10:20": 700000 - 600001 }, 700000),
+    { notices: [["Port 3000 went quiet", "Node is no longer listening"]], markers: {} })
+  eq("losing one of a process's ports still reports that port",
+    runVanished({}, 700000,
+      [{ port: 3001, process: { pid: 10, start: "20" }, label: "Node" }],
+      [
+        { port: 3000, process: { pid: 10, start: "20" }, label: "Node" },
+        { port: 3001, process: { pid: 10, start: "20" }, label: "Node" }
+      ]),
+    { notices: [["Port 3000 went quiet", "Node is no longer listening"]], markers: {} })
+  if (!serviceSrc.includes("targetHealthy: t.targetHealthy === true ? true"))
+    bad.push("tunnel status drops target health before the UI")
+  const targetOfflineExpr = rowSrc.match(/readonly property bool targetOffline: ([^\n]+)/)?.[1]
+  const publicTunnelTextExpr = rowSrc.match(/readonly property string publicTunnelText: ([^\n]+)/)?.[1]
+  if (!targetOfflineExpr || !publicTunnelTextExpr) {
+    bad.push("the public tunnel row does not model an offline target")
+  } else {
+    const targetOffline = new Function("publicTunnel", "return " + targetOfflineExpr)
+    const publicTunnelText = new Function("publicTunnel", "targetOffline", "return " + publicTunnelTextExpr)
+    const staleTunnel = { url: "https://stale.trycloudflare.com", targetHealthy: false }
+    eq("an unhealthy tracked tunnel is marked offline", targetOffline(staleTunnel), true)
+    eq("an adopted tunnel is not marked offline", targetOffline({ url: "https://adopted.example", targetHealthy: null }), false)
+    eq("the public line names an offline target",
+      publicTunnelText(staleTunnel, true), "https://stale.trycloudflare.com · target offline")
+  }
+  const maxPorts = Number(scanSrc.match(/^MAX_PORTS=([0-9]+)/m)?.[1] ?? 0)
+  const argvLogicalCap = Number(scanSrc.match(/^ARGV_LOGICAL_CAP=([0-9]+)$/m)?.[1] ?? 0)
+  if (argvLogicalCap !== 8192) bad.push(`scanner argv logical cap is ${argvLogicalCap}`)
+  const scanCap = Number(serviceSrc.match(/outputCaps:[^\n]*scan:\s*([0-9]+)/)?.[1] ?? 0)
+  const maxArgvValue = "\u0001".repeat(argvLogicalCap + 1)
+  const maximalArgvDocument = { version: 1, ports: Array.from({ length: maxPorts }, () => ({ argv: [maxArgvValue] })) }
+  eq(`scan cap holds ${maxPorts} maximally JSON-escaped sampled argv values`, Buffer.byteLength(JSON.stringify(maximalArgvDocument)) <= scanCap, true)
+  const tunnelCap = Number(serviceSrc.match(/outputCaps:[^\n]*poll:\s*([0-9]+)/)?.[1] ?? 0)
+  if (tunnelCap < 8 * 1024 * 1024) bad.push(`tunnel poll cap is only ${tunnelCap} bytes`)
+
+  const state = { feedback: null }, timer = { restarted: 0, stopped: 0,
+    restart() { this.restarted++ }, stop() { this.stopped++ } }
+  const feedbackFn = (name, params) => {
+    const body = panelSrc.match(new RegExp("\\n  function " + name + "\\([^)]*\\) \\{\\n([\\s\\S]*?)\\n  \\}\\n"))?.[1]
+    if (!body) throw new Error(`no function ${name}`)
+    return new Function("state", "feedbackTimer", ...params, body.replace(/\bfeedback\s*=/g, "state.feedback ="))
+  }
+  const showMoment = feedbackFn("showMoment", ["message", "error"])
+  const showGuidance = feedbackFn("showGuidance", ["message", "command"])
+  showGuidance(state, timer, "run this", "sudo true")
+  eq("copy guidance carries one command", state.feedback, { kind: "copy", text: "run this", error: false, command: "sudo true" })
+  eq("copy guidance remains until replacement or dismissal", timer.stopped, 1)
+  showMoment(state, timer, "copied", false)
+  eq("a moment replaces copy guidance", state.feedback, { kind: "moment", text: "copied", error: false })
+  showMoment(state, timer, "failed", true)
+  eq("an action failure stays urgent", state.feedback, { kind: "moment", text: "failed", error: true })
+
+  const extract = (src, re) => src.match(re)?.[0] ?? ""
+  if (panelSrc.includes("Text.RichText")) bad.push("PortalPanel.qml still renders rich text")
+  if (/\bfunction\s+richStep\s*\(/.test(panelSrc)) bad.push("PortalPanel.qml still declares richStep")
+  const stepBlockSrc = extract(panelSrc,
+    /^        Column \{\n          id: stepBlock\n[\s\S]*?^        \}$/m)
+  if (!stepBlockSrc) {
+    bad.push("copy guidance is not a Column named stepBlock")
+  } else {
+    const guidanceTextSrc = extract(stepBlockSrc,
+      /^          Text \{\n[\s\S]*?^          \}$/m)
+    if (!/^[ \t]*textFormat:[ \t]*Text\.PlainText[ \t]*$/m.test(guidanceTextSrc)
+        || !/^[ \t]*text:[ \t]*root\.feedback[ \t]*\?[ \t]*root\.feedback\.text[ \t]*:[ \t]*""[ \t]*$/m.test(guidanceTextSrc)
+        || !/^[ \t]*wrapMode:[ \t]*Text\.WrapAtWordBoundaryOrAnywhere[ \t]*$/m.test(guidanceTextSrc)
+        || /^[ \t]*elide[ \t]*:/m.test(guidanceTextSrc))
+      bad.push("copy guidance does not render feedback text literally with fallback wrapping")
+    if (!/^[ \t]*clip:[ \t]*true[ \t]*$/m.test(stepBlockSrc))
+      bad.push("copy guidance no longer clips to its block")
+    const actionRowSrc = extract(stepBlockSrc,
+      /^          Item \{\n[\s\S]*?^          \}$/m)
+    const docsLinkSrc = extract(actionRowSrc,
+      /^            LinkText \{\n[\s\S]*?^            \}$/m)
+    const linkCount = (actionRowSrc.match(/^            LinkText \{$/gm) || []).length
+    if (linkCount !== 1
+        || !/^[ \t]*anchors\.left:[ \t]*parent\.left[ \t]*$/m.test(docsLinkSrc)
+        || !/^[ \t]*anchors\.right:[ \t]*copyHit\.left[ \t]*$/m.test(docsLinkSrc)
+        || !/^[ \t]*anchors\.rightMargin:[ \t]*Style\.spacing\.lg[ \t]*$/m.test(docsLinkSrc)
+        || !/^[ \t]*text:[ \t]*"Portless documentation"[ \t]*$/m.test(docsLinkSrc)
+        || !/^[ \t]*onClicked:[ \t]*if \(root\.service\) root\.service\.openUrl\(stepBlock\.portlessDocs\)[ \t]*$/m.test(docsLinkSrc))
+      bad.push("copy guidance does not have one fixed, separated Portless documentation link")
+    const copyHitSrc = extract(actionRowSrc,
+      /^            MouseArea \{\n              id: copyHit\n[\s\S]*?^            \}$/m)
+    if (!/^[ \t]*width:[ \t]*parent\.width[ \t]*$/m.test(actionRowSrc)
+        || !/^[ \t]*implicitHeight:[ \t]*Math\.max\(docsLink\.implicitHeight, copyHit\.height\)[ \t]*$/m.test(actionRowSrc)
+        || !/^[ \t]*anchors\.right:[ \t]*parent\.right[ \t]*$/m.test(copyHitSrc))
+      bad.push("copy guidance actions do not span the row with copy anchored right")
+    const copyClickSrc = extract(copyHitSrc,
+      /^              onClicked: \{\n[\s\S]*?^              \}$/m)
+    if (!/^[ \t]*if \(root\.service && root\.feedback\) root\.service\.copyText\(root\.feedback\.command, true\)[ \t]*$/m.test(copyClickSrc))
+      bad.push("copy guidance changed the quiet command copy")
+    if (!/^[ \t]*stepBlock\.copied[ \t]*=[ \t]*true[ \t]*$/m.test(copyClickSrc)
+        || !/^[ \t]*copiedTimer\.restart\(\)[ \t]*$/m.test(copyClickSrc))
+      bad.push("copy guidance click no longer starts copied state and its timer")
+    const copiedTimerSrc = extract(copyHitSrc,
+      /^              Timer \{\n                id: copiedTimer\n[\s\S]*?^              \}$/m)
+    if (!/^[ \t]*interval:[ \t]*1200[ \t]*$/m.test(copiedTimerSrc)
+        || !/^[ \t]*onTriggered:[ \t]*stepBlock\.copied[ \t]*=[ \t]*false[ \t]*$/m.test(copiedTimerSrc)
+        || !/^[ \t]*onVisibleChanged:[ \t]*if \(!visible\) copied[ \t]*=[ \t]*false[ \t]*$/m.test(stepBlockSrc))
+      bad.push("copy guidance changed its reset or copied animation lifetime")
+    if (/^[ \t]*linkColor[ \t]*:/m.test(stepBlockSrc)
+        || /^[ \t]*onLinkActivated[ \t]*:/m.test(stepBlockSrc))
+      bad.push("copy guidance still contains rich-text link handling")
+  }
+  const closeHandlerSrc = extract(panelSrc,
+    /^      onCloseRequested: \{\n[\s\S]*?^      \}$/m)
+  if (!/^        if \(root\.feedback !== null && root\.feedback\.kind !== "moment"\) \{\n          root\.feedback = null\n          return\n        \}$/m.test(closeHandlerSrc))
+    bad.push("Escape no longer clears persistent guidance first")
+  const openedHandlerSrc = extract(panelSrc,
+    /^  onOpenedChanged: \{\n[\s\S]*?^  \}$/m)
+  if (!/^    if \(!opened\) return\n[\s\S]*?^    feedback = null$/m.test(openedHandlerSrc))
+    bad.push("panel reopen no longer clears feedback")
 
   const probeList = fn(serviceSrc, "probeList", ["ports", "watchedPorts", "focusPort"])
   const p = (n, cat, web) => ({ port: n, category: cat, web: web })
@@ -396,6 +561,9 @@ check("a wildcard bind still opens localhost", e({
   if (bad.length === 0) { pass++; console.log("  ok   chart phases and axis rules") }
   else { fail++; console.log("  FAIL chart rules"); for (const b of bad) console.log("         " + b) }
 }
+
+check("the kernel start time passes through with the pid", { port: 3000, pid: 10, start: 15273183, comm: "node", cmdline: "node srv.js", cwd: "/tmp/x", addresses: ["127.0.0.1"] }, { pid: 10, start: 15273183 })
+check("a scan without a start time yields null, never undefined", { port: 3001, pid: 11, comm: "node", cmdline: "node", cwd: "/tmp/x", addresses: ["127.0.0.1"] }, { start: null })
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

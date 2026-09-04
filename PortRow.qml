@@ -45,6 +45,8 @@ Item {
   readonly property var route: service && entry ? service.routeFor(entry.port) : null
   readonly property var publicTunnel: service && entry ? service.publicTunnelFor(entry.port) : null
   readonly property bool dnsPending: publicTunnel !== null && publicTunnel.dns === "pending"
+  readonly property bool targetOffline: publicTunnel !== null && publicTunnel.targetHealthy === false
+  readonly property string publicTunnelText: publicTunnel ? publicTunnel.url + (targetOffline ? " · target offline" : "") : ""
   // Index of the provider chip the panel's keyboard cursor is on while the
   // share picker is open on this row; -1 when the cursor is elsewhere.
   property int shareCursor: -1
@@ -66,7 +68,7 @@ Item {
   // exactly where the main line's title does: one alignment axis, read off
   // the title column itself so nothing can drift from it.
   readonly property real titleAxis: titleColumn.x
-  // The centre of the icon slot: where the thread rule hangs from.
+  // The center of the icon slot: where the thread rule hangs from.
   readonly property real iconAxis: iconGlyph.x + iconGlyph.width / 2
   readonly property var stats: service && entry ? (service.stats[entry.port] || null) : null
   readonly property bool paused: stats ? stats.paused === true : false
@@ -169,25 +171,23 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         spacing: 0
 
-        Text {
+        TickerText {
           width: parent.width
-          textFormat: Text.PlainText
           text: row.named ? row.routeHost : (row.entry ? row.entry.name : "")
           color: row.named ? Color.accent : row.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
+          fontFamily: Style.font.family
+          fontSize: Style.font.body
+          hovered: hover.hovered
         }
 
-        Text {
+        TickerText {
           width: parent.width
           visible: text.length > 0
-          textFormat: Text.PlainText
           text: row.revealed && row.statsLine ? row.statsLine : row.stackLine
           color: row.paused ? Color.urgent : Util.alpha(row.foreground, 0.55)
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          fontFamily: Style.font.family
+          fontSize: Style.font.caption
+          hovered: hover.hovered
         }
       }
 
@@ -285,7 +285,7 @@ Item {
         anchors.rightMargin: Style.spacing.md
         anchors.verticalCenter: parent.verticalCenter
         textFormat: Text.PlainText
-        text: row.publicTunnel ? row.publicTunnel.url : ""
+        text: row.publicTunnelText
         color: Util.alpha(Color.urgent, row.dnsPending ? 0.5 : 1.0)
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
@@ -311,7 +311,7 @@ Item {
 
       sourceComponent: Item {
         // The same breath above the content as below it: the block sits
-        // centred between its row and the next, not glued to one of them.
+        // centered between its row and the next, not glued to one of them.
         implicitHeight: expansion.implicitHeight + Style.spacing.md * 2
 
         Rectangle {
