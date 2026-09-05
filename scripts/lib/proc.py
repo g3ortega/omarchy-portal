@@ -88,7 +88,13 @@ def cmd_end(a):
     if not pid or starttime(pid) != start:
         return 1
     end_group(pid)
-    return 0 if starttime(pid) != start else 1
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return 0 if starttime(pid) != start else 1
+    except OSError:
+        return 1
+    return 1
 
 
 def end_group(pid):

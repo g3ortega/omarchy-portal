@@ -12,6 +12,127 @@ ok()  { pass=$((pass+1)); echo "  ok   $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL $1"; }
 is()  { if [[ $2 == "$3" ]]; then ok "$1"; else bad "$1: expected [$3], got [$2]"; fi; }
 
+if [[ -z ${PORTAL_TEST_ONLY:-} || ${PORTAL_TEST_ONLY:-} == proc-end ]]; then
+if /usr/bin/python3 -I -S - "$PR" <<'PY'
+import errno
+import importlib.util
+import sys
+import types
+
+pid = 424242
+start = "12345"
+spec = importlib.util.spec_from_file_location("portal_proc_end", sys.argv[1])
+proc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(proc)
+
+
+def end_case(group):
+    state = [start]
+    probes = []
+
+    def killpg(value, sig):
+        probes.append((value, sig))
+        if group is not None:
+            raise group
+
+    proc.starttime = lambda value: state[0] if value == pid else None
+    proc.end_group = lambda value: state.__setitem__(0, None)
+    proc.os = types.SimpleNamespace(killpg=killpg)
+    return proc.cmd_end([str(pid), start]), state[0], probes
+
+
+groups = {
+    "present": None,
+    "absent": ProcessLookupError(),
+    "eperm": PermissionError(errno.EPERM, "operation not permitted"),
+}
+results = {name: end_case(error) for name, error in groups.items()}
+
+dangerous = (("1", "1"), ("0", "0"), ("-1", "1"), ("", ""),
+             ("999999999999999999999", "1"), (str(pid), "not-a-number"))
+dangerous_probes = []
+proc.starttime = lambda value: None
+proc.os = types.SimpleNamespace(killpg=lambda value, sig: dangerous_probes.append((value, sig)))
+dangerous_results = [proc.cmd_end(list(identity)) for identity in dangerous]
+
+expected = {
+    "present": (1, None, [(pid, 0)]),
+    "absent": (0, None, [(pid, 0)]),
+    "eperm": (1, None, [(pid, 0)]),
+}
+if (results != expected or dangerous_results != [1] * len(dangerous)
+        or dangerous_probes):
+    raise SystemExit(
+        f"expected {expected}, got {results}; "
+        f"dangerous returns {dangerous_results}, probes {dangerous_probes}"
+    )
+print("present=1 absent=0 eperm=1 dangerous-probes=0")
+PY
+then
+  ok "proc end requires the exact leader and process group to be gone"
+else
+  bad "proc end accepted a surviving or unprobeable process group"
+fi
+if [[ ${PORTAL_TEST_ONLY:-} == proc-end ]]; then
+  echo; echo "$pass passed, $fail failed"
+  exit $((fail > 0))
+fi
+fi
+
+if [[ -z ${PORTAL_TEST_ONLY:-} || ${PORTAL_TEST_ONLY:-} == restart-cancel ]]; then
+RESTART_CANCEL="$T/restart-cancel"
+mkdir -p "$RESTART_CANCEL/state"
+PORTAL_STATE_DIR="$RESTART_CANCEL/state" EFFECTS="$RESTART_CANCEL/effects" S="$S" bash -c '
+  set -- noop
+  source "$S/lifecycle.sh" >/dev/null
+  : > "$EFFECTS"
+  rollback_replacement() {
+    printf "%s\t%s\t%s\n" "$1" "$2" "$3" >> "$EFFECTS"
+    state remove "$PORTAL_RUNTIME_DIR" "$3"
+  }
+  read_case() {
+    local label=$1 record=$2 identity rc
+    identity=$(read_restart_identity "$record"); rc=$?
+    printf "%s\t%s\t%s\n" "$label" "$rc" "$identity"
+  }
+
+  printf "999999 1" | state write "$PORTAL_RUNTIME_DIR/valid"
+  read_case valid valid
+  ( cancel_restart valid 143 ); printf "cancel-valid\t%s\n" "$?"
+
+  printf "999999 1\n" | state write "$PORTAL_RUNTIME_DIR/newline"
+  printf "999999 1\000tail" | state write "$PORTAL_RUNTIME_DIR/nul"
+  printf "2147483648 1" | state write "$PORTAL_RUNTIME_DIR/huge"
+  printf "1 1" | state write "$PORTAL_RUNTIME_DIR/one"
+  printf "999999 nope" | state write "$PORTAL_RUNTIME_DIR/nonnumeric"
+  printf "999999 1 extra" | state write "$PORTAL_RUNTIME_DIR/extra"
+  for record in newline nul huge one nonnumeric extra; do
+    read_case "$record" "$record"
+    ( cancel_restart "$record" 130 ); printf "cancel-%s\t%s\n" "$record" "$?"
+  done
+  read_case absent absent
+
+  state() { return 129; }
+  read_case helper-signal ignored
+' > "$RESTART_CANCEL/result" 2> "$RESTART_CANCEL/err"
+restart_cancel_rc=$?
+restart_trap_line=$(grep -nF "trap 'cancel_restart \"\$restart_pid\" 143' TERM" "$S/lifecycle.sh" | head -1 | cut -d: -f1)
+restart_launch_line=$(grep -n 'state launch-tracked .*restart_pid' "$S/lifecycle.sh" | head -1 | cut -d: -f1)
+is "restart cancellation reads only bounded durable identities" \
+  "$restart_cancel_rc|$(cat "$RESTART_CANCEL/result")|$(cat "$RESTART_CANCEL/effects")" \
+  $'0|valid\t0\t999999 1\ncancel-valid\t143\nnewline\t2\t\ncancel-newline\t130\nnul\t2\t\ncancel-nul\t130\nhuge\t2\t\ncancel-huge\t130\none\t2\t\ncancel-one\t130\nnonnumeric\t2\t\ncancel-nonnumeric\t130\nextra\t2\t\ncancel-extra\t130\nabsent\t1\t\nhelper-signal\t129\t|999999\t1\tvalid'
+if [[ $restart_trap_line =~ ^[0-9]+$ && $restart_launch_line =~ ^[0-9]+$ \
+    && $restart_trap_line -lt $restart_launch_line ]]; then
+  ok "restart arms durable-record cancellation before launch"
+else
+  bad "restart launches before durable-record cancellation is armed"
+fi
+if [[ ${PORTAL_TEST_ONLY:-} == restart-cancel ]]; then
+  echo; echo "$pass passed, $fail failed"
+  exit $((fail > 0))
+fi
+fi
+
 if [[ -z ${PORTAL_TEST_ONLY:-} || ${PORTAL_TEST_ONLY:-} == stage-ignored ]]; then
 STAGE_IGNORED="$T/stage-ignored"
 STAGE_SOURCE="$STAGE_IGNORED/source"
@@ -929,6 +1050,7 @@ run_portal_status_case() {
         portal_status_real_portless_adopt
       }
       portless_probe() { PROBE_PORT=1355; PROBE_SCHEME=https; return 0; }
+      portless_listener_scope() { echo local; }
       portless_host_url() {
         [[ $CASE_URL_MODE == fallback ]] && return 0
         printf "https://%s:1355" "$1"
@@ -1120,9 +1242,9 @@ is "an exact mixed-case complete record keeps marker bytes and falls back to loc
   'MiXeD|[["portless",3007,"https://mixed.test/path","local"]]|0'
 
 run_portal_status_case complete-malformed-reach 3008 '[{"hostname":"reach.test","port":3008,"pid":0}]' file:Reach file:https://REACH.test file:bogus none live none status
-is "an exact complete record retains readable malformed reach behavior" \
+is "observed proxy scope replaces malformed reach without rewriting its record" \
   "$(status_row "$PORTAL_STATUS_ROOT/out.1")|$(cat "$PORTAL_STATUS_ROOT/portal/portless-3008.reach")" \
-  '[["portless",3008,"https://REACH.test","bogus"]]|bogus'
+  '[["portless",3008,"https://REACH.test","local"]]|bogus'
 
 run_portal_status_case complete-unrelated-port 3009 '[{"hostname":"unrelated.test","port":3009,"pid":0}]' file:owned file:https://owned.test file:local none live none status
 is "an unrelated same-port route cannot prove complete ownership" \
@@ -1167,7 +1289,7 @@ is "known URL-only state is adopted from the fixed route rather than tracked fro
 run_portal_status_case leading-zero-dedup 03000 '[{"hostname":"tracked.test","port":3000,"pid":0},{"hostname":"adopted.test","port":3000,"pid":0}]' file:Tracked file:https://tracked.test file:local none live 3000 status
 is "a leading-zero tracked row suppresses numeric adopted duplicates" \
   "$(status_row "$PORTAL_STATUS_ROOT/out.1")|$(jq -c '.tunnels[0] | keys' "$PORTAL_STATUS_ROOT/out.1")" \
-  '[["portless",3000,"https://tracked.test","local"]]|["dns","port","provider","reach","targetHealthy","url"]'
+  '[["portless",3000,"https://tracked.test","local"]]|["aliasName","dns","managed","port","provider","reach","targetHealthy","url"]'
 
 run_portal_status_case malformed-marker 3014 '[{"hostname":"bad.name.test","port":3014,"pid":0}]' file:bad.name file:https://bad.name.test file:local none live none status
 is "a malformed marker stays untracked under known provider state" "$(status_row "$PORTAL_STATUS_ROOT/out.1")|$(wc -l < "$PORTAL_STATUS_ROOT/mutations")" '[]|0'
@@ -1364,13 +1486,14 @@ CASE_ROOT="$DUAL_STATUS" PORTAL_STATE_DIR="$DUAL_STATUS/portal" PORTLESS_STATE_D
   kill() { printf "kill\n" >> "$CASE_ROOT/effects"; return 1; }
   cloudflared_adopt() { :; }; ngrok_adopt() { :; }
   portless_adopt() { printf "3000\thttps://adopted.test\n"; }
+  portless_probe() { return 1; }
   ss() { :; }
   cmd_status > "$CASE_ROOT/public"
   cmd_status internal > "$CASE_ROOT/internal"
 '
 is "public status deduplicates canonical keys while internal status preserves lexical rows" \
   "$(jq -c '[(.tunnels | length), (.tunnels[0] | keys), [.tunnels[] | [.port,.url]]]' "$DUAL_STATUS/public")|$(jq -c '[(.tunnels | length), [.tunnels[]._statePort]]' "$DUAL_STATUS/internal")|$(sha256sum "$DUAL_STATUS/portless/routes.json" | cut -d' ' -f1)|$(wc -l < "$DUAL_STATUS/effects")" \
-  "[1,[\"dns\",\"port\",\"provider\",\"reach\",\"targetHealthy\",\"url\"],[[3000,\"https://one.test\"]]]|[2,[\"03000\",\"3000\"]]|$dual_routes_hash|0"
+  "[1,[\"aliasName\",\"dns\",\"managed\",\"port\",\"provider\",\"reach\",\"targetHealthy\",\"url\"],[[3000,\"https://one.test\"]]]|[2,[\"03000\",\"3000\"]]|$dual_routes_hash|0"
 
 LEXICAL_STOP="$T/portal-lexical-stop"; mkdir -p "$LEXICAL_STOP/portal" "$LEXICAL_STOP/portless"
 printf target > "$LEXICAL_STOP/portal/cloudflared-03000.target"
@@ -1429,7 +1552,7 @@ is "tld_arg still appends localhost" "$(portless_tld_arg)" "test,localhost"
 rm -f "$PORTLESS_STATE_DIR/proxy.tld"
 is "running_tlds defaults to localhost" "$(portless_running_tlds)" "localhost"
 case "$(portless_fix_cmd evict)" in
-  "sudo fuser -k 443/tcp; sleep 1; PORTLESS_STATE_DIR=\"\$HOME/.portless\" portless proxy start -p 443 --tld test,localhost") ok "fix command composes from validated parts" ;;
+  "sudo fuser -k 443/tcp; sleep 1; PORTLESS_LAN=0 PORTLESS_LAN_IP= PORTLESS_STATE_DIR=\"\$HOME/.portless\" portless proxy start -p 443 --tld test,localhost") ok "fix command composes from validated parts" ;;
   *) bad "fix command: $(portless_fix_cmd evict)" ;;
 esac
 printf '[{"port":3000,"hostname":"acme.localhost","pid":0},{"port":5173,"hostname":"dash.test","pid":0},{"port":8,"hostname":"eight.test","pid":0}]' > "$PORTLESS_STATE_DIR/routes.json"
@@ -2256,6 +2379,7 @@ portless_status=$(PORTLESS_STATE_DIR="$PS" PORTAL_STATE_DIR="$PD" EFFECTS="$T/ps
   cloudflared_adopt() { :; }
   ngrok_adopt() { :; }
   portless_adopt() { printf "portless-adopt\n" >> "$EFFECTS"; }
+  portless_probe() { return 1; }
   kill() { printf "kill\n" >> "$EFFECTS"; return 1; }
   proc() { printf "proc\n" >> "$EFFECTS"; return 1; }
   cmd_status
@@ -3153,13 +3277,21 @@ if command -v certutil >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; th
   printf '%s' "$(cat "$U/portless/ca.pem")" > "$U/validated-ca.pem"
   cmp -s "$U/validated-ca.pem" "$U/fd-proof.pem" && ok "and certutil reads the validated CA bytes" || bad "certutil read different CA bytes"
   mkdir -p "$U/rollback/nss" "$U/rollback-bin"
-  printf '#!/bin/sh\ncase " $* " in *" -L "*) exit 1;; *) exit 0;; esac\n' > "$U/rollback-bin/certutil"
+  cat > "$U/rollback-bin/certutil" <<'SH'
+#!/bin/sh
+case " $* " in
+  *" -A "*) : > "$TRUST_ROLLBACK_MARK";;
+  *" -L "*) [ ! -e "$TRUST_ROLLBACK_MARK" ];;
+  *) exit 0;;
+esac
+SH
   chmod 755 "$U/rollback-bin/certutil"
-  PATH="$U/rollback-bin:$PATH" PORTAL_METRICS_DIR="$U/rollback" PORTLESS_STATE_DIR="$U/portless" bash -c '
+  TRUST_ROLLBACK_MARK="$U/rollback/imported" PATH="$U/rollback-bin:$PATH" PORTAL_METRICS_DIR="$U/rollback" PORTLESS_STATE_DIR="$U/portless" bash -c '
     set -- status; source "'"$S"'/portless-setup.sh" >/dev/null 2>&1
     state_remove() { return 1; }
     trust_store "'"$U"'/rollback/nss"
   ' >/dev/null 2>&1
+  [[ -e $U/rollback/imported ]] && ok "rollback fixture reaches certificate import" || bad "rollback fixture failed before import"
   [[ -e $U/rollback/trusted-stores ]] && ok "a failed trust rollback keeps its ownership record" || bad "a failed trust rollback lost its ownership record"
   cp "$U/trusted-stores" "$U/trusted.before-error"; mkdir -p "$U/failbin"
   printf '#!/bin/sh\nexit 1\n' > "$U/failbin/certutil"; chmod 755 "$U/failbin/certutil"

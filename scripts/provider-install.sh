@@ -96,7 +96,7 @@ install_cloudflared() {
   rm -rf -- "$tmp" || die "could not remove the private download directory $tmp"
   trap - EXIT
   jq -nc --arg v "$CLOUDFLARED_VERSION" --arg p "$BIN_DIR/cloudflared" \
-    '{ok:true, version:$v, path:$p, note:"official Cloudflare release, checksum-pinned; prefer sudo pacman -S cloudflared for repo signatures"}'
+    '{ok:true, version:$v, path:$p, note:"official Cloudflare release, checksum-pinned"}'
 }
 
 case "${1:-}" in

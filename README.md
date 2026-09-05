@@ -37,8 +37,9 @@ release from GitHub. Cloudflared and ngrok connect to their own services.
 - Finds every listening TCP port with a couple of `ss` calls and names the
   stack behind it (nearly 50: Next, Vite, Rails, Django, Phoenix, Go,
   Postgres, Redis, ...).
-- Gives a port a local name like `https://acme-web.localhost` through
-  [Portless](https://github.com/vercel-labs/portless). Nothing leaves the machine.
+- Gives a port a local name like `https://acme-web.localhost:1355` through
+  [Portless](https://github.com/vercel-labs/portless). New proxies serve this machine
+  only. Existing LAN routes are labeled "LAN name".
 - Shares a port publicly through Cloudflare or ngrok, and paints anything
   public in your theme's urgent color so you can't forget it's open.
 - Charts latency, connections, CPU and memory per port. Watch a port to keep
@@ -46,8 +47,13 @@ release from GitHub. Cloudflared and ngrok connect to their own services.
 - Pauses, resumes, restarts and stops a dev server. The loud ones ask first.
 - Works entirely from the keyboard. Press `?` in the panel.
 
-Settings live in the panel (`,`). Listing and sharing are also a CLI
-(`scripts/portal`) and an IPC target (`omarchy-shell g3ortega.portal`).
+Provider setup, browser trust, and preferences live in Settings (`,`).
+Local names use an unprivileged proxy on port 1355 by default. Existing proxies
+on port 443 keep their URLs without a port number. Cloudflare sharing does not
+flush system DNS caches or request administrator authentication.
+
+Listing and sharing are also a CLI (`scripts/portal`) and an IPC target
+(`omarchy-shell g3ortega.portal`).
 
 Details, screenshots, settings, CLI, security notes and how to hack on it:
 [docs/guide.md](docs/guide.md).

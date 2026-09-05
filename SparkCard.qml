@@ -4,30 +4,9 @@ import QtQuick
 import qs.Ui
 import qs.Commons
 
-// One metric over time: hero value, sparkline, hover readout. One metric per
-// card, the series in the theme accent, text in text tokens, a recessive
-// baseline as the only grid.
-//
-// The load-bearing rule here is about zero. An area fill claims magnitude
-// measured from a true baseline, so:
-//
-//   the axis includes zero  <=>  the area is drawn
-//
-// A metric whose useful variation lives far from zero (a process's resident
-// memory never approaches it) gets a truncated axis and NO fill — position
-// then encodes relative change only, and the range label declares the band.
-// A metric where zero is a real, common reading (connections, CPU) is always
-// anchored at zero, so "0" draws flat on the baseline where it belongs
-// instead of riding mid-plot under half a card of fill.
-//
-// A series with no shape gets no plot: all-zero reads "idle" in words with
-// the hero number dimmed, constant-but-nonzero says "steady at X".
-//
-// The card is a renderer: the owner hands it an already-strided sample view
-// (≤ a few hundred points) plus exact lo/hi/last computed from the full
-// series, so painting cost is capped regardless of history length and four
-// cards never mean four walks. The crosshair is an overlay item, not a
-// canvas layer — hovering repaints nothing.
+// Fill only zero-anchored plots. A truncated axis shows relative change.
+// The owner supplies strided samples and exact full-series bounds to cap painting cost.
+// The crosshair is an overlay, so hovering does not repaint the canvas.
 Item {
   id: card
 

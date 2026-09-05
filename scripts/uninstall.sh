@@ -199,9 +199,6 @@ remove_known "$PORTAL_STATE_HOME" state 0 \
 if (( DRY )); then
   if [[ $runtime_root == "$state_root" ]]; then
     dry_plan_root "$PORTAL_RUNTIME_DIR" "$runtime_override"
-  elif [[ $runtime_root == "$state_root"/* ]]; then
-    dry_plan_root "$PORTAL_RUNTIME_DIR" "$runtime_override"
-    dry_plan_root "$PORTAL_STATE_HOME" "$metrics_override"
   elif [[ $state_root == "$runtime_root"/* ]]; then
     dry_plan_root "$PORTAL_STATE_HOME" "$metrics_override"
     dry_plan_root "$PORTAL_RUNTIME_DIR" "$runtime_override"

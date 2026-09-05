@@ -139,20 +139,10 @@ Item {
     try { return JSON.parse(text) } catch (e) { return null }
   }
 
-  // Start `scripts/<script>` on `proc` unless it is already running. The
-  // command is assigned here rather than as a binding: pluginDir is set by the
-  // host after the Process objects exist, and an early binding would run
-  // /scripts/... from the filesystem root.
-  // Every helper runs under a hard deadline (timeout signals the whole process
-  // group, so a stuck curl or portless call cannot outlive it) and every
-  // helper's output is bounded by construction: capped fields, capped reads,
-  // one JSON document. The seconds are per process, sized to the slowest
-  // legitimate run of what it carries.
-  // Every helper runs under scripts/lib/proc.py: a byte ceiling on what it
-  // may say and a deadline, past either of which its whole process group is
-  // ended and nothing is passed on (so no document is ever parsed cut short).
-  readonly property var deadlines: ({ scan: 20, poll: 20, action: 330, quick: 15 })
-  readonly property var outputCaps: ({ scan: 67108864, poll: 16777216, action: 1048576, quick: 4194304 })
+  // Assign commands after the host injects pluginDir, or they resolve under /scripts.
+  // proc.py ends the whole group at either limit and discards truncated output.
+  readonly property var deadlines: ({ scan: 20, poll: 20, action: 330, lifecycle: 20, quick: 15 })
+  readonly property var outputCaps: ({ scan: 67108864, poll: 16777216, action: 1048576, lifecycle: 1048576, quick: 4194304 })
   function runScript(proc, script, args, kind) {
     if (!alive || !pluginDir || proc.running) return false
     var k = kind || "quick"
@@ -400,6 +390,8 @@ Item {
       next[t.provider + ":" + t.port] = {
         provider: t.provider, port: t.port, url: t.url, reach: t.reach,
         dns: t.dns,
+        aliasName: String(t.aliasName || ""),
+        managed: t.managed === true ? true : (t.managed === false ? false : null),
         targetHealthy: t.targetHealthy === true ? true : (t.targetHealthy === false ? false : null),
         // The display identity, derived once for every consumer.
         host: String(t.url).replace(/^[a-z]+:\/\//, "").replace(/:\d+$/, "")
@@ -451,7 +443,8 @@ Item {
       root.queuedAction = null
       var started = queued.script === "tunnels"
         ? root.runTunnels(actionProcess, queued.args, "action")
-        : root.runScript(actionProcess, queued.script, queued.args, "quick")
+        : root.runScript(actionProcess, queued.script, queued.args,
+                         queued.script === "lifecycle.sh" ? "lifecycle" : "quick")
       if (!started) {
         root.activeAction = null
         root.actionMoment("still working — try again in a moment")
@@ -654,6 +647,8 @@ Item {
         // carrying a command arrives as a copy card instead of plain text.
         if (parsed.copy) root.actionCopy(String(parsed.hint), String(parsed.copy))
         else root.actionHint(String(parsed.hint))
+      } else if (action && action.key.slice(-6) === ":setup") {
+        root.actionMoment("Setup complete.")
       }
       if (action && action.lifecycle) restartDelay.restart()
       root.refreshTunnels()

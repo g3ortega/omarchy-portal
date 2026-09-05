@@ -79,7 +79,7 @@ case "${1:-}" in
     f="$METRICS_DIR/$2.jsonl"
     # A line torn by a crash mid-append must not cost the rest of the file.
     raw=$(cat_own "$f" "$MAX_BYTES")
-    jq -R 'fromjson?' <<<"$raw" | jq -sc '{ok:true, samples: .}' || echo '{"ok":true,"samples":[]}'
+    jq -Rnc '{ok:true, samples:[inputs | fromjson?]}' <<<"$raw" || echo '{"ok":true,"samples":[]}'
     ;;
   *) echo '{"ok":false,"error":"usage: metrics.sh watched|watch <port>|unwatch <port>|append-batch <json-map>|read <port>"}' ;;
 esac

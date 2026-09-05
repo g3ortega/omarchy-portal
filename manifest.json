@@ -43,7 +43,7 @@
         "type": "string",
         "label": "Portless TLD",
         "defaultValue": "localhost",
-        "description": "TLD for local names. 'localhost' resolves in every browser with zero setup; any other TLD needs a one-time resolver rule, which Portal hands you as a command."
+        "description": "Suffix for local names. The default localhost needs no resolver changes. Other suffixes need a resolver rule and proxy restart; Settings shows the required commands."
       },
       {
         "key": "portlessAutoName",

@@ -34,10 +34,14 @@ else
 fi
 
 step "detection unit tests"
-node "$HERE/detect.test.mjs" || fails=$((fails+1))
+for f in "$HERE"/*.test.mjs; do
+  node "$f" || fails=$((fails+1))
+done
 
 step "shell library unit tests"
-"$HERE/scripts.test.sh" || fails=$((fails+1))
+for f in "$HERE"/*.test.sh; do
+  bash "$f" || fails=$((fails+1))
+done
 
 step "port scan produces valid JSON"
 if "$S/scan-ports.sh" | jq -e '.version == 1 and (.ports | type == "array")' >/dev/null; then

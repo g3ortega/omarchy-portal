@@ -53,10 +53,43 @@ target() {  # <pid> <start> <port>: validated, the process the scan listed, and 
   proc check "$1" "$2" || die "pid $1 exited while its port ownership was checked"
 }
 
-cancel_restart() {  # <pid> <start> <pidfile> <exit status>
-  trap - TERM INT HUP
-  rollback_replacement "$1" "$2" "$3" || true
-  exit "$4"
+read_restart_identity() {  # <pidfile>: 0 valid, 1 absent, 2 refused or malformed
+  local name=$1 dump rc result
+  # Match tunnels.sh's runtime entry cap; dump counts all leaves before filtering.
+  dump=$(state dump "$PORTAL_RUNTIME_DIR" 128 4096 "$name" 2>/dev/null)
+  rc=$?
+  case $rc in 129|130|143) return "$rc" ;; 0) ;; *) return 2 ;; esac
+  result=$(jq -r --arg name "$name" '
+    if ((.refused // []) | index($name)) != null then "refused"
+    elif ((.files // {}) | has($name) | not) then "absent"
+    else .files[$name] as $value
+      | if ($value | type) == "string"
+          and (($value | contains("\u0000") or contains("\r") or contains("\n")) | not)
+          and ($value | test("^(?:[2-9]|[1-9][0-9]{1,9}) [1-9][0-9]{0,19}$"))
+          and (($value | split(" ")[0] | tonumber) <= 2147483647)
+        then "valid\t" + $value
+        else "invalid"
+        end
+    end
+  ' <<<"$dump" 2>/dev/null)
+  rc=$?
+  case $rc in 129|130|143) return "$rc" ;; 0) ;; *) return 2 ;; esac
+  case $result in
+    valid$'\t'*) printf '%s' "${result#*$'\t'}" ;;
+    absent) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+cancel_restart() {  # <pidfile> <exit status>
+  local identity rc pid start
+  trap '' TERM INT HUP
+  identity=$(read_restart_identity "$1"); rc=$?
+  if (( rc == 0 )); then
+    read -r pid start <<<"$identity"
+    rollback_replacement "$pid" "$start" "$1" || true
+  fi
+  exit "$2"
 }
 group_alive() { (( ${1:-0} > 1 )) && kill -0 -- "-$1" 2>/dev/null; }   # <pid>: its process group still has members
 rollback_replacement() {  # <pid> <start> <pidfile>: keep identity if stop cannot be proven
@@ -68,7 +101,7 @@ rollback_replacement() {  # <pid> <start> <pidfile>: keep identity if stop canno
   state_remove "$PORTAL_RUNTIME_DIR" "$3" >/dev/null 2>&1
 }
 fail_restart() {  # <pid> <start> <pidfile> <reason>: a replacement that cannot serve is never left half-owned
-  trap - TERM INT HUP
+  trap '' TERM INT HUP
   rollback_replacement "$1" "$2" "$3" \
     || die_effect "$4; the replacement could not be closed out, so its identity record was kept" stopped
   die_effect "$4" stopped
@@ -133,7 +166,10 @@ case "${1:-}" in
     (( busy_rc == 0 )) && die_effect "port $port did not free up" stopped
 
     restart_pid=".restart-$port.pid"
-    relaunched=$(
+    trap 'cancel_restart "$restart_pid" 143' TERM
+    trap 'cancel_restart "$restart_pid" 130' INT
+    trap 'cancel_restart "$restart_pid" 129' HUP
+    (
       if (( ${#envs[@]} > 0 )); then
         for v in $(compgen -e); do unset "$v"; done
         for kv in "${envs[@]}"; do [[ $kv =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && export "$kv"; done
@@ -141,14 +177,30 @@ case "${1:-}" in
       # Discarded output: nothing reads a restart's log, and unlinking one that
       # the replacement still holds would park a growing inode nowhere.
       cd "$cwd" && state launch-tracked "$PORTAL_RUNTIME_DIR" --discard-output "$restart_pid" \
-        --exec "$exec_path" -- "${argv[@]}"
-    ) || die_effect "could not launch the replacement process" stopped
-    read -r new_pid new_start <<<"$relaunched"
-    [[ $new_pid =~ ^[1-9][0-9]*$ && $new_start =~ ^[1-9][0-9]*$ ]] && (( new_pid > 1 )) \
-      || die_effect "the replacement process returned an invalid identity" stopped
-    trap 'cancel_restart "$new_pid" "$new_start" "$restart_pid" 143' TERM
-    trap 'cancel_restart "$new_pid" "$new_start" "$restart_pid" 130' INT
-    trap 'cancel_restart "$new_pid" "$new_start" "$restart_pid" 129' HUP
+        --exec "$exec_path" -- "${argv[@]}" >/dev/null
+    )
+    launch_rc=$?
+    case $launch_rc in 129|130|143) cancel_restart "$restart_pid" "$launch_rc" ;; esac
+    if (( launch_rc != 0 )); then
+      identity=$(read_restart_identity "$restart_pid"); identity_rc=$?
+      case $identity_rc in
+        0)
+          read -r new_pid new_start <<<"$identity"
+          rollback_replacement "$new_pid" "$new_start" "$restart_pid" \
+            || die_effect "could not launch the replacement process; its identity record was kept" stopped
+          ;;
+        2) die_effect "could not launch the replacement process; its unreadable identity record was kept" stopped ;;
+        129|130|143) cancel_restart "$restart_pid" "$identity_rc" ;;
+      esac
+      die_effect "could not launch the replacement process" stopped
+    fi
+    identity=$(read_restart_identity "$restart_pid"); identity_rc=$?
+    case $identity_rc in
+      0) read -r new_pid new_start <<<"$identity" ;;
+      1) die_effect "the replacement process left no identity record" stopped ;;
+      2) die_effect "the replacement process left an invalid identity record; it was kept" stopped ;;
+      129|130|143) cancel_restart "$restart_pid" "$identity_rc" ;;
+    esac
     # Report success only once the port is serving again; the relaunch is
     # detached, so give it a moment. An exec that failed leaves the port free.
     for ((i = 0; i < 50; i++)); do
@@ -167,7 +219,9 @@ case "${1:-}" in
       [[ $(ps -o sid= -p "$lpid" 2>/dev/null | tr -d ' ') == "$new_pid" ]] && { restart_ok=1; break; }
     done
     [[ -n $restart_ok ]] || fail_restart "$new_pid" "$new_start" "$restart_pid" "port $port is held by another process after restart"
-    state_remove "$PORTAL_RUNTIME_DIR" "$restart_pid" \
+    state_remove "$PORTAL_RUNTIME_DIR" "$restart_pid"; remove_rc=$?
+    case $remove_rc in 129|130|143) cancel_restart "$restart_pid" "$remove_rc" ;; esac
+    (( remove_rc == 0 )) \
       || die_effect "restart succeeded, but its temporary identity could not be cleared" restarted
     trap - TERM INT HUP
     echo '{"ok":true,"effect":"restarted"}'

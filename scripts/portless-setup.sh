@@ -11,7 +11,7 @@
 #   installed      portless on PATH (the npm install is a copyable command;
 #                  the plugin never runs a package manager)
 #   ca             the user's own CA exists (minted by portless on first run)
-#   proxy          serving on 443/80 with THIS user's routes (sudo — copy only)
+#   proxy          serving this user's routes on any port
 #   trust_system   CA in the system store (portless trusts it during the
 #                  elevated proxy start; reported, not forced)
 #   trust_nss      CA in ~/.pki/nssdb — Chrome/Chromium/Brave read this,
@@ -93,6 +93,12 @@ trust_store() {  # <nss dir>
   local pem="$PORTAL_STATE_HOME/ca-import.pem" pemfd rc fp bound_fp rec="" cert_state
   fp=$(printf '%s' "$CA_PEM" | ca_fingerprint)
   [[ -n $fp ]] || return 1
+  cert_state=$(store_cert_state "$1" "$fp")
+  case $cert_state in
+    absent) ;;
+    matches) store_ca_trusted "$1" "$fp"; return $? ;;
+    *) return 1 ;;
+  esac
   # A ledger that exists but cannot be read is not an empty one: importing
   # over it would replace every earlier record with this one entry.
   if [[ -e $TRUSTED || -L $TRUSTED ]]; then
@@ -111,8 +117,9 @@ trust_store() {  # <nss dir>
   certutil -d "sql:$1" -A -t "C,," -n "$NICK" -i "/proc/self/fd/$pemfd" >/dev/null 2>&1; rc=$?
   exec {pemfd}<&-
   state_remove "$PORTAL_STATE_HOME" ca-import.pem || rc=1
-  (( rc == 0 )) && return 0
-  certutil -d "sql:$1" -D -n "$NICK" >/dev/null 2>&1
+  (( rc == 0 )) && store_ca_trusted "$1" "$fp" && return 0
+  [[ $(store_cert_state "$1" "$fp") != matches ]] \
+    || certutil -d "sql:$1" -D -n "$NICK" >/dev/null 2>&1
   cert_state=$(store_cert_state "$1" "$fp")
   case $cert_state in absent|different) drop_trust_record "$1" || true ;; esac
   return 1
@@ -147,30 +154,40 @@ store_cert_state() {  # <nss dir> <expected fingerprint>: absent|matches|differe
   [[ $fp == "$2" ]] && echo matches || echo different
 }
 
-proxy_state() {  # echoes: ok | wrong-tld | odd-port | foreign | off
+store_ca_trusted() {  # <nss dir> <current CA fingerprint>
+  [[ -n $2 && $(store_cert_state "$1" "$2") == matches ]] || return 1
+  certutil -d "sql:$1" -L 2>/dev/null | awk -v nick="$NICK" '
+    { name = $0; sub(/[[:space:]]+$/, "", name)
+      sub(/[[:space:]]+[^[:space:]]+$/, "", name)
+      split($NF, trust, ",")
+      if (name == nick && trust[1] ~ /C/) found = 1 }
+    END { exit !found }'
+}
+
+proxy_state() {  # echoes: ok | wrong-tld | foreign | off | lan | unknown
+  local scope; scope=$(portless_proxy_scope)
+  [[ $scope == local ]] || { echo "$scope"; return; }
   if ! portless_probe; then echo off; return; fi
   if ! portless_serving_routes; then echo foreign; return; fi
-  portless_clean_port || { echo odd-port; return; }
   # A proxy serves the TLD set it was started with; a newly configured suffix
-  # is dead until a restart adds it, and the panel's strip already says so.
+  # is dead until a restart adds it, and Settings already says so.
   portless_serves_tld "$(configured_tld)" || { echo wrong-tld; return; }
   echo ok
 }
 
 nss_trusted() {
-  have certutil && [[ -d $NSSDB ]] \
-    && certutil -d "sql:$NSSDB" -L 2>/dev/null | grep -q "$NICK"
+  store_ca_trusted "$NSSDB" "$(ca_fingerprint <<<"$CA_PEM")"
 }
 
 firefox_untrusted() {
-  have certutil || return 0
+  local fp; fp=$(ca_fingerprint <<<"$CA_PEM")
   firefox_profiles | while read -r d; do
-    certutil -d "sql:$d" -L 2>/dev/null | grep -q "$NICK" || printf '%s\n' "$d"
+    store_ca_trusted "$d" "$fp" || printf '%s\n' "$d"
   done
 }
 
 report() {
-  local installed ca proxy nss ff_missing tldok remaining=()
+  local installed ca proxy nss ff_missing tldok repair="" remaining=()
   # Installed means runnable by Portal: on PATH and a trusted executable.
   resolve_bin portless >/dev/null 2>&1 && installed=true || installed=false
   [[ -n $CA_PEM ]] && ca=true || ca=false
@@ -187,11 +204,22 @@ report() {
     fi
   fi
   if [[ $proxy == wrong-tld ]]; then
-    remaining+=("restart the portless proxy so it serves .$(configured_tld) too"$'\x1f'"$(portless_fix_cmd)")
-  elif [[ $proxy != ok ]]; then
-    remaining+=("Start the portless proxy on 443 · one sudo command"$'\x1f'"$(portless_fix_cmd "$([[ $proxy == foreign ]] && echo evict)")")
+    portless_probe && repair=$(portless_fix_cmd "" "$PROBE_PORT")
+    remaining+=("restart the portless proxy so it serves .$(configured_tld) too${repair:+$'\x1f'$repair}")
+  elif [[ $proxy == foreign ]]; then
+    remaining+=("restart the proxy with your routes"$'\x1f'"$(portless_fix_cmd evict)")
+  elif [[ $proxy == off ]]; then
+    remaining+=("Start local names in Portal settings")
+  elif [[ $proxy == lan ]]; then
+    portless_probe && repair=$(portless_fix_cmd "" "$PROBE_PORT")
+    remaining+=("The proxy listens beyond this device; restart it for local-only names${repair:+$'\x1f'$repair}")
+  elif [[ $proxy == unknown ]]; then
+    remaining+=("Could not verify the proxy listener; local-only naming is unavailable")
   fi
   $ca || remaining+=("CA appears after the first proxy start")
+  have certutil || remaining+=("Install certutil to trust the Portless CA in browsers")
+  $nss || remaining+=("Chrome/Chromium has not trusted the current Portless CA")
+  (( ff_missing == 0 )) || remaining+=("$ff_missing Firefox profiles have not trusted the current Portless CA")
   $tldok || remaining+=("wildcard-resolve .$(configured_tld) once (root, replaces per-name hosts syncs)"$'\x1f'"$(tld_fix_cmd)")
 
   jq -nc --argjson installed "$installed" --argjson ca "$ca" --arg proxy "$proxy" \
@@ -210,20 +238,21 @@ case "${1:-status}" in
     ;;
   run)
     portless_state_load || die "could not read Portless state safely: ${PORTLESS_STATE_ERROR:-unknown error}"
-    # A proxy missing the configured TLD is restarted only when that is
-    # unprivileged (ours, on a high port); the 443 case stays in `remaining`
-    # as a copyable command.
-    PORTLESS=$(resolve_bin portless)
-    if [[ -n $PORTLESS ]] && [[ $(proxy_state) == wrong-tld ]]; then
-      portless_clean_port || "$PORTLESS" proxy stop >/dev/null 2>&1 \
-        || die "could not stop the Portless proxy before restarting it"
-      portless_probe_reset
+    portless_probe || :
+    if [[ $(portless_proxy_scope) != local ]]; then
+      die "the proxy is not verified as local-only; repair its listener before setup"
     fi
+    PORTLESS=$(resolve_bin portless)
+    # Even a high-port proxy can belong to root. Portless may elevate to stop
+    # it, so existing proxies require an explicit repair command.
     # Proxy-start is an unprivileged rung like any other: when portless is
     # installed and nothing answers, start a high-port proxy so names work
-    # immediately; the report keeps carrying the 443 upgrade.
+    # immediately.
     if [[ -n $PORTLESS ]] && [[ $(proxy_state) == off ]]; then
-      "$PORTLESS" proxy start -p "${PORTAL_PORTLESS_PORT:-1355}" \
+      proxy_port=$(canonical_port "${PORTAL_PORTLESS_PORT:-1355}") \
+        || die "invalid Portless proxy port"
+      (( proxy_port >= 1024 )) || die "automatic setup requires a Portless proxy port of 1024 or higher"
+      PORTLESS_LAN=0 PORTLESS_LAN_IP= "$PORTLESS" proxy start -p "$proxy_port" --skip-trust \
         --tld "$(portless_tld_arg)" >/dev/null 2>&1 \
         || die "could not start the Portless proxy"
       sleep 1
@@ -232,15 +261,19 @@ case "${1:-status}" in
       ca_load   # the proxy just wrote its port and minted the CA
       [[ $(proxy_state) != off ]] || die "Portless reported success but its proxy is not reachable"
     fi
+    portless_probe || :
+    if [[ $(portless_proxy_scope) != local ]]; then
+      die "the proxy is not verified as local-only; browser trust was not changed"
+    fi
     if ca_is_portless && have certutil; then
       if [[ ! -d $NSSDB ]]; then
         own_dir "$NSSDB" || die "could not create the browser trust store"
         certutil -d "sql:$NSSDB" -N --empty-password >/dev/null 2>&1 \
           || die "could not initialize the browser trust store"
       fi
-      nss_trusted || trust_store "$NSSDB" || die "could not trust the Portless CA in $NSSDB"
+      nss_trusted || trust_store "$NSSDB" || die "could not trust the Portless CA in $NSSDB; check for an existing certificate or an inaccessible store"
       while read -r d; do
-        trust_store "$d" || die "could not trust the Portless CA in $d"
+        trust_store "$d" || die "could not trust the Portless CA in $d; check for an existing certificate or an inaccessible store"
       done < <(firefox_untrusted)
     fi
     report

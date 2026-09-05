@@ -34,6 +34,9 @@ A server started through mise, nvm, or a shell hook uses the same launcher.
 Signals only go to processes you own. Stop, pause, and restart ask first and
 name the process. Resume never asks.
 
+Press `s` to share the selected port or stop its existing public share.
+Stopping a share still works when its server is no longer listening.
+
 When `ss` attributes a prefork listener to multiple PIDs, Portal still lists
 the port. It hides pause, restart, stop, and starting a new public share because
 it cannot bind those actions to one process.
@@ -54,15 +57,21 @@ inventing a shape. Hovering any card reads all four out at that instant.
 
 <img src="images/naming.png" width="480" alt="Renaming a port">
 
-Name a port and it becomes `https://acme-web.localhost` through Portless. The
+Name a port and it becomes `https://acme-web.localhost:1355` through Portless. The
 name is the row's title, and it is what opens and what copies. In the name
 editor, Enter on an empty field removes the name.
 
-Portless needs its proxy on port 443 (or 80) for clean names, and it self-elevates
-through sudo to bind it. An elevated proxy defaults to root's state directory
-and silently 404s your routes. The fix Portal hands you pins
-`PORTLESS_STATE_DIR` to your home, which portless forwards through its own
-sudo. Portal never runs sudo for you. It shows the command and you paste it.
+Set up local names in Settings. Portal starts an unprivileged proxy on port
+1355 and can trust its CA in your browser stores after confirmation. It does
+not change system certificate trust or invoke sudo. If a working proxy already
+uses port 443 or 80, Portal keeps it and uses URLs without a port number.
+New proxies serve this machine only. Existing proxies configured for LAN
+access stay reachable on the LAN, and their rows show "LAN name".
+
+Custom domains need resolver configuration. Settings shows the required
+command before you copy it. Copy guidance stays visible until dismissed.
+Repairing an existing proxy can also need a terminal command.
+Portal leaves running proxies alone, including those owned by root.
 
 ## Sharing
 
@@ -72,15 +81,13 @@ sudo. Portal never runs sudo for you. It shows the command and you paste it.
 |---|---|---|---|
 | Cloudflare | public | `https://<words>.trycloudflare.com` | nothing; a confirmed click installs a checksum-pinned release |
 | ngrok | public | `https://<id>.ngrok-free.app`, or your reserved domain | `ngrok` and an authtoken |
-| Portless | this machine | `https://<name>.localhost` | `portless`, proxy on 443 |
+| Portless | this machine by default; existing LAN routes keep their reach | `https://<name>.localhost:1355` by default | `portless`; setup in Settings |
 
 Providers are detected, not assumed. Each shows ready, needs setup (with a
 fix where one exists), or not installed. Sharing asks first, in place, naming the
 port and the provider, and a desktop notification confirms every new public
-URL, whether the panel or IPC asked for it. A fix that puts something
-on the machine asks too: installing cloudflared names the release and the
-directory; setting up local names says it will trust your Portless CA in
-Chrome and Firefox and start the proxy. Anything reachable from
+URL, whether the panel or IPC asked for it. An unavailable provider opens Settings. Installation and browser trust ask
+for confirmation there, independently of the selected port. Anything reachable from
 the internet is drawn in the theme's urgent color in the row, in the panel,
 and on the bar.
 
@@ -88,7 +95,8 @@ A new public hostname is held back until its DNS record is live, checked
 through a resolver outside your system's path so the check itself cannot
 poison your resolver's cache. If it is still not resolvable after that, the
 row shows the URL dimmed with "waiting for dns…" and turns into a link on the
-poll it resolves.
+poll it resolves. Portal never flushes system DNS caches automatically.
+A cached negative result clears when its DNS TTL expires.
 
 When the approved process closes its port, the tunnel remains for ten minutes
 in case that same process reopens it. The row reads "shared while nothing
@@ -104,9 +112,13 @@ in the shell's environment if yours uses another `web_addr`.
 
 <img src="images/settings.png" width="480" alt="Settings page">
 
-The gear (or `,`) opens every setting in place. They persist to shell.json
-through the shell's own API, so `omarchy bar set g3ortega.portal <key> <value>`
-works too.
+The gear (or `,`) opens provider setup followed by preferences. Use `j`/`k`
+to move through both sections. Enter activates setup or changes a preference;
+`h`/`l` changes preference values. Escape cancels a setup confirmation before
+returning to the list. Settings scrolls to keep the selected control visible.
+
+Preferences persist to shell.json through the shell's API, so
+`omarchy bar set g3ortega.portal <key> <value>` works too.
 
 | Key | In the panel | Default | |
 |---|---|---|---|
@@ -149,7 +161,8 @@ scripts/portal providers             # provider readiness
 scripts/portal expose cloudflared 3000
 scripts/portal stop cloudflared 3000
 scripts/portal stop-all              # every share and name
-scripts/portal setup                 # audit and fix the local-names ladder
+scripts/portal setup                 # set up local names and browser trust
+scripts/portal setup --status        # inspect setup without changing it
 scripts/portal refresh               # ask the running shell to rescan
 scripts/portal doctor                # dependency and install check
 scripts/portal test                  # the full non-live gate
@@ -171,9 +184,9 @@ omarchy-shell g3ortega.portal unexpose cloudflared 3000
 missing (Portal never runs a package manager), imports your own
 Portless CA (`~/.portless/ca.pem`, checked to be Portless's self-signed root,
 nothing else) into Chrome, Chromium, Brave and every Firefox profile (needs
-`certutil`), and starts an unprivileged proxy if none is running. The one
-privileged step, the proxy on 443 pinned to your state, comes back as a
-command to paste.
+`certutil`), and starts an unprivileged proxy on port 1355 if none is running.
+Use `portal setup --status` to inspect readiness without importing certificates
+or starting a proxy. Port 443 is optional.
 
 The Cloudflared installer fetches one pinned Cloudflare release from GitHub
 into `~/.local/bin`. It verifies the SHA-256 digest and the ELF header before
@@ -221,6 +234,8 @@ in the installed clone, merges with `--ff-only`, and checks parity again.
 test/test.sh                 # syntax, manifest, Node and shell suites, qmllint, glyphs
 node test/detect.test.mjs    # detection, formatting, panel rules, chart and settings contracts
 test/scripts.test.sh         # the shell libraries and validators, against throwaway state
+node test/settings.test.mjs # Settings navigation, setup consent, and routing
+bash test/portless-setup.test.sh # unprivileged setup and DNS retry behavior
 test/check-glyphs.sh         # every icon resolves to the intended glyph name
 test/e2e-live.sh             # 19 listener fixtures, plus Ruby and Deno when available
 ```

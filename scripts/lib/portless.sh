@@ -139,6 +139,57 @@ routes_json() { portless_file routes.json; }
 PROBE_PORT=""
 PROBE_SCHEME=""
 portless_probe_reset() { PROBE_PORT=""; PROBE_SCHEME=""; }
+portless_listener_scope() {  # <proxy port> [socket snapshot]: local|lan|unknown
+  local port sockets
+  port=$(canonical_port "$1") || { echo unknown; return; }
+  if (( $# > 1 )); then sockets=$2
+  else sockets=$(ss -tlnH "sport = :$port" 2>/dev/null) || { echo unknown; return; }
+  fi
+  printf '%s' "$sockets" | /usr/bin/python3 -I -S -c '
+import ipaddress, sys
+found = lan = malformed = False
+for row in sys.stdin:
+    fields = row.split()
+    if len(fields) < 5:
+        malformed = True
+        continue
+    host, separator, port = fields[3].rpartition(":")
+    if not separator or not port.isdecimal():
+        malformed = True
+        continue
+    if int(port) != int(sys.argv[1]):
+        continue
+    found = True
+    if host == "*":
+        lan = True
+        continue
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+        address = getattr(address, "ipv4_mapped", None) or address
+        lan |= not address.is_loopback
+    except ValueError:
+        malformed = True
+print("lan" if lan else "local" if found and not malformed else "unknown")
+' "$port" || echo unknown
+}
+portless_proxy_scope() {  # [socket snapshot]: local|lan|unknown, including an unresponsive proxy
+  local sockets recorded candidates=" 443 80 1355 " endpoint port
+  if (( $# )); then sockets=$1
+  else sockets=$(ss -tlnH 2>/dev/null) || { echo unknown; return; }
+  fi
+  if portless_probe; then
+    portless_listener_scope "$PROBE_PORT" "$sockets"
+    return
+  fi
+  recorded=$(canonical_port "$(portless_file proxy.port | head -n 1)") && candidates+="$recorded "
+  while read -r _ _ _ endpoint _; do
+    [[ -n $endpoint ]] || { [[ -z $sockets ]] && break; echo unknown; return; }
+    port=${endpoint##*:}
+    [[ $port =~ ^[0-9]+$ ]] || { echo unknown; return; }
+    [[ $candidates != *" $port "* ]] || { echo unknown; return; }
+  done <<<"$sockets"
+  echo local
+}
 portless_probe() {
   [[ -n $PROBE_PORT ]] && return 0
   local cand p seen=" "
@@ -197,10 +248,36 @@ configured_tld() {
 
 # The bare name portless holds for a port, if any.
 portless_route_name() {  # <port>
-  local n port
+  local n port tld suffix=""
   port=$(canonical_port "${1:-}") || return 1
   n=$(routes_json | jq -r --argjson p "$port" 'first(.[] | select(.port == $p) | .hostname) // empty' 2>/dev/null) || return 1
-  printf '%s' "${n%%.*}"
+  [[ -n $n ]] || return 0
+  while read -r tld || [[ -n $tld ]]; do
+    [[ $n == *".$tld" && ${#tld} -gt ${#suffix} ]] && suffix=$tld
+  done < <(portless_tld_arg | tr ',' '\n')
+  [[ -n $suffix ]] || return 1
+  printf '%s' "${n%.$suffix}"
+}
+
+portless_alias_routes() {  # <name>: every matching hostname under the configured suffixes
+  local name=${1,,} tlds
+  valid_tld "$name" || return 1
+  tlds=$(portless_tld_arg) || return 1
+  routes_json | jq -c --arg n "$name" --arg tlds "$tlds" \
+    '[.[] | select(.hostname as $h | any($tlds | split(",")[]; $h == ($n + "." + .)))]'
+}
+
+portless_alias_safe() {  # <name> <port>: unclaimed or static aliases for this port only
+  local routes port
+  port=$(canonical_port "$2") || return 1
+  routes=$(portless_alias_routes "$1") || return 1
+  jq -e --argjson p "$port" 'all(.[]; .pid == 0 and .port == $p)' <<<"$routes" >/dev/null
+}
+
+portless_managed_port() {  # <port>
+  local port
+  port=$(canonical_port "$1") || return 1
+  routes_json | jq -e --argjson p "$port" 'any(.[]; .port == $p and .pid != 0)' >/dev/null
 }
 
 # The URL portless serves for an already-assembled hostname. Scheme and port
@@ -253,17 +330,19 @@ portless_running_tlds() {
   done
 }
 
-# The command that reaches the end state: portless on 443, serving THIS user's
-# routes. portless hard-checks uid before binding a port under 1024 and
+# Explicit proxy repair preserves the current port when provided. Portless
+# hard-checks uid before binding a port under 1024 and
 # self-elevates through `sudo env`, forwarding every PORTLESS_* variable;
 # PORTLESS_STATE_DIR overrides state resolution outright. `sudo portless` is
 # never used: version-managed installs are not on root's PATH; eviction goes
 # through fuser by port number.
-portless_fix_cmd() {  # $1 = "evict" when another proxy owns the port
-  local stop="portless proxy stop"
+portless_fix_cmd() {  # [evict] [port]
+  local stop="portless proxy stop" port skip_trust=""
+  port=$(canonical_port "${2:-443}") || return 1
+  (( port >= 1024 )) && skip_trust=" --skip-trust"
   [[ ${1:-} == evict ]] && stop="sudo fuser -k 443/tcp; sleep 1"
-  printf '%s; PORTLESS_STATE_DIR="$HOME/.portless" portless proxy start -p 443 --tld %s' \
-    "$stop" "$(portless_tld_arg)"
+  printf '%s; PORTLESS_LAN=0 PORTLESS_LAN_IP= PORTLESS_STATE_DIR="$HOME/.portless" portless proxy start -p %s%s --tld %s' \
+    "$stop" "$port" "$skip_trust" "$(portless_tld_arg)"
 }
 
 # Wildcard resolution for the configured TLD. .localhost needs nothing —

@@ -1,20 +1,14 @@
 #!/bin/bash
 # Detect available exposure providers, and start/stop them for a given port.
 #
-# Two different things live here, and the UI must not conflate them:
-#
 #   reach=public  the port becomes reachable from the internet  (cloudflared, ngrok)
-#   reach=local   the port gets a nicer name on this machine only (portless)
-#
-# portless is a local reverse proxy that maps a port to a stable
-# <name>.localhost URL. It does NOT publish anything. Labelling it as a tunnel
-# would be a security lie, so it reports reach=local and the panel groups it
-# separately.
+#   reach=local   Portless names served by a loopback proxy, or currently offline
+#   reach=lan     an existing Portless proxy listens beyond loopback
 #
 # Provider knowledge lives in exactly two places: the PROVIDERS roster below,
 # and one <name>_* function block per provider. reach is decided once, by
-# provider_reach, and persisted next to each share's URL so status never has to
-# re-derive it. Adding a provider = one roster line + one function block.
+# provider_reach. Portless runtime rows use the observed proxy listener scope.
+# Adding a provider = one roster line + one function block.
 #
 # The function block's slots, all optional except _status:
 #   _status         readiness rung  ->  "state|detail|fix"
@@ -64,7 +58,6 @@ MAX_ROWS=512      # past this many tunnels, status reports an error, not a growi
 STATE_FILES_CAP=$((MAX_ROWS * (${#SHARE_FILES[@]} + 1)))
 
 die() { jq -nc --arg e "$1" '{ok:false,error:$e}'; exit 0; }
-json_str() { jq -Rn --arg v "$1" '$v'; }
 ok_json() { jq -nc --arg h "${1:-}" --arg c "${2:-}" '{ok:true} + (if $h == "" then {} else {hint:$h} end) + (if $c == "" then {} else {copy:$c} end)'; }
 have() { command -v "$1" >/dev/null 2>&1; }
 url_host() { local h=${1#*://}; h=${h%%/*}; printf '%s' "${h%%:*}"; }
@@ -179,14 +172,11 @@ augment_path() {
     "$HOME/go/bin"
     /usr/local/bin
   )
-  local d concrete=()
+  local d
   for d in "$HOME"/.local/share/mise/installs/node/*/bin \
            "$HOME"/.local/share/mise/installs/bun/*/bin \
            "$HOME"/.nvm/versions/node/*/bin; do
-    [[ -d $d ]] && concrete+=("$d")
-  done
-  for d in "${concrete[@]}"; do
-    [[ ":$PATH:" != *":$d:"* ]] && PATH="$d:$PATH"
+    [[ -d $d && ":$PATH:" != *":$d:"* ]] && PATH="$d:$PATH"
   done
   extra+=("$HOME/.local/share/mise/shims")
   for d in "${extra[@]}"; do
@@ -198,10 +188,10 @@ augment_path() {
 # ---- per-provider blocks ------------------------------------------------------
 
 cloudflared_status() {
-  provider_bin cloudflared >/dev/null || { printf 'setup|Not installed — click installs the official build (or: sudo pacman -S cloudflared for repo signatures)|'; return; }
+  provider_bin cloudflared >/dev/null || { printf 'setup|Not installed — set up to install the official build|'; return; }
   printf 'ready|Quick tunnel, no account needed|'
 }
-cloudflared_argv() { printf '%s\n' tunnel --no-autoupdate --url "http://localhost:$1"; }
+cloudflared_argv() { printf '%s\n' tunnel --config /dev/null --no-autoupdate --url "http://localhost:$1"; }
 cloudflared_setup_clause() { printf 'a checksum-pinned release, into ~/.local/bin'; }
 # pid<TAB>port for every cloudflared serving a local port, from its own argv.
 # Both the adopter and the stopper read this, so they cannot disagree about
@@ -225,20 +215,50 @@ cloudflared_url_from_log() { cat_own "$1" "$LOG_CAP" | grep -m1 -oE 'https://[a-
 
 NGROK_API_PORT="${NGROK_API_PORT:-4040}"
 ngrok_status() {
-  local ng; ng=$(provider_bin ngrok) || { printf 'missing|Install with: yay -S ngrok|'; return; }
+  local ng; ng=$(provider_bin ngrok) || { printf 'missing|Not installed|yay -S ngrok'; return; }
   if "$ng" config check >/dev/null 2>&1; then
-    printf 'ready|Authenticated|'
+    printf 'ready|Configuration valid; account required|'
   else
-    printf 'setup|Run: ngrok config add-authtoken <token>|'
+    printf 'setup|Configuration needs attention|ngrok config check'
   fi
 }
 ngrok_argv() { printf '%s\n' http "$1" --log stdout --log-format json; }
 # The agent's local API. One home for the endpoint, its port, and its timeout.
 # Every curl in this file starts with -q: a ~/.curlrc must not be able to add
 # redirects, proxies or output files to the request.
+ngrok_api_owner() {
+  local port identity pid start bin exe
+  port=$(canonical_port "$NGROK_API_PORT") || return 1
+  bin=$(provider_bin ngrok) || return 1
+  identity=$(listener_identity "$port") || return 1
+  read -r pid start <<<"$identity"
+  [[ $(stat -c %u -- "/proc/$pid" 2>/dev/null) == "$UID" ]] || return 1
+  exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+  [[ ${exe% (deleted)} == "$bin" ]] || return 1
+  proc check "$pid" "$start" >/dev/null 2>&1 || return 1
+  printf '%s' "$identity"
+}
+ngrok_api_request() {  # <method> <path> <timeout> [expected owner]
+  local owner port
+  owner=$(ngrok_api_owner) || return 1
+  [[ -z ${4:-} || $owner == "$4" ]] || return 1
+  port=$(canonical_port "$NGROK_API_PORT") || return 1
+  curl -q -fsS --noproxy '*' --max-time "$3" --max-redirs 0 --max-filesize 65536 \
+    -X "$1" "http://127.0.0.1:$port/api/$2" 2>/dev/null | head -c 65536
+}
 ngrok_api_tunnels() {
-  curl -q -s --max-time "${1:-0.4}" --max-redirs 0 --max-filesize 65536 \
-    "http://127.0.0.1:$NGROK_API_PORT/api/tunnels" 2>/dev/null | head -c 65536
+  ngrok_api_request GET tunnels "${1:-0.4}" "${2:-}"
+}
+ngrok_local_tunnels() {
+  jq -ce '
+    if (.tunnels | type) != "array" then error("missing tunnels") else
+      [.tunnels[] | select((.name | type) == "string" and (.name | length) > 0)
+        | . as $t
+        | (.config.addr | strings | capture("^(?:https?://)?(?:localhost|127\\.0\\.0\\.1|\\[::1\\]):(?<port>[0-9]{1,5})/?$"))
+        | (.port | tonumber) as $port | select($port >= 1 and $port <= 65535)
+        | select($t.public_url | strings | test("^https://[a-z0-9-]+\\.(ngrok-free\\.app|ngrok\\.app|ngrok\\.io|ngrok-free\\.dev|ngrok\\.dev)(/[^[:space:][:cntrl:]]*)?$"))
+        | {name: $t.name, port: $port, url: $t.public_url}]
+    end'
 }
 
 ngrok_url_from_log() { cat_own "$1" "$LOG_CAP" | grep -m1 -oP '"url":"\Khttps://[^"]+'; }
@@ -247,10 +267,13 @@ portless_status() {
   # Not installed is a setup state with a copyable command: the plugin never
   # runs a package manager itself.
   provider_bin portless >/dev/null || { printf 'setup|Local names need portless|npm install -g portless'; return; }
-  if ! portless_probe; then
-    printf 'setup|Local names are off|'
-    return
-  fi
+  portless_probe || :
+  local scope; scope=$(portless_proxy_scope)
+  case $scope in
+    lan) printf 'setup|Proxy listens beyond this device|%s' "$(portless_fix_cmd "" "$PROBE_PORT")"; return ;;
+    unknown) printf 'unavailable|Could not verify the proxy listener|'; return ;;
+  esac
+  portless_probe || { printf 'setup|Local names are off|'; return; }
   if ! portless_serving_routes; then
     # Live proxy, but blind to this user's routes — it was started from
     # another state directory (typically root's). Names silently 404 until
@@ -258,21 +281,16 @@ portless_status() {
     printf 'setup|Proxy is not reading your routes|%s' "$(portless_fix_cmd evict)"
     return
   fi
-  if ! portless_clean_port; then
-    # Works, but every URL carries :PORT — which defeats the point of naming.
-    printf 'setup|Names carry :%s — bind 443 for clean URLs|%s' "$PROBE_PORT" "$(portless_fix_cmd)"
-    return
-  fi
   # A proxy serves the TLD set it was started with; a newly configured
   # suffix is dead until a restart adds it. The fix carries the union, so
   # existing .localhost names never break.
   local want_tld; want_tld=$(configured_tld)
   if ! portless_serves_tld "$want_tld"; then
-    printf 'setup|Proxy does not serve .%s yet — restart adds it|%s' "$want_tld" "$(portless_fix_cmd)"
+    printf 'setup|Proxy does not serve .%s yet — restart adds it|%s' "$want_tld" "$(portless_fix_cmd "" "$PROBE_PORT")"
     return
   fi
   if ! tld_resolves; then
-    # Routes would be created and then silently fail to resolve; the strip is
+    # Routes would be created and then silently fail to resolve; Settings is
     # the copyable channel for the one-time resolver fix.
     printf 'setup|Names on .%s do not resolve yet|%s' "$want_tld" "$(tld_fix_cmd)"
     return
@@ -488,16 +506,11 @@ dns_published() {  # <host> [timeout]
     "$DOH_URL?name=$1&type=A" -H 'accept: application/dns-json' 2>/dev/null \
     | head -c 16384 | jq -e '(.Answer // []) | length > 0' >/dev/null 2>&1
 }
-dns_resolves_here() {  # <host>: the system path answers; flush the stub once if not
-  getent hosts "$1" >/dev/null 2>&1 && return 0
-  resolvectl flush-caches >/dev/null 2>&1
-  getent hosts "$1" >/dev/null 2>&1
-}
+dns_resolves_here() { getent hosts "$1" >/dev/null 2>&1; }
 # 0 = resolves locally, 1 = not yet (unpublished, or an upstream negative
 # cache that clears with its TTL).
 dns_gate() {  # <host>
   local host="$1" i
-  getent hosts "$host" >/dev/null 2>&1 && return 0   # a re-shared static domain
   sleep 3   # the record never exists in the first seconds; asking then only poisons
   for ((i = 0; i < 12; i++)); do
     dns_published "$host" && { dns_resolves_here "$host"; return; }
@@ -508,6 +521,12 @@ dns_gate() {  # <host>
 
 finish_start() {  # <provider> <port> <url> [hint]
   local reach; reach=$(provider_reach "$1")
+  if [[ $1 == portless ]]; then
+    portless_probe_reset
+    portless_probe || :
+    reach=$(portless_proxy_scope)
+    [[ $reach != unknown ]] || return 1
+  fi
   write_own "$(reachfile "$1" "$2")" "$reach" || return 1
   write_own "$(urlfile "$1" "$2")" "$3" || return 1
   jq -nc --arg u "$3" --arg r "$reach" --arg h "${4:-}" \
@@ -517,18 +536,20 @@ finish_start() {  # <provider> <port> <url> [hint]
 rollback_portless() {  # <port> <new name> <old name> <old marker: 0|1> <bin>
   local port="$1" new="$2" old="$3" old_owned="$4" bin="$5" current
   portless_state_load || return 1
-  current=$(portless_route_name "$port")
+  current=$(portless_route_name "$port") || return 1
   if [[ $current == "$new" && $new != "$old" ]]; then
+    portless_alias_safe "$new" "$port" || return 1
     "$bin" alias --remove "$new" >/dev/null 2>&1 || return 1
     current=""
   elif [[ $current != "$old" && -n $current ]]; then
     return 1
   fi
   if [[ -z $current && -n $old ]]; then
-    "$bin" alias "$old" "$port" --force >/dev/null 2>&1 || return 1
+    portless_alias_safe "$old" "$port" || return 1
+    "$bin" alias "$old" "$port" >/dev/null 2>&1 || return 1
   fi
   portless_state_load || return 1
-  current=$(portless_route_name "$port")
+  current=$(portless_route_name "$port") || return 1
   [[ $current == "$old" ]] || return 1
   if (( old_owned )); then
     write_own "$(namefile portless "$port")" "$old"
@@ -569,6 +590,12 @@ cmd_start_portless() {  # <port> <name>
   local port="$1" name="$2" out bin old old_owned=0
   bin=$(provider_bin portless) || die "portless is not installed as a trusted executable"
   portless_state_load || die "could not read Portless state safely"
+  portless_probe_reset
+  portless_probe || :
+  if [[ $(portless_proxy_scope) != local ]]; then
+    die "the proxy is not verified as local-only; repair its listener before naming"
+  fi
+  portless_managed_port "$port" && die "this route is managed by portless run; change its name in the owning app"
   # A port holds one name; drop the previous alias on rename.
   local n; n=$(slug "${name:-port-$port}")
   [[ -n $n ]] || n="port-$port"
@@ -578,9 +605,11 @@ cmd_start_portless() {  # <port> <name>
     [[ -n $old ]] || die "the Portless name record for port $port is malformed; it was kept"
     old_owned=1
   else
-    # A route this plugin did not create (portless run / CLI) still renames.
-    old=$(portless_route_name "$port")
+    old=$(portless_route_name "$port") || die "could not identify the existing Portless alias safely"
   fi
+  portless_alias_safe "$n" "$port" || die "the name $n belongs to another Portless route; choose another name"
+  [[ -z $old ]] || portless_alias_safe "$old" "$port" \
+    || die "the existing name $old belongs to another Portless route; it was kept"
   trap 'cancel_portless_start "$port" "$n" "$old" "$old_owned" "$bin" 143' TERM
   trap 'cancel_portless_start "$port" "$n" "$old" "$old_owned" "$bin" 130' INT
   trap 'cancel_portless_start "$port" "$n" "$old" "$old_owned" "$bin" 129' HUP
@@ -595,7 +624,7 @@ cmd_start_portless() {  # <port> <name>
     fi
     die "portless could not remove the previous name $old"
   fi
-  out=$("$bin" alias "$n" "$port" --force 2>&1 | head -c 4096) || {
+  out=$("$bin" alias "$n" "$port" 2>&1 | head -c 4096) || {
     rollback_portless "$port" "$n" "$old" "$old_owned" "$bin" \
       && die "portless alias failed: ${out:0:200}"
     die "portless alias failed and rollback could not be verified; the name record was kept"
@@ -614,15 +643,15 @@ cmd_start_portless() {  # <port> <name>
   [[ -n $resolved ]] || resolved="https://$n.$(portless_tld)"
 
   # Route must be visible to the LIVE proxy and its host must resolve;
-  # either failure comes back as a short outcome — the strip carries the
+  # either failure comes back as a short outcome — Settings carries the
   # copyable fix, not the toast.
   local hint=""
   if portless_probe && ! portless_serving_routes; then
-    hint="the proxy is not reading your routes — the strip has the fix"
+    hint="the proxy is not reading your routes — Settings has the fix"
   else
     local host; host=$(url_host "$resolved")
     getent hosts "$host" >/dev/null 2>&1 \
-      || hint="$host does not resolve yet — the strip has the one-time fix"
+      || hint="$host does not resolve yet — Settings has the one-time fix"
   fi
   finish_start portless "$port" "$resolved" "$hint" || {
     rollback_portless "$port" "$n" "$old" "$old_owned" "$bin" \
@@ -697,7 +726,12 @@ cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
   trap 'cancel_public_start "$provider" "$port" "$pidline" 143' TERM
   trap 'cancel_public_start "$provider" "$port" "$pidline" 130' INT
   trap 'cancel_public_start "$provider" "$port" "$pidline" 129' HUP
-  pidline=$(state launch-tracked "$STATE_DIR" "${lf##*/}" "${pf##*/}" -- "$bin" "${argv[@]}") || {
+  pidline=$(
+    if [[ $provider == cloudflared ]]; then
+      unset TUNNEL_NAME TUNNEL_HELLO_WORLD TUNNEL_BASTION
+    fi
+    state launch-tracked "$STATE_DIR" "${lf##*/}" "${pf##*/}" -- "$bin" "${argv[@]}"
+  ) || {
     trap - TERM INT HUP
     clear_share "$provider" "$port" || die "could not start $provider, and its pre-launch records could not be cleared"
     die "could not start $provider"
@@ -752,7 +786,8 @@ cmd_stop() {
   local pidline bin
   if [[ $provider == portless ]]; then
     portless_state_load || die "could not read Portless state safely; its records are kept"
-    local n n_lower marker_dump marker_name="portless-$state_port.name"
+    portless_managed_port "$port" && die "this route is managed by portless run; stop it from the owning app"
+    local n n_lower alias_routes marker_dump marker_name="portless-$state_port.name"
     marker_dump=$(state dump "$STATE_DIR" 256 "$STATE_FILES_CAP" "$marker_name" 2>/dev/null) \
       || die "the Portless name record for port $port cannot be read; its records are kept"
     if jq -e --arg n "$marker_name" 'any(.refused[]?; . == $n)' <<<"$marker_dump" >/dev/null 2>&1; then
@@ -764,16 +799,21 @@ cmd_stop() {
       n_lower=$(portal_marker_lower "$n") \
         || die "the Portless name record for port $port is malformed; its records are kept"
     else
-      n=$(portless_route_name "$port")
-      [[ -z $n ]] || n_lower=$(portal_marker_lower "$n") \
+      n=$(portless_route_name "$port") || die "could not identify the existing Portless alias safely"
+      n_lower=${n,,}
+      [[ -z $n ]] || valid_tld "$n_lower" \
         || die "Portless reported a malformed name for port $port; its records are kept"
     fi
     if [[ -n $n ]]; then
+      portless_alias_safe "$n" "$port" \
+        || die "the name $n belongs to another Portless route; its records are kept"
       # The record of a name stays until Portless has actually let it go.
       bin=$(provider_bin portless) || die "portless is not installed as a trusted executable; the name $n is still registered"
       "$bin" alias --remove "$n" >/dev/null 2>&1 || die "portless could not remove the name $n"
       portless_state_load || die "Portless removed $n, but its state could not be verified; the records are kept"
-      routes_json | jq -e --arg n "$n_lower" 'any(.[]?; ((.hostname // "") | split(".")[0]) == $n)' >/dev/null 2>&1 \
+      alias_routes=$(portless_alias_routes "$n_lower") \
+        || die "Portless removed $n, but its aliases could not be verified; the records are kept"
+      jq -e 'length > 0' <<<"$alias_routes" >/dev/null 2>&1 \
         && die "Portless reported removing $n, but the route remains; the records are kept"
     fi
     state_remove "$STATE_DIR" "portless-$state_port.name" \
@@ -870,36 +910,25 @@ cloudflared_stop_adopted() {  # <port>
 # container), so only a socket the kernel attributes to our own ngrok counts.
 ngrok_adopt() {
   [[ $LIVE_PORTS == *" $NGROK_API_PORT "* ]] || return 0
-  [[ -n $SOCKS ]] || SOCKS=$(ss -tlnpH 2>/dev/null)
-  # comm is settable with prctl, so pin the 4040 owner to the ngrok binary by
-  # its executable, and accept only ngrok's own public hostnames — a hostile
-  # same-uid process cannot then inject an arbitrary "your tunnel" URL.
-  local apid; apid=$(grep -F ":$NGROK_API_PORT " <<<"$SOCKS" | grep -oP 'pid=\K[0-9]+' | head -1)
-  [[ -n $apid ]] || return 0
-  local nbin xe; nbin=$(provider_bin ngrok) || return 0
-  xe=$(readlink "/proc/$apid/exe" 2>/dev/null); xe=${xe% (deleted)}
-  [[ $xe == "$nbin" ]] || return 0
   ngrok_api_tunnels \
-    | jq -r '.tunnels[]?
-        | [( .config.addr | capture(":(?<p>[0-9]+)$").p ), .public_url ]
-        | select(.[1] | test("^https://[a-z0-9-]+\\.(ngrok-free\\.app|ngrok\\.app|ngrok\\.io|ngrok-free\\.dev|ngrok\\.dev)(/|$)"))
-        | @tsv' 2>/dev/null
+    | ngrok_local_tunnels \
+    | jq -r '.[] | [.port, .url] | @tsv' 2>/dev/null
 }
 
 ngrok_stop_adopted() {  # <port>
-  local before after tname
-  before=$(ngrok_api_tunnels 0.6) || return 1
-  tname=$(jq -er --arg p ":$1" 'first(.tunnels[]? | select(.config.addr | endswith($p)) | .name | @uri) // ""' <<<"$before") \
-    || return 1
-  [[ -n $tname ]] || return 0
-  if ! curl -q -fsS --max-time 2 --max-redirs 0 -X DELETE \
-    "http://127.0.0.1:$NGROK_API_PORT/api/tunnels/$tname" >/dev/null 2>&1; then
-    after=$(ngrok_api_tunnels 0.6) || return 1
-    jq -e --arg p ":$1" 'all(.tunnels[]?; (.config.addr | endswith($p) | not))' <<<"$after" >/dev/null 2>&1
-    return
-  fi
-  after=$(ngrok_api_tunnels 0.6) || return 1
-  jq -e --arg p ":$1" 'all(.tunnels[]?; (.config.addr | endswith($p) | not))' <<<"$after" >/dev/null 2>&1
+  local port owner before selected current tname after
+  port=$(canonical_port "$1") || return 1
+  owner=$(ngrok_api_owner) || return 1
+  before=$(ngrok_api_tunnels 0.6 "$owner" | ngrok_local_tunnels) || return 1
+  selected=$(jq -ce --argjson p "$port" '[.[] | select(.port == $p)] | if length == 1 then .[0] else error("ambiguous or absent tunnel") end' <<<"$before" 2>/dev/null) || return 1
+  # A port is not a tunnel identity. Recheck the exact record before deleting.
+  current=$(ngrok_api_tunnels 0.6 "$owner" | ngrok_local_tunnels) || return 1
+  jq -e --argjson p "$port" --argjson selected "$selected" \
+    '[.[] | select(.port == $p)] == [$selected]' <<<"$current" >/dev/null || return 1
+  tname=$(jq -r '.name | @uri' <<<"$selected")
+  ngrok_api_request DELETE "tunnels/$tname" 2 "$owner" >/dev/null || :
+  after=$(ngrok_api_tunnels 0.6 "$owner") || return 1
+  jq -e --argjson selected "$selected" '.tunnels | type == "array" and all(.[]; .name != $selected.name)' <<<"$after" >/dev/null 2>&1
 }
 
 stop_reconciled_share() {
@@ -1041,6 +1070,8 @@ cmd_status() {
   dump=$(reconcile_portless_status "$STATE_DIR" "$STATE_FILES_CAP") || die "could not list Portal's state"
   local portless_ok=1
   portless_state_load || portless_ok=0
+  portless_probe || :
+  local portless_scope; portless_scope=$(portless_proxy_scope "$ss_raw")
   local tsv="" listed=" " now; printf -v now '%(%s)T' -1
   # An unreadable state directory is not an empty one: a tunnel that cannot be
   # listed cannot be cleaned up either, so the caller keeps its last snapshot.
@@ -1149,7 +1180,12 @@ cmd_status() {
       fi
       reconcile_idle "$provider" "$port" "$state_port" "$idle" "$healthy" "$now" || continue
     fi
-    [[ -n $reach ]] || reach=$(provider_reach "$provider")
+    if [[ $provider == portless ]]; then
+      [[ $portless_scope != unknown ]] || (( internal )) || continue
+      reach=$portless_scope
+    else
+      [[ -n $reach ]] || reach=$(provider_reach "$provider")
+    fi
     # A share whose DNS was still pending at start is re-checked each poll,
     # off-path first, and stops being pending the moment the system resolves it.
     if [[ $dns == pending ]]; then
@@ -1197,6 +1233,10 @@ cmd_status() {
   for row in "${PROVIDERS[@]}"; do
     name="${row%%:*}"; areach="${row##*:}"
     if [[ $name == portless ]] && (( portless_ok == 0 )); then continue; fi
+    if [[ $name == portless ]]; then
+      [[ $portless_scope != unknown ]] || continue
+      areach=$portless_scope
+    fi
     declare -f "${name}_adopt" >/dev/null || continue
     while IFS=$'\t' read -r aport aurl; do
       numeric_aport=$(canonical_port "$aport") || continue
@@ -1208,10 +1248,27 @@ cmd_status() {
   done
 
   (( $(grep -c . <<<"$tsv") > MAX_ROWS )) && die "more than $MAX_ROWS tunnels"
-  printf '%s' "$tsv" | jq -Rsc --argjson internal "$internal" 'split("\n") | map(select(length > 0) | split("\t")
+  local portless_tlds="" portless_snapshot=${PORTLESS_STATE:-}
+  [[ -n $portless_snapshot ]] || portless_snapshot='{"files":{}}'
+  (( portless_ok )) && portless_tlds=$(portless_tld_arg)
+  printf '%s' "$tsv" | jq -Rsc --argjson internal "$internal" --argjson portless_ok "$portless_ok" \
+    --arg tlds "$portless_tlds" --slurpfile snapshot <(printf '%s' "$portless_snapshot") '
+    def alias_name($suffixes):
+      capture("^https?://(?<host>[^/:]+)").host | ascii_downcase as $host
+      | ($suffixes | map(. as $suffix | select($host | endswith("." + $suffix))) | sort_by(length) | last) as $suffix
+      | if $suffix == null then "" else $host[:-(($suffix | length) + 1)] end;
+    ($snapshot[0].files["routes.json"] // "[]" | fromjson) as $routes
+    | ($tlds | split(",") | map(select(length > 0))) as $suffixes
+    | split("\n") | map(select(length > 0) | split("\t")
     | . as $row
     | {provider: $row[0], port: ($row[1] | tonumber), url: $row[2], reach: $row[3], dns: ($row[4] // ""),
        targetHealthy: (if $row[5] == "true" then true elif $row[5] == "false" then false else null end)}
+      + (if $row[0] == "portless" then
+          if $portless_ok == 1 and $row[3] != "unknown" then
+            {aliasName: ($row[2] | alias_name($suffixes)),
+             managed: any($routes[]; .port == ($row[1] | tonumber) and .pid > 0)}
+          else {aliasName: "", managed: null} end
+        else {} end)
       + (if $internal == 1 and (($row[6] // "") != "") then {_statePort: $row[6]} else {} end))
     | if $internal == 1 then . else
         reduce .[] as $row ([];

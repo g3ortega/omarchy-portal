@@ -280,8 +280,8 @@ check("a wildcard bind still opens localhost", e({
   eq("a system port gets no verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, category: "system" })), [])
   eq("no pid means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, pid: null, process: null })), ["name"])
   eq("no start means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, start: null, process: null })), ["name"])
-  eq("no proxy and no name means no name verb", ids(verbsFor(svc({}), false, -1, "", dev)), ["share", "pause", "restart", "stop"])
-  eq("an existing name can be renamed without the proxy", verbsFor(svc({ route: {} }), false, -1, "", dev)[0].label, "rename")
+  eq("name remains discoverable before setup", ids(verbsFor(svc({}), false, -1, "", dev)), ["name", "share", "pause", "restart", "stop"])
+  eq("an existing name can be renamed without the proxy", verbsFor(svc({ route: { managed: false, aliasName: "app" } }), false, -1, "", dev)[0].label, "rename")
   eq("a truncated command line cannot be restarted", ids(verbsFor(svc({}), true, -1, "", { ...dev, argvTruncated: true })), ["name", "share", "pause", "stop"])
   eq("a paused process offers resume, urgently", verbsFor(svc({ stats: { 3000: { paused: true } } }), true, -1, "", dev)[2], { id: "pause", label: "resume", on: false, urgent: true })
   eq("a shared port omits the duplicate sharing verb", verbsFor(svc({ tunnel: { url: "x" } }), true, -1, "", dev).some(v => v.id === "share"), false)
@@ -366,6 +366,10 @@ check("a wildcard bind still opens localhost", e({
   eq(`scan cap holds ${maxPorts} maximally JSON-escaped sampled argv values`, Buffer.byteLength(JSON.stringify(maximalArgvDocument)) <= scanCap, true)
   const tunnelCap = Number(serviceSrc.match(/outputCaps:[^\n]*poll:\s*([0-9]+)/)?.[1] ?? 0)
   if (tunnelCap < 8 * 1024 * 1024) bad.push(`tunnel poll cap is only ${tunnelCap} bytes`)
+  const lifecycleDeadline = Number(serviceSrc.match(/deadlines:[^\n]*lifecycle:\s*([0-9]+)/)?.[1] ?? 0)
+  if (lifecycleDeadline !== 20) bad.push(`lifecycle deadline is ${lifecycleDeadline} seconds`)
+  if (!/queued\.script === "lifecycle\.sh"\s*\? "lifecycle"\s*:\s*"quick"/.test(serviceSrc))
+    bad.push("lifecycle actions still use the quick helper deadline")
 
   const state = { feedback: null }, timer = { restarted: 0, stopped: 0,
     restart() { this.restarted++ }, stop() { this.stopped++ } }
@@ -403,16 +407,8 @@ check("a wildcard bind still opens localhost", e({
       bad.push("copy guidance no longer clips to its block")
     const actionRowSrc = extract(stepBlockSrc,
       /^          Item \{\n[\s\S]*?^          \}$/m)
-    const docsLinkSrc = extract(actionRowSrc,
-      /^            LinkText \{\n[\s\S]*?^            \}$/m)
-    const linkCount = (actionRowSrc.match(/^            LinkText \{$/gm) || []).length
-    if (linkCount !== 1
-        || !/^[ \t]*anchors\.left:[ \t]*parent\.left[ \t]*$/m.test(docsLinkSrc)
-        || !/^[ \t]*anchors\.right:[ \t]*copyHit\.left[ \t]*$/m.test(docsLinkSrc)
-        || !/^[ \t]*anchors\.rightMargin:[ \t]*Style\.spacing\.lg[ \t]*$/m.test(docsLinkSrc)
-        || !/^[ \t]*text:[ \t]*"Portless documentation"[ \t]*$/m.test(docsLinkSrc)
-        || !/^[ \t]*onClicked:[ \t]*if \(root\.service\) root\.service\.openUrl\(stepBlock\.portlessDocs\)[ \t]*$/m.test(docsLinkSrc))
-      bad.push("copy guidance does not have one fixed, separated Portless documentation link")
+    if (actionRowSrc.includes("Portless documentation") || /onLinkActivated/.test(actionRowSrc))
+      bad.push("generic setup guidance still assumes a Portless destination")
     const copyHitSrc = extract(actionRowSrc,
       /^            MouseArea \{\n              id: copyHit\n[\s\S]*?^            \}$/m)
     if (!/^[ \t]*width:[ \t]*parent\.width[ \t]*$/m.test(actionRowSrc)

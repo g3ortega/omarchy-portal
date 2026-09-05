@@ -75,7 +75,7 @@ cmd_list() {
         .label,
         (if (.name // "") == .label then "" else (.name // "") end),
         .scope,
-        (if $t then ($t.url + (if $t.reach == "public" then "  [PUBLIC]" else "  [local]" end))
+        (if $t then ($t.url + (if $t.reach == "public" then "  [PUBLIC]" elif $t.reach == "lan" then "  [LAN]" else "  [local]" end))
          else (.url // "") end)
       ] | @tsv
   ' <<<"$ports" | column -t -s$'\t'
@@ -124,8 +124,13 @@ cmd_stop_all() {
 }
 
 cmd_setup() {
-  local out rc
-  out=$("$HERE/portless-setup.sh" run); rc=$?
+  local mode=run out rc
+  case "${1:-}" in
+    --status) mode=status ;;
+    "") ;;
+    *) echo "usage: portal setup [--status]" >&2; return 2 ;;
+  esac
+  out=$("$HERE/portless-setup.sh" "$mode"); rc=$?
   if (( rc != 0 )) || ! jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
     echo "error: $(jq -r '.error // "setup failed"' <<<"$out" 2>/dev/null)" >&2
     return 1
@@ -163,7 +168,7 @@ case "${1:-list}" in
   uninstall) shift; "$HERE/uninstall.sh" "$@" ;;
   doctor)    cmd_doctor ;;
   refresh)   omarchy-shell "$PLUGIN_ID" refresh ;;
-  setup)     cmd_setup ;;
+  setup)     shift; cmd_setup "$@" ;;
   test)      "$HERE/../test/test.sh" ;;
   -h|--help|help)
     cat <<USAGE
@@ -180,7 +185,7 @@ case "${1:-list}" in
   portal stop-all                    stop every share and name
   portal uninstall [--dry]           reverse what Portal put on the machine
   portal refresh                     ask the running shell to rescan
-  portal setup                       full portless setup (starts the proxy, trusts browsers)
+  portal setup [--status]            set up local names, or inspect without changes
   portal doctor                      check the plugin's dependencies
   portal test                        run the unit tests
 

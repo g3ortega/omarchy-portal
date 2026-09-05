@@ -7,19 +7,8 @@ import "lib/Icons.js" as Icons
 import "lib/Colors.js" as Colors
 import "lib/Format.js" as Format
 
-// One listening port.
-//
-// A row's title is its best name: the local route when one exists
-// (anycable.test), else the project or stack. What the process is DOING —
-// connections, cpu, memory, uptime — lives in service.stats and shows while
-// the row has attention, so identity stays put while numbers move.
-//
-// Layout: every element on the main line is a sibling positioned by anchors.
-// Actions float over the right edge on a scrim instead of reserving width, so
-// a resting row gives its full width to the name.
-//
-// Security: every string here except our own literals is untrusted — process
-// names, command lines, tunnel URLs — so every Text sets Text.PlainText.
+// Hover actions overlay the title so resting rows retain the full name width.
+// Process metadata and URLs must render as plain text.
 Item {
   id: row
 
@@ -84,6 +73,7 @@ Item {
   readonly property string stackLine: {
     if (!entry) return ""
     var bits = []
+    if (route && route.reach === "lan") bits.push("LAN name")
     if (named && entry.name && entry.name !== routeHost) bits.push(entry.name)
     if (entry.label && entry.label !== entry.name) bits.push(entry.label)
     if (entry.scope === "all") bits.push("all interfaces")
@@ -96,6 +86,7 @@ Item {
   readonly property string statsLine: {
     if (!stats) return ""
     var bits = []
+    if (route && route.reach === "lan") bits.push("LAN name")
     if (paused) bits.push("paused")
     bits.push(stats.conns === 1 ? "1 conn" : stats.conns + " conns")
     if (stats.cpuPct != null) bits.push(stats.cpuPct + "% cpu")
@@ -436,6 +427,9 @@ Item {
 
           // -- the name editor ------------------------------------------------
           Item {
+            id: nameEditor
+            readonly property bool editable: !row.route || (row.route.managed === false && !!row.route.aliasName)
+            onEditableChanged: if (!editable && row.naming) row.editorCanceled()
             width: parent.width
             visible: row.naming && !row.confirming
             implicitHeight: Style.spacing.controlHeight
@@ -448,14 +442,15 @@ Item {
               anchors.rightMargin: Style.spacing.xs
               anchors.verticalCenter: parent.verticalCenter
               foreground: row.foreground
-              text: row.named ? row.routeHost.split(".")[0]
+              enabled: nameEditor.editable
+              text: row.named ? String(row.route.aliasName || "")
                 : (row.service && row.entry ? row.service.suggestedName(row.entry) : "")
               Keys.onEscapePressed: row.editorCanceled()
               // Enter on an empty field removes an existing name: the keyboard
               // route to what the remove link does.
               onAccepted: {
                 var n = text.trim()
-                if (row.service && row.entry) {
+                if (nameEditor.editable && row.service && row.entry) {
                   if (n.length > 0) row.service.expose(row.entry.port, "portless", n)
                   else if (row.named) row.service.unexpose(row.entry.port, "portless")
                 }
@@ -477,12 +472,12 @@ Item {
 
             LinkText {
               id: removeLink
-              visible: row.named
+              visible: row.named && nameEditor.editable
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               text: "remove"
               onClicked: {
-                if (row.service && row.entry) row.service.unexpose(row.entry.port, "portless")
+                if (nameEditor.editable && row.service && row.entry) row.service.unexpose(row.entry.port, "portless")
                 row.editorDone()
               }
             }
@@ -513,7 +508,6 @@ Item {
                 required property var modelData
                 required property int index
                 readonly property bool ready: choice.modelData.status === "ready"
-                readonly property bool actionable: ready || choice.modelData.status === "setup"
                 readonly property bool starting: row.service && row.entry
                   && row.service.busyAction === choice.modelData.id + ":" + row.entry.port
                 readonly property bool installing: row.service
@@ -536,14 +530,12 @@ Item {
                   text: {
                     if (choice.starting) return choice.modelData.label + " — starting…"
                     if (choice.installing) return choice.modelData.label + " — installing…"
-                    if (choice.modelData.status === "setup") return choice.modelData.label + " — fix"
+                    if (!choice.ready) return choice.modelData.label + " · set up"
                     return choice.modelData.label
                   }
-                  color: choice.ready ? Util.alpha(Color.urgent, 0.9)
-                    : choice.actionable ? Util.alpha(row.foreground, 0.7)
-                    : Util.alpha(row.foreground, 0.35)
+                  color: choice.ready ? Util.alpha(Color.urgent, 0.9) : Util.alpha(row.foreground, 0.7)
                   font.pixelSize: Style.font.bodySmall
-                  onClicked: if (choice.actionable) row.providerChosen(choice.modelData)
+                  onClicked: row.providerChosen(choice.modelData)
                 }
               }
             }
@@ -600,7 +592,7 @@ Item {
 
         PublicAction {
           icon: Icons.g("open")
-          text: "Open"
+          text: row.dnsPending ? "Waiting for DNS…" : "Open"
           enabled: !row.dnsPending
           opacity: enabled ? 1 : 0.5
           onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)

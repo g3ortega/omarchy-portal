@@ -602,24 +602,18 @@ def copy_stdin(fd):
         write_all(fd, chunk)
 
 
-def cmd_write(a):
+def cmd_write(a, *, replace=True):
     mode = int(a[1], 8) if len(a) > 1 else 0o600
     d, name = split(a[0])
     dirfd = open_dir(d, create=True)
     try:
-        atomic_write(dirfd, name, copy_stdin, mode)
+        atomic_write(dirfd, name, copy_stdin, mode, replace=replace)
     finally:
         os.close(dirfd)
 
 
 def cmd_create(a):
-    mode = int(a[1], 8) if len(a) > 1 else 0o600
-    d, name = split(a[0])
-    dirfd = open_dir(d, create=True)
-    try:
-        atomic_write(dirfd, name, copy_stdin, mode, replace=False)
-    finally:
-        os.close(dirfd)
+    return cmd_write(a, replace=False)
 
 
 def acquire_lock(path, mode, name) -> HeldLock | None:

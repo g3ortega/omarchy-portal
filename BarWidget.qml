@@ -135,8 +135,6 @@ BarWidget {
     id: panelLoader
     active: false
     visible: false
-    // Ordinary declarative bindings: the host-injected properties (bar,
-    // settings) and the service flow into the panel whenever they change.
     sourceComponent: PortalPanel {
       bar: root.bar
       settings: root.settings
