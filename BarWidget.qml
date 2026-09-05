@@ -105,7 +105,7 @@ BarWidget {
     if (devCount > 0 || lines.length === 0)
       lines.push(devCount + (devCount === 1 ? " dev server" : " dev servers"))
     return {
-      icon: counts.pub > 0 ? "broadcast" : counts.named > 0 ? "localRoute" : "portal",
+      broadcasting: counts.pub > 0,
       count: counts.pub > 0 ? counts.pub : counts.named > 0 ? counts.named : devCount,
       tooltip: lines.join(" · ")
     }
@@ -113,7 +113,6 @@ BarWidget {
 
   readonly property var indicator: summarizeCounts(service ? service.tunnelCounts : ({ pub: 0, named: 0 }),
                                                   service ? service.devCount : 0)
-  readonly property bool broadcasting: indicator.icon === "broadcast"
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -161,10 +160,10 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     active: root.opened
-    readonly property string glyph: Icons.g(root.indicator.icon)
+    readonly property string glyph: Icons.g("portal")
     // Vertical bars have no room for a label.
     text: root.vertical || !root.showCount || root.indicator.count <= 0 ? glyph : glyph + " " + root.indicator.count
-    foreground: root.broadcasting
+    foreground: root.indicator.broadcasting
       ? (root.bar ? root.bar.urgent : Color.urgent)
       : (root.bar ? root.bar.barForeground : Color.foreground)
     tooltipText: root.service ? root.indicator.tooltip : "Portal"
