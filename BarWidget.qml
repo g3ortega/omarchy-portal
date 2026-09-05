@@ -161,12 +161,23 @@ BarWidget {
     bar: root.bar
     active: root.opened
     readonly property string glyph: Icons.g("portal")
+    labelVisible: false
     // Vertical bars have no room for a label.
     text: root.vertical || !root.showCount || root.indicator.count <= 0 ? glyph : glyph + " " + root.indicator.count
     foreground: root.indicator.broadcasting
       ? (root.bar ? root.bar.urgent : Color.urgent)
       : (root.bar ? root.bar.barForeground : Color.foreground)
     tooltipText: root.service ? root.indicator.tooltip : "Portal"
+
+    OpticalGlyph {
+      id: label
+      anchors.fill: parent
+      transform: Translate { x: label.width / 2 - label.paintedCenterX }
+      text: button.text
+      fontFamily: button.fontFamily
+      fontSize: button.fontSize
+      color: button.active ? button.activeColor : button.foreground
+    }
     onPressed: function (buttonCode) {
       if (buttonCode === Qt.LeftButton) root.toggle()
       else if (buttonCode === Qt.RightButton && root.service) root.service.refreshAll()
