@@ -834,7 +834,6 @@ cmd_stop() {
     elif [[ -e $(targetfile "$provider" "$state_port") || -L $(targetfile "$provider" "$state_port") ]]; then
       : # a pre-launch target with no pid has no provider process to stop
     elif declare -f "${provider}_stop_adopted" >/dev/null; then
-      # Not ours to begin with: the provider knows how to end its own.
       "${provider}_stop_adopted" "$port" || die "$provider on port $port did not stop"
     fi
   fi
@@ -867,7 +866,7 @@ portless_adopt() {
 # (--url http://localhost:PORT) and a quick tunnel publishes its hostname on
 # its own metrics endpoint (/quicktunnel) — the one port that pid listens on.
 cloudflared_adopt() {
-  provider_bin cloudflared >/dev/null || return 0   # not installed: no processes, no dump, no cost
+  provider_bin cloudflared >/dev/null || return 0
   # A quick tunnel must be listening on its metrics port for us to learn its
   # hostname at all, so the attributed dump names every cloudflared worth
   # looking at — no process-table walk needed.

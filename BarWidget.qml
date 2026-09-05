@@ -65,7 +65,7 @@ BarWidget {
   // current value plus the one change. Returns whether anything persisted.
   function saveSetting(key, value) {
     if (!bar || !bar.shell || typeof bar.shell.updateEntryInline !== "function") return false
-    var current = liveEntry() || settings || ({})
+    var current = _pending || liveEntry() || settings || ({})
     var merged = { id: moduleName }
     for (var k in current) if (k !== "id") merged[k] = current[k]
     merged[key] = value

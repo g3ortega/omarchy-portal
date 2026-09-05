@@ -57,7 +57,6 @@ Item {
   // exactly where the main line's title does: one alignment axis, read off
   // the title column itself so nothing can drift from it.
   readonly property real titleAxis: titleColumn.x
-  // The center of the icon slot: where the thread rule hangs from.
   readonly property real iconAxis: iconGlyph.x + iconGlyph.width / 2
   readonly property var stats: service && entry ? (service.stats[entry.port] || null) : null
   readonly property bool paused: stats ? stats.paused === true : false
@@ -282,17 +281,12 @@ Item {
     }
 
     // ---- expansion ----------------------------------------------------------
-    // Everything a row can unfold — the verb line, the name editor, the
-    // exposure choices — is one block in one register: quiet text at one
-    // indent, tied to its row by a thread rule where the icon column runs.
     Loader {
       width: parent.width
       active: row.expanded
       visible: active
 
       sourceComponent: Item {
-        // The same breath above the content as below it: the block sits
-        // centered between its row and the next, not glued to one of them.
         implicitHeight: expansion.implicitHeight + Style.spacing.md * 2
 
         Rectangle {

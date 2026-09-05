@@ -37,3 +37,46 @@ assert.equal(render(root, "glyph"), "glyph 2")
 assert.equal(render({ ...root, showCount: false }, "glyph"), "glyph")
 assert.equal(render({ ...root, vertical: true }, "glyph"), "glyph")
 console.log("Bar counts, glyph state, tooltip, and hidden-label checks passed")
+
+{
+  const save = source.match(/^  function saveSetting\([^)]*\) \{\n[\s\S]*?^  \}/m)
+  const timer = source.match(/id: persistTimer[\s\S]*?onTriggered: \{([\s\S]*?)\n    \}/)
+  assert.ok(save)
+  assert.ok(timer)
+  let live = { id: "g3ortega.portal", iconColors: "Brand", barLabel: "Count", refreshSeconds: 5 }
+  const writes = []
+  const ctx = vm.createContext({
+    moduleName: live.id, settings: { ...live }, _pending: null,
+    liveEntry: () => live,
+    bar: { shell: { updateEntryInline: (id, entry) => {
+      assert.equal(id, live.id)
+      live = JSON.parse(JSON.stringify(entry))
+      writes.push(live)
+      return true
+    } } },
+    persistTimer: { restart() {} }
+  })
+  ctx.root = ctx
+  vm.runInContext(save[0], ctx)
+  const flush = () => vm.runInContext(`(function () {${timer[1]}})()`, ctx)
+  ctx.saveSetting("iconColors", "Theme")
+  ctx.saveSetting("barLabel", "Icon only")
+  assert.equal(writes.length, 0, "a burst remains pending until the timer fires")
+  flush()
+  assert.deepEqual(live, { id: "g3ortega.portal", iconColors: "Theme", barLabel: "Icon only", refreshSeconds: 5 },
+    "different preference edits in one burst both persist")
+  assert.equal(ctx._pending, null)
+  ctx.saveSetting("refreshSeconds", 10)
+  ctx.saveSetting("refreshSeconds", 30)
+  flush()
+  assert.equal(live.refreshSeconds, 30, "repeated edits keep the last value")
+  assert.equal(live.iconColors, "Theme")
+  live = { ...live, iconColors: "Brand", customSetting: "external" }
+  ctx.saveSetting("barLabel", "Count")
+  flush()
+  assert.equal(live.iconColors, "Brand", "a new burst reads the latest persisted preferences")
+  assert.equal(live.customSetting, "external", "unrelated external settings survive")
+  assert.equal(live.barLabel, "Count")
+  assert.equal(writes.length, 3)
+}
+console.log("Settings bursts preserve distinct edits and current persisted preferences")

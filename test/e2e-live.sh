@@ -21,6 +21,7 @@ PIDS="$TMP/pids"
 export PORTAL_METRICS_DIR="$TMP/state"
 export PORTAL_STATE_DIR="$TMP/runtime"
 PROC="$S/lib/proc.py"
+export PORTAL_E2E_RUN="$(< /proc/sys/kernel/random/uuid)"
 
 fails=0
 say()  { printf '\033[1m== %s\033[0m\n' "$1"; }
@@ -45,7 +46,9 @@ process_start() {
 record_pid() {
   local pid="$1" start i
   for i in $(seq 1 10); do
-    if start=$(process_start "$pid"); then
+    if start=$(process_start "$pid") \
+        && grep -zqxF -- "PORTAL_E2E_RUN=$PORTAL_E2E_RUN" "/proc/$pid/environ" 2>/dev/null \
+        && [[ $(process_start "$pid") == "$start" ]]; then
       printf '%s %s\n' "$pid" "$start" >> "$PIDS"
       return 0
     fi
@@ -115,9 +118,9 @@ http.createServer((q, r) => r.end("ok:" + name)).listen(port, "127.0.0.1")
 JSEOF
 
 start() {  # start <port> <cwd> <argv...>
-  local cwd="$2"; shift 2   # the port is the table's business, not ours
-  ( cd "$cwd" && setsid "$@" >/dev/null 2>&1 & record_pid "$!" ) </dev/null >/dev/null 2>&1 \
-    || bad "could not record a fixture process in $cwd"
+  local cwd="$2"; shift 2
+  ( cd "$cwd" && exec setsid "$@" ) </dev/null >/dev/null 2>&1 &
+  record_pid "$!" || bad "could not record a fixture process in $cwd"
 }
 
 fixture() { mkdir -p "$FARM/$1"; echo "$FARM/$1"; }
@@ -195,9 +198,8 @@ for _ in $(seq 1 40); do
 done
 [[ $up -eq ${#EXPECT[@]} ]] && ok "$up/${#EXPECT[@]} listening" || bad "only $up/${#EXPECT[@]} listening"
 
-# $! is the server itself because setsid does not fork for a non-leader. A
-# runtime that re-execs itself can get a second PID. Harvest by port through the
-# same attribution the product uses, so teardown never pattern-kills.
+# Forked and restarted listeners inherit the run marker. Port attribution
+# alone must never make an unrelated process eligible for teardown.
 for port in "${!EXPECT[@]}"; do
   while read -r pid; do record_pid "$pid" || bad "could not record PID $pid from port $port"; done \
     < <(ss -tlnpH "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+')
@@ -209,6 +211,8 @@ for port in "${!EXPECT[@]}"; do
     grep -qxF "$pid $start" "$PIDS" || bad "port $port has untracked process $pid"
   done < <(ss -tlnpH "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+')
 done
+
+(( fails == 0 )) || exit 1
 
 say "detection across the farm (scan → Detect)"
 PROBES=$(printf '%s ' "${!EXPECT[@]}")
@@ -234,10 +238,14 @@ if [[ $c0 == *$'\033'* || $c0 == *$'\t'* ]]; then bad "control bytes survived in
 [[ $(row 45925 | jq -r '.argv[4]') == $'record\x1eseparator' ]] && ok "an argument with U+001E survives the scan" || bad "45925 argv[4]: $(row 45925 | jq -c '.argv[4]')"
 
 say "traffic + latency probes"
+traffic_pids=()
 for _ in $(seq 1 10); do
-  for port in 45901 45907 45910; do curl -s --max-time 2 "http://127.0.0.1:$port/" >/dev/null & done
+  for port in 45901 45907 45910; do
+    curl -s --max-time 2 "http://127.0.0.1:$port/" >/dev/null &
+    traffic_pids+=("$!")
+  done
 done
-wait
+wait "${traffic_pids[@]}"
 PROBED=$("$S/scan-ports.sh" --probe "$PROBES" )
 n_lat=$(jq '[.ports[] | select(.latMs != null and .httpCode == 200)] | length' <<<"$PROBED")
 [[ $n_lat -eq ${#EXPECT[@]} ]] && ok "latency measured on $n_lat probed fixtures (all 200)" \

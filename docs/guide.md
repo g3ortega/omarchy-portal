@@ -299,8 +299,9 @@ Portal runs unsandboxed inside `omarchy-shell`, like every Omarchy plugin.
   fetch a remote image out of a hostile value.
 - Subprocesses take argv arrays. There is no `bash -c` with interpolated
   data. Restart re-executes the exact argv read from `/proc`, carried as
-  JSON, refuses a truncated one, and applies the process's environment with
-  shell builtins so no value ever appears on a command line.
+  JSON, refuses a truncated one, and passes the process's environment over
+  stdin for the replacement's final exec. Target loader variables never affect
+  the Python helper or appear on its command line.
 - The kernel limits signals to processes you own. Lifecycle actions re-check
   both the PID and its kernel start time, then signal through a pidfd. Owned
   tunnel stops use that check for the leader and separately guard process-group
@@ -316,10 +317,12 @@ Portal runs unsandboxed inside `omarchy-shell`, like every Omarchy plugin.
 - `scan-ports.sh` reads an allowlist of marker filenames and dependency
   names, strips control characters, and stops root discovery at directories
   you don't own.
-- Metric samples live in XDG state (700/600), hold only numbers and
-  timestamps, and are deleted when a port is unwatched. Tunnel state lives
-  in `$XDG_RUNTIME_DIR/portal` with the same modes. Every state file, and
-  Portless's own state, goes through `scripts/lib/statedir.py`: files are
+- New metric and tunnel state uses 700/600 modes. Metrics hold only numbers
+  and timestamps and are deleted when a port is unwatched. Tunnel state uses
+  `PORTAL_STATE_DIR`, then `$XDG_RUNTIME_DIR/portal`, then `$HOME/.cache/portal`.
+  The fallback persists across logouts. Existing state may be readable by
+  others, but must be owned by the user and not writable by others. Every
+  state file, including Portless's own state, goes through `scripts/lib/statedir.py`: files are
   opened relative to a verified directory, never through a link, under a byte
   cap, and replaced atomically. A pidfile records the process's kernel start
   time, and the scan carries it for attributed processes. `scripts/lib/proc.py`
@@ -327,13 +330,14 @@ Portal runs unsandboxed inside `omarchy-shell`, like every Omarchy plugin.
   pidfd. The separate tunnel stop paths use the guards described above.
   Provider binaries run by absolute path after a regular-file, owner and
   mode check, never by a bare name through PATH.
-- Every helper runs under a byte ceiling on its output and a hard deadline
-  (`scripts/lib/proc.py`, which ends the whole process group past either and
+- Helpers dispatched by the QML service run under an output byte ceiling
+  and a hard deadline (`scripts/lib/proc.py`, which ends the whole process group past either and
   passes nothing on); the scanner caps every field, its stderr, and the number
   of ports it will describe (past 512 it reports an error instead); provider
   API bodies and the installer download are byte-capped; every `curl` starts
   with `-q` so a `~/.curlrc` cannot alter the request; a tunnel's log
-  is truncated past 4 MiB.
+  is truncated past 4 MiB. Direct CLI mutations rely on the helpers' own
+  operation limits rather than the QML wrapper.
 - The Portless CA is imported only when it is a small plain file the user
   owns, is self-signed under Portless's own name, and verifies the
   certificate the live proxy actually presents.

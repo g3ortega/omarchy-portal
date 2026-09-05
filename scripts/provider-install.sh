@@ -3,10 +3,7 @@
 #
 # Trust model, stated plainly: the binary is one specific Cloudflare release,
 # pinned by version and SHA256 below, fetched from GitHub over TLS. A hash
-# mismatch aborts before the file is ever executed. Bumping the release means
-# editing the three digests, which is the point. If you prefer repository
-# signatures, install the distro package instead (sudo pacman -S cloudflared);
-# the setup surfaces that alternative rather than hiding it.
+# mismatch aborts before the file is ever executed.
 #
 # The download lands in a private temp dir, must match its digest, and must
 # parse as an ELF before it is installed into

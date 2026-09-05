@@ -165,7 +165,7 @@ Panel {
   function settingValue(def) { return String(setting(def.key, def.def)) }
 
   function applySetting(def, value) {
-    if (value === settingValue(def)) return              // nothing to write
+    if (value === settingValue(def)) return
     if (!hostWidget.saveSetting(def.key, def.type === "integer" ? Number(value) : value))
       showMoment("Could not save " + def.label + " — check ~/.config/omarchy/shell.json", true)
   }
@@ -477,11 +477,6 @@ Panel {
     selectedPort = detailEntry.port
   }
 
-  // One activation body for the keyboard and the row's own chips.
-  // Reaching the internet, or putting something on the machine, is asked
-  // first, in the row, like any other consequential action. What a setup
-  // does comes from the provider itself (setupClause), so no provider is
-  // named here.
   function chooseProvider(port, provider) {
     if (!service || !provider) return
     var entry = entryForPort(port)
