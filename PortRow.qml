@@ -104,6 +104,49 @@ Item {
     return bits.join(" · ")
   }
 
+  component PublicAction: Item {
+    id: action
+
+    required property string icon
+    required property string text
+    property color color: Util.alpha(Color.popups.text, 0.6)
+    signal clicked()
+
+    implicitWidth: actionGlyph.width + Style.spacing.xs + actionLabel.implicitWidth
+    implicitHeight: Style.space(24)
+
+    OpticalGlyph {
+      id: actionGlyph
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(16)
+      height: Style.space(16)
+      text: action.icon
+      fontSize: Style.font.caption
+      color: action.color
+    }
+
+    Text {
+      id: actionLabel
+      anchors.left: actionGlyph.right
+      anchors.leftMargin: Style.spacing.xs
+      anchors.verticalCenter: parent.verticalCenter
+      textFormat: Text.PlainText
+      text: action.text
+      color: action.color
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      font.underline: action.enabled && actionHover.hovered
+    }
+
+    HoverHandler { id: actionHover }
+    MouseArea {
+      anchors.fill: parent
+      cursorShape: action.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+      onClicked: action.clicked()
+    }
+  }
+
   Column {
     id: body
     width: parent.width
@@ -251,14 +294,13 @@ Item {
     Item {
       width: parent.width
       visible: row.publicTunnel !== null
-      height: visible ? Style.space(48) : 0
+      height: visible ? Style.space(44) : 0
 
       OpticalGlyph {
         id: shareGlyph
         anchors.left: parent.left
         anchors.leftMargin: row.titleAxis - width - Style.spacing.sm
-        anchors.top: parent.top
-        anchors.topMargin: Style.spacing.xs
+        anchors.verticalCenter: publicUrl.verticalCenter
         width: Style.font.caption + Style.spacing.sm
         height: Style.font.caption
         text: Icons.g("broadcast")
@@ -267,12 +309,14 @@ Item {
       }
 
       Text {
+        id: publicUrl
         anchors.left: parent.left
         anchors.leftMargin: row.titleAxis
         anchors.right: parent.right
         anchors.rightMargin: Style.spacing.md
         anchors.top: parent.top
-        anchors.topMargin: Style.spacing.xs
+        height: Style.space(20)
+        verticalAlignment: Text.AlignVCenter
         textFormat: Text.PlainText
         text: row.publicTunnelText
         color: Util.alpha(Color.urgent, row.dnsPending ? 0.5 : 1.0)
@@ -292,23 +336,25 @@ Item {
         anchors.left: parent.left
         anchors.leftMargin: row.titleAxis
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: Style.spacing.xs
         spacing: Style.spacing.lg
 
-        LinkText {
-          text: Icons.g("open") + "  Open"
+        PublicAction {
+          icon: Icons.g("open")
+          text: "Open"
           enabled: !row.dnsPending
           opacity: enabled ? 1 : 0.5
           onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)
         }
-        LinkText {
-          text: Icons.g("copy") + "  Copy"
+        PublicAction {
+          icon: Icons.g("copy")
+          text: "Copy"
           onClicked: if (row.service && row.publicTunnel) row.service.copyText(row.publicTunnel.url)
         }
-        LinkText {
+        PublicAction {
           readonly property bool stopping: !!(row.service && row.service.activeAction && row.publicTunnel
             && row.service.activeAction.shareStopKey === row.publicTunnel.provider + ":" + row.entry.port)
-          text: Icons.g("stop") + (stopping ? "  Stopping…" : "  Stop sharing")
+          icon: Icons.g("stop")
+          text: stopping ? "Stopping…" : "Stop sharing"
           color: Color.urgent
           enabled: !!row.service && !row.service.activeAction
           opacity: enabled || stopping ? 1 : 0.5
