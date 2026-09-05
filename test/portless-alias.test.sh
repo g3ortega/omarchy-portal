@@ -147,9 +147,17 @@ ss() {
 cloudflared_adopt() { printf '5000\thttps://example.trycloudflare.com\n'; }
 ngrok_adopt() { :; }
 result=$(cmd_status)
-jq -e '[.tunnels[] | select(.provider == "portless") | [.port, .aliasName, .managed]] == [[3000,"api.acme",false],[4000,"static",true],[6000,"branch.app",true]]' <<<"$result" >/dev/null
+jq -e '[.tunnels[] | select(.provider == "portless") | [.port, .aliasName, .managed]] == [[3000,"api.acme",false],[4000,"static",false],[6000,"branch.app",true]]' <<<"$result" >/dev/null \
+  || { echo "FAIL displayed alias classification: $result"; exit 1; }
 jq -e '[.tunnels[] | select(.provider == "cloudflared")] == [{provider:"cloudflared",port:5000,url:"https://example.trycloudflare.com",reach:"public",dns:"",targetHealthy:null}]' <<<"$result" >/dev/null
-echo 'PASS local metadata preserves full names and every managed owner without changing public rows'
+echo 'PASS local metadata classifies the displayed alias without changing public rows'
+
+printf static > "$STATE_DIR/portless-4000.name"
+printf https://static.localhost:1355 > "$STATE_DIR/portless-4000.url"
+printf local > "$STATE_DIR/portless-4000.reach"
+result=$(cmd_status)
+jq -e '.ok and any(.tunnels[]; .port == 4000 and .aliasName == "static" and .managed == false)' <<<"$result" >/dev/null
+echo 'PASS owned static alias remains editable beside a managed sibling'
 
 python3 - <<'PY'
 import json

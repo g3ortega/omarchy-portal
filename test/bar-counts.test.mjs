@@ -54,9 +54,10 @@ console.log("Bar counts, glyph state, tooltip, and hidden-label checks passed")
       writes.push(live)
       return true
     } } },
-    persistTimer: { restart() {} }
+    persistTimer: { restart() {} }, settingsSaveError: ""
   })
   ctx.root = ctx
+  vm.runInContext(source.match(/^  function mergedSettings\([^)]*\) \{\n[\s\S]*?^  \}/m)[0], ctx)
   vm.runInContext(save[0], ctx)
   const flush = () => vm.runInContext(`(function () {${timer[1]}})()`, ctx)
   ctx.saveSetting("iconColors", "Theme")
@@ -78,5 +79,26 @@ console.log("Bar counts, glyph state, tooltip, and hidden-label checks passed")
   assert.equal(live.customSetting, "external", "unrelated external settings survive")
   assert.equal(live.barLabel, "Count")
   assert.equal(writes.length, 3)
+  const acceptedWriter = ctx.bar.shell.updateEntryInline
+  ctx.bar.shell.updateEntryInline = () => false
+  ctx.saveSetting("refreshSeconds", 10)
+  flush()
+  assert.ok(ctx._pending, "a rejected write retains the pending edits")
+  assert.match(ctx.settingsSaveError, /not saved/i, "a rejected write has visible error state")
+  live = { ...live, customSetting: "changed during retry", nested: { options: [1, 2] } }
+  ctx.saveSetting("iconColors", "Theme")
+  ctx.bar.shell.updateEntryInline = acceptedWriter
+  flush()
+  assert.deepEqual(live.nested, { options: [1, 2] }, "unknown nested settings survive retries")
+  assert.equal(live.customSetting, "changed during retry", "retry preserves unrelated external edits")
+  assert.equal(live.refreshSeconds, 10, "retry retains the earlier rejected edit")
+  assert.equal(live.iconColors, "Theme")
+  assert.equal(ctx._pending, null)
+  assert.equal(ctx.settingsSaveError, "")
+  ctx.bar.shell.updateEntryInline = () => false
+  ctx.saveSetting("iconColors", "Theme")
+  flush()
+  assert.equal(ctx._pending, null, "an already-saved value is not a rejected write")
+  assert.equal(ctx.settingsSaveError, "")
 }
 console.log("Settings bursts preserve distinct edits and current persisted preferences")

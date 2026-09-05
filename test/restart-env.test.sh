@@ -88,7 +88,7 @@ int main(int argc,char **argv) {
     expected=b'custom-zero\0'+os.fsencode(output)+b'\0\0\0'
     assert data.startswith(expected),data
     print('ok empty captured environment does not inherit Portal helper variables')
-    for number,raw in enumerate([b'KEY=value',b'NO_EQUALS\0',b'=empty-key\0',b'K='+b'x'*8388608+b'\0']):
+    for number,raw in enumerate([b'KEY=value',b'NO_EQUALS\0',b'=empty-key\0',b'K=first\0K=last\0',b'K='+b'x'*8388608+b'\0']):
         state=fixture/('invalid-'+str(number))
         result=subprocess.run(helper+['launch-tracked',str(state),'--discard-output','record','--env-stdin','--exec',str(executable),'--','report',str(fixture/'invalid-output')],input=raw,env=clean,capture_output=True,timeout=10)
         assert result.returncode!=0 and not state.exists(),result.stderr

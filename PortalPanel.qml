@@ -165,7 +165,7 @@ Panel {
   function settingValue(def) { return String(setting(def.key, def.def)) }
 
   function applySetting(def, value) {
-    if (value === settingValue(def)) return
+    if (value === settingValue(def) && !hostWidget.settingsSaveError) return
     if (!hostWidget.saveSetting(def.key, def.type === "integer" ? Number(value) : value))
       showMoment("Could not save " + def.label + " — check ~/.config/omarchy/shell.json", true)
   }
@@ -1257,6 +1257,17 @@ Panel {
               }
             }
           }
+        }
+
+        Text {
+          width: parent.width
+          visible: root.mode === "settings" && text.length > 0
+          text: root.hostWidget ? root.hostWidget.settingsSaveError : ""
+          textFormat: Text.PlainText
+          color: Color.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WrapAtWordBoundaryOrAnywhere
         }
 
         // Setup commands stay in Settings until dismissed or replaced.

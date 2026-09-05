@@ -30,6 +30,7 @@ group.
 A row shows open, copy and charts on hover. Click it (or press Enter) and it
 unfolds a line of verbs: name, share, pause, restart, stop. Pause is SIGSTOP.
 Restart re-runs the process's own argv in its own directory and environment.
+Restart refuses duplicate environment names before stopping the process.
 A server started through mise, nvm, or a shell hook uses the same launcher.
 Signals only go to processes you own. Stop, pause, and restart ask first and
 name the process. Resume never asks.

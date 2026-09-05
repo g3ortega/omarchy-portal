@@ -2560,7 +2560,7 @@ lst=$(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $20}')
 is "and the process was not touched" "$(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $1}')" "S"
 # lifecycle.sh carries the same identity from the scan to every signal.
 is "lifecycle refuses a pid that is not the listed process" "$("$S/lifecycle.sh" pause "$lp" "$((lst + 1))" 4495 | jq -r .error)" "pid $lp is no longer the process that was listed"
-is "lifecycle refuses a port the process does not own" "$("$S/lifecycle.sh" pause "$lp" "$lst" 4496 | jq -r .error)" "pid $lp no longer owns port 4496"
+is "lifecycle refuses a port the process does not own" "$("$S/lifecycle.sh" pause "$lp" "$lst" 4496 | jq -r .error)" "pid $lp no longer exclusively owns port 4496"
 is "lifecycle pauses the listed process" "$("$S/lifecycle.sh" pause "$lp" "$lst" 4495 | jq -c .ok) $(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $1}')" "true T"
 is "lifecycle resumes it" "$("$S/lifecycle.sh" resume "$lp" "$lst" 4495 | jq -c .ok) $(cut -d')' -f2- "/proc/$lp/stat" | awk '{print $1}')" "true S"
 is "lifecycle stops it" "$("$S/lifecycle.sh" stop "$lp" "$lst" 4495 | jq -c .ok)" "true"

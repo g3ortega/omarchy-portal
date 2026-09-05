@@ -1266,8 +1266,9 @@ cmd_status() {
        targetHealthy: (if $row[5] == "true" then true elif $row[5] == "false" then false else null end)}
       + (if $row[0] == "portless" then
           if $portless_ok == 1 and $row[3] != "unknown" then
-            {aliasName: ($row[2] | alias_name($suffixes)),
-             managed: any($routes[]; .port == ($row[1] | tonumber) and .pid > 0)}
+            ($row[2] | capture("^https?://(?<host>[^/:]+)").host | ascii_downcase) as $host
+            | {aliasName: ($row[2] | alias_name($suffixes)),
+               managed: any($routes[]; .port == ($row[1] | tonumber) and .hostname == $host and .pid > 0)}
           else {aliasName: "", managed: null} end
         else {} end)
       + (if $internal == 1 and (($row[6] // "") != "") then {_statePort: $row[6]} else {} end))

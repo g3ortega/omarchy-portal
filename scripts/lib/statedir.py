@@ -23,6 +23,7 @@ and truncation go through the validated descriptor, never the path again.
   truncate <path> <maxbytes>              empty the file once it is past the cap
   lock     <dir> <nowait|wait> <name> -- <argv...>  run argv under a stable lock
   lock-clean <dir> <nowait|wait> <name> [--keep-existing-root] [--prune-to <dir>] -- <argv...> run argv; remove empty lock roots after success
+  check-env                            validate capped NUL-separated stdin environment
   launch   <dir> <logname> -- <argv...>   daemonize argv with the log as stdio;
                                            prints "pid starttime". The executable
                                            is walked to by descriptor (every
@@ -1127,19 +1128,28 @@ def cmd_launch(a):
     return launch_process(a[0], a[1], None, a[3:])
 
 
+def read_launch_environment():
+    raw = sys.stdin.buffer.read(8388609)
+    if len(raw) > 8388608 or (raw and not raw.endswith(b"\0")):
+        raise Refused("invalid or oversized launch environment")
+    environment = {}
+    for entry in raw[:-1].split(b"\0") if raw else []:
+        key, separator, value = entry.partition(b"=")
+        if not separator or not key or key in environment:
+            raise Refused("invalid or duplicate launch environment entry")
+        environment[key] = value
+    return environment
+
+
+def cmd_check_env(a):
+    read_launch_environment()
+
+
 def cmd_launch_tracked(a):
     logname = None if a[1] == "--discard-output" else a[1]
     environment = None
     if a[3] == "--env-stdin":
-        raw = sys.stdin.buffer.read(8388609)
-        if len(raw) > 8388608 or (raw and not raw.endswith(b"\0")):
-            raise Refused("invalid or oversized launch environment")
-        environment = {}
-        for entry in raw[:-1].split(b"\0") if raw else []:
-            key, separator, value = entry.partition(b"=")
-            if not separator or not key:
-                raise Refused("invalid launch environment entry")
-            environment[key] = value
+        environment = read_launch_environment()
         a = a[:3] + a[4:]
     if len(a) < 5 or a[3] != "--":
         if len(a) < 7 or a[3] != "--exec" or a[5] != "--":
@@ -1150,7 +1160,7 @@ def cmd_launch_tracked(a):
 
 COMMANDS = {
     "ensure": (cmd_ensure, 1), "dump": (cmd_dump, 1), "read": (cmd_read, 1), "write": (cmd_write, 1),
-    "create": (cmd_create, 1),
+    "create": (cmd_create, 1), "check-env": (cmd_check_env, 0),
     "append": (cmd_append, 2), "append-many": (cmd_append_many, 3), "remove": (cmd_remove, 2),
     "remove-digest": (cmd_remove_digest, 4), "truncate": (cmd_truncate, 2), "lock": (cmd_lock, 5),
     "lock-clean": (cmd_lock_clean, 5),

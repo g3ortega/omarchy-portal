@@ -36,9 +36,19 @@ port_busy() {
   [[ -n $sockets ]]
 }
 owns_port() {
-  local sockets
+  local sockets proc_rest row_attributed found=0
   sockets=$(ss -tlnpH "sport = :$2" 2>/dev/null) || return 2
-  grep -qF "pid=$1," <<<"$sockets"
+  while read -r _ _ _ _ _ proc_rest; do
+    row_attributed=0
+    while [[ $proc_rest =~ pid=([0-9]+) ]]; do
+      [[ ${BASH_REMATCH[1]} == "$1" ]] || return 1
+      proc_rest=${proc_rest#*"${BASH_REMATCH[0]}"}
+      row_attributed=1
+    done
+    (( row_attributed )) || return 1
+    found=1
+  done <<<"$sockets"
+  (( found ))
 }
 
 target() {  # <pid> <start> <port>: validated, the process the scan listed, and still the socket's owner
@@ -48,7 +58,7 @@ target() {  # <pid> <start> <port>: validated, the process the scan listed, and 
   owns_port "$1" "$3"; local owner_rc=$?
   (( owner_rc == 0 )) || {
     (( owner_rc == 2 )) && die "could not query attributed listening sockets"
-    die "pid $1 no longer owns port $3"
+    die "pid $1 no longer exclusively owns port $3"
   }
   proc check "$1" "$2" || die "pid $1 exited while its port ownership was checked"
 }
@@ -139,6 +149,8 @@ case "${1:-}" in
     # identity is checked again afterwards, so what was read is that process's.
     envs=(); mapfile -d '' envs < "/proc/$pid/environ" 2>/dev/null \
       || die "could not read the environment of pid $pid"
+    { if (( ${#envs[@]} )); then printf '%s\0' "${envs[@]}"; fi; } | state check-env >/dev/null \
+      || die "the environment of pid $pid cannot be restored exactly"
     exe=$(readlink "/proc/$pid/exe" 2>/dev/null); exe=${exe% (deleted)}
     proc check "$pid" "$start" || die "pid $pid exited while its environment was read"
     # argv[0] may be absolute, on the process's own PATH, or relative to its
@@ -154,6 +166,7 @@ case "${1:-}" in
     [[ -z $exec_path && -n $exe ]] && exec_path=$exe
     [[ -n $exec_path && -x $exec_path ]] || die "launcher not found: ${argv[0]}"
 
+    target "$pid" "$start" "$port"
     proc signal "$pid" "$start" TERM || die "could not stop pid $pid"
     # Wait for the port to actually free before relaunching into EADDRINUSE.
     for ((i = 0; i < 25; i++)); do

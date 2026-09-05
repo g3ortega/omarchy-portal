@@ -61,38 +61,42 @@ BarWidget {
     return null
   }
 
-  // updateEntryInline REPLACES the whole entry, so a save carries every
-  // current value plus the one change. Returns whether anything persisted.
+  function mergedSettings(changes) {
+    var merged = Object.assign({ id: moduleName }, liveEntry() || settings || ({}))
+    for (var key in changes) merged[key] = changes[key]
+    return merged
+  }
+
   function saveSetting(key, value) {
     if (!bar || !bar.shell || typeof bar.shell.updateEntryInline !== "function") return false
-    var current = _pending || liveEntry() || settings || ({})
-    var merged = { id: moduleName }
-    for (var k in current) if (k !== "id") merged[k] = current[k]
-    merged[key] = value
-    // Apply locally first so the chip reflects the click immediately rather
-    // than waiting for the shell's write-back (same as the built-in clock).
-    // Every read of `settings` is now correct, which is what lets the disk
-    // write be coalesced below.
-    root.settings = merged
-    root._pending = merged
+    var changes = Object.assign({}, _pending || ({}))
+    changes[key] = value
+    root._pending = changes
+    root.settings = mergedSettings(changes)
     persistTimer.restart()
     return true
   }
 
-  // A held h/l repeats at ~25/s, and each persist is two deep clones of the
-  // whole shell config plus an atomic write whose watcher fires a reload. One
-  // write per burst is indistinguishable to the user and cheap to the shell.
   property var _pending: null
+  property string settingsSaveError: ""
 
   Timer {
     id: persistTimer
     interval: 200
     onTriggered: {
       if (!root._pending) return
-      var entry = root._pending
+      var entry = root.mergedSettings(root._pending)
+      var current = root.liveEntry()
+      // The host also returns false when the entry already matches.
+      var unchanged = current && Object.keys(current).length === Object.keys(entry).length
+        && Object.keys(entry).every(function (key) { return current[key] === entry[key] })
+      if (!unchanged && root.bar.shell.updateEntryInline(root.moduleName, entry) === false) {
+        root.settingsSaveError = "Settings were not saved. Select a setting to retry. Check the Portal entry in ~/.config/omarchy/shell.json."
+        return
+      }
       root._pending = null
-      if (root.bar.shell.updateEntryInline(root.moduleName, entry) === false)
-        console.warn("g3ortega.portal: shell.json did not accept the settings write")
+      root.settings = entry
+      root.settingsSaveError = ""
     }
   }
 

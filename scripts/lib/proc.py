@@ -4,7 +4,7 @@
   run <stdout-cap> <deadline> -- <argv...>
       Run argv in a session of its own. Its stdout is held up to the cap and
       its stderr up to 4096 bytes; past the cap, or past the deadline
-      (seconds), the whole process group is ended (TERM, then KILL five
+      (seconds), the whole process group is ended (TERM, then KILL ten
       seconds later) and nothing is passed on: exit 125 for overflow, 124 for
       the deadline, so a reader never parses a document that was cut short.
       TERM, INT, or HUP sent to this wrapper ends and reaps the group before
@@ -30,6 +30,9 @@ import time
 
 STDERR_CAP = 4096
 GRACE = 5.0
+# Nested tunnel rollback needs five seconds for TERM and two for KILL,
+# plus helper and state cleanup time before its action shell can exit.
+RUN_GRACE = 10.0
 
 
 def starttime(pid):
@@ -97,7 +100,7 @@ def cmd_end(a):
     return 1
 
 
-def end_group(pid):
+def end_group(pid, grace=GRACE):
     """TERM the whole group, and if anything is still in it after the grace
     period, KILL the group. The leader exiting does not end this: a descendant
     that inherited the pipes and ignores TERM is still a group member."""
@@ -124,7 +127,7 @@ def end_group(pid):
         os.killpg(pid, signal.SIGTERM)
     except OSError:
         pass
-    limit = time.monotonic() + GRACE
+    limit = time.monotonic() + grace
     while time.monotonic() < limit:
         reap()
         if group_gone():
@@ -199,6 +202,8 @@ def cmd_run(a):
     status = None
     reaped = False
 
+    # Keep readers open until cleanup ends. Bash can print a signal diagnostic
+    # before running its trap; closing early would turn that write into SIGPIPE.
     def close_reads():
         for fd in tuple(open_reads):
             try:
@@ -235,8 +240,8 @@ def cmd_run(a):
             if status is not None:
                 break
         if status is not None:
+            end_group(pid, RUN_GRACE)
             close_reads()
-            end_group(pid)
             reaped = True
             sys.stderr.buffer.write(err[:STDERR_CAP])
             sys.stderr.buffer.write(b"\nproc: output past the cap\n" if status == 125 else b"\nproc: past the deadline\n")
@@ -253,8 +258,8 @@ def cmd_run(a):
                 reaped = True
                 break
             if time.monotonic() > limit:
+                end_group(pid, RUN_GRACE)
                 close_reads()
-                end_group(pid)
                 reaped = True
                 code = 124 << 8
                 break
@@ -266,15 +271,15 @@ def cmd_run(a):
             return 128 + os.WTERMSIG(code)
         return os.WEXITSTATUS(code)
     except ForwardedSignal:
-        close_reads()
         if not reaped:
-            end_group(pid)
+            end_group(pid, RUN_GRACE)
             reaped = True
+        close_reads()
         return 128 + forwarded[0]
     except BaseException:
-        close_reads()
         if not reaped:
-            end_group(pid)
+            end_group(pid, RUN_GRACE)
+        close_reads()
         raise
     finally:
         signal.pthread_sigmask(signal.SIG_BLOCK, watched)
