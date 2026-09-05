@@ -251,13 +251,14 @@ Item {
     Item {
       width: parent.width
       visible: row.publicTunnel !== null
-      height: visible ? Style.space(20) : 0
+      height: visible ? Style.space(48) : 0
 
       OpticalGlyph {
         id: shareGlyph
         anchors.left: parent.left
         anchors.leftMargin: row.titleAxis - width - Style.spacing.sm
-        anchors.verticalCenter: parent.verticalCenter
+        anchors.top: parent.top
+        anchors.topMargin: Style.spacing.xs
         width: Style.font.caption + Style.spacing.sm
         height: Style.font.caption
         text: Icons.g("broadcast")
@@ -265,25 +266,13 @@ Item {
         color: Color.urgent
       }
 
-      // While DNS for a fresh hostname is still propagating the line says so
-      // and is not a link: a URL that opens to NXDOMAIN teaches the wrong thing.
-      LinkText {
-        id: copyLink
-        anchors.right: parent.right
-        anchors.rightMargin: Style.spacing.xs
-        anchors.verticalCenter: parent.verticalCenter
-        enabled: !row.dnsPending
-        text: row.dnsPending ? "waiting for dns…" : "copy"
-        color: Util.alpha(row.foreground, 0.6)
-        onClicked: if (row.service && row.publicTunnel) row.service.copyText(row.publicTunnel.url)
-      }
-
       Text {
         anchors.left: parent.left
         anchors.leftMargin: row.titleAxis
-        anchors.right: copyLink.left
+        anchors.right: parent.right
         anchors.rightMargin: Style.spacing.md
-        anchors.verticalCenter: parent.verticalCenter
+        anchors.top: parent.top
+        anchors.topMargin: Style.spacing.xs
         textFormat: Text.PlainText
         text: row.publicTunnelText
         color: Util.alpha(Color.urgent, row.dnsPending ? 0.5 : 1.0)
@@ -296,6 +285,34 @@ Item {
           enabled: !row.dnsPending
           cursorShape: Qt.PointingHandCursor
           onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)
+        }
+      }
+
+      Row {
+        anchors.left: parent.left
+        anchors.leftMargin: row.titleAxis
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Style.spacing.xs
+        spacing: Style.spacing.lg
+
+        LinkText {
+          text: Icons.g("open") + "  Open"
+          enabled: !row.dnsPending
+          opacity: enabled ? 1 : 0.5
+          onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)
+        }
+        LinkText {
+          text: Icons.g("copy") + "  Copy"
+          onClicked: if (row.service && row.publicTunnel) row.service.copyText(row.publicTunnel.url)
+        }
+        LinkText {
+          readonly property bool stopping: !!(row.service && row.service.activeAction && row.publicTunnel
+            && row.service.activeAction.shareStopKey === row.publicTunnel.provider + ":" + row.entry.port)
+          text: Icons.g("stop") + (stopping ? "  Stopping…" : "  Stop sharing")
+          color: Color.urgent
+          enabled: !!row.service && !row.service.activeAction
+          opacity: enabled || stopping ? 1 : 0.5
+          onClicked: if (row.service && row.publicTunnel) row.service.unexpose(row.entry.port, row.publicTunnel.provider)
         }
       }
     }
