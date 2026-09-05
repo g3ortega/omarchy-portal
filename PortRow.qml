@@ -290,79 +290,6 @@ Item {
       }
     }
 
-    // ---- public exposure, stated loudly -------------------------------------
-    Item {
-      width: parent.width
-      visible: row.publicTunnel !== null
-      height: visible ? Style.space(44) : 0
-
-      OpticalGlyph {
-        id: shareGlyph
-        anchors.left: parent.left
-        anchors.leftMargin: row.titleAxis - width - Style.spacing.sm
-        anchors.verticalCenter: publicUrl.verticalCenter
-        width: Style.font.caption + Style.spacing.sm
-        height: Style.font.caption
-        text: Icons.g("broadcast")
-        fontSize: Style.font.caption
-        color: Color.urgent
-      }
-
-      Text {
-        id: publicUrl
-        anchors.left: parent.left
-        anchors.leftMargin: row.titleAxis
-        anchors.right: parent.right
-        anchors.rightMargin: Style.spacing.md
-        anchors.top: parent.top
-        height: Style.space(20)
-        verticalAlignment: Text.AlignVCenter
-        textFormat: Text.PlainText
-        text: row.publicTunnelText
-        color: Util.alpha(Color.urgent, row.dnsPending ? 0.5 : 1.0)
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        elide: Text.ElideMiddle
-
-        MouseArea {
-          anchors.fill: parent
-          enabled: !row.dnsPending
-          cursorShape: Qt.PointingHandCursor
-          onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)
-        }
-      }
-
-      Row {
-        anchors.left: parent.left
-        anchors.leftMargin: row.titleAxis
-        anchors.bottom: parent.bottom
-        spacing: Style.spacing.lg
-
-        PublicAction {
-          icon: Icons.g("open")
-          text: "Open"
-          enabled: !row.dnsPending
-          opacity: enabled ? 1 : 0.5
-          onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)
-        }
-        PublicAction {
-          icon: Icons.g("copy")
-          text: "Copy"
-          onClicked: if (row.service && row.publicTunnel) row.service.copyText(row.publicTunnel.url)
-        }
-        PublicAction {
-          readonly property bool stopping: !!(row.service && row.service.activeAction && row.publicTunnel
-            && row.service.activeAction.shareStopKey === row.publicTunnel.provider + ":" + row.entry.port)
-          icon: Icons.g("stop")
-          text: stopping ? "Stopping…" : "Stop sharing"
-          color: Color.urgent
-          enabled: !!row.service && !row.service.activeAction
-          opacity: enabled || stopping ? 1 : 0.5
-          onClicked: if (row.service && row.publicTunnel) row.service.unexpose(row.entry.port, row.publicTunnel.provider)
-        }
-      }
-    }
-
     // ---- expansion ----------------------------------------------------------
     // Everything a row can unfold — the verb line, the name editor, the
     // exposure choices — is one block in one register: quiet text at one
@@ -621,6 +548,77 @@ Item {
               }
             }
           }
+        }
+      }
+    }
+    Item {
+      width: parent.width
+      visible: row.publicTunnel !== null
+      height: visible ? Style.space(44) : 0
+
+      OpticalGlyph {
+        id: shareGlyph
+        anchors.left: parent.left
+        anchors.leftMargin: row.titleAxis - width - Style.spacing.sm
+        anchors.verticalCenter: publicUrl.verticalCenter
+        width: Style.font.caption + Style.spacing.sm
+        height: Style.font.caption
+        text: Icons.g("broadcast")
+        fontSize: Style.font.caption
+        color: Color.urgent
+      }
+
+      Text {
+        id: publicUrl
+        anchors.left: parent.left
+        anchors.leftMargin: row.titleAxis
+        anchors.right: parent.right
+        anchors.rightMargin: Style.spacing.md
+        anchors.top: parent.top
+        height: Style.space(20)
+        verticalAlignment: Text.AlignVCenter
+        textFormat: Text.PlainText
+        text: row.publicTunnelText
+        color: Util.alpha(Color.urgent, row.dnsPending ? 0.5 : 1.0)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideMiddle
+
+        MouseArea {
+          anchors.fill: parent
+          enabled: !row.dnsPending
+          cursorShape: Qt.PointingHandCursor
+          onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)
+        }
+      }
+
+      Row {
+        anchors.left: parent.left
+        anchors.leftMargin: row.titleAxis
+        anchors.bottom: parent.bottom
+        spacing: Style.spacing.lg
+
+        PublicAction {
+          icon: Icons.g("open")
+          text: "Open"
+          enabled: !row.dnsPending
+          opacity: enabled ? 1 : 0.5
+          onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)
+        }
+        PublicAction {
+          icon: Icons.g("copy")
+          text: "Copy"
+          onClicked: if (row.service && row.publicTunnel) row.service.copyText(row.publicTunnel.url)
+        }
+        PublicAction {
+          readonly property bool stopping: !!(row.service && row.service.activeAction && row.publicTunnel
+            && row.service.activeAction.shareStopKey === row.publicTunnel.provider + ":" + row.entry.port)
+          icon: Icons.g("stop")
+          text: stopping ? "Stopping…" : "Stop sharing"
+          color: Color.urgent
+          enabled: !!row.service && !row.service.activeAction
+          opacity: enabled || stopping ? 1 : 0.5
+          onClicked: if (row.service && row.publicTunnel) row.service.unexpose(row.entry.port, row.publicTunnel.provider)
         }
       }
     }
