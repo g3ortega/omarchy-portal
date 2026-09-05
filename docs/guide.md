@@ -230,6 +230,9 @@ and `parity` again. Commit only after that proof passes. Then run
 `dev/portal.sh sync`. `sync` checks parity before it pushes, fetches the branch
 in the installed clone, merges with `--ff-only`, and checks parity again.
 
+The restart environment regression compiles a private fixture with `cc`; install
+a C compiler and libc headers before running the suite.
+
 ```sh
 test/test.sh                 # syntax, manifest, Node and shell suites, qmllint, glyphs
 node test/detect.test.mjs    # detection, formatting, panel rules, chart and settings contracts

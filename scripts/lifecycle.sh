@@ -19,8 +19,8 @@
 # passed as JSON) in its own cwd and with its own environment, read from
 # /proc before the process is signalled — so a server started through a
 # version manager's shell hook comes back the same way. No shell ever parses
-# the argv, and the environment is applied with builtins, never on a command
-# line where another user could read it.
+# the argv. Environment bytes travel over stdin and apply only at final exec,
+# so target loader settings cannot affect Portal helpers or appear in argv.
 set -o pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/files.sh
@@ -137,7 +137,8 @@ case "${1:-}" in
     [[ ${#argv[@]} -gt 0 ]] || die "no command line recorded for pid $pid"
     # The process's environment and executable, while it still exists; the
     # identity is checked again afterwards, so what was read is that process's.
-    envs=(); mapfile -d '' envs < "/proc/$pid/environ" 2>/dev/null
+    envs=(); mapfile -d '' envs < "/proc/$pid/environ" 2>/dev/null \
+      || die "could not read the environment of pid $pid"
     exe=$(readlink "/proc/$pid/exe" 2>/dev/null); exe=${exe% (deleted)}
     proc check "$pid" "$start" || die "pid $pid exited while its environment was read"
     # argv[0] may be absolute, on the process's own PATH, or relative to its
@@ -170,14 +171,11 @@ case "${1:-}" in
     trap 'cancel_restart "$restart_pid" 130' INT
     trap 'cancel_restart "$restart_pid" 129' HUP
     (
-      if (( ${#envs[@]} > 0 )); then
-        for v in $(compgen -e); do unset "$v"; done
-        for kv in "${envs[@]}"; do [[ $kv =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && export "$kv"; done
-      fi
       # Discarded output: nothing reads a restart's log, and unlinking one that
       # the replacement still holds would park a growing inode nowhere.
-      cd "$cwd" && state launch-tracked "$PORTAL_RUNTIME_DIR" --discard-output "$restart_pid" \
-        --exec "$exec_path" -- "${argv[@]}" >/dev/null
+      cd "$cwd" && { if (( ${#envs[@]} )); then printf '%s\0' "${envs[@]}"; fi; } \
+        | state launch-tracked "$PORTAL_RUNTIME_DIR" --discard-output "$restart_pid" \
+          --env-stdin --exec "$exec_path" -- "${argv[@]}" >/dev/null
     )
     launch_rc=$?
     case $launch_rc in 129|130|143) cancel_restart "$restart_pid" "$launch_rc" ;; esac

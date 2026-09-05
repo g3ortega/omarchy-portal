@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs"
 import vm from "node:vm"
 
 const source = readFileSync(new URL("../PortalPanel.qml", import.meta.url), "utf8")
-const names = ["setupStillValid", "activateProviderSetup", "activateSetting", "openSettings", "activateVerb", "chooseProvider", "verbsFor", "activateVerbById"]
+const names = ["setupStillValid", "activateProviderSetup", "activateSetting", "openSettings", "activateVerb", "chooseProvider", "verbsFor", "activateVerbById", "activateVerbAtCursor"]
 const functions = names.map(name => {
   const found = source.match(new RegExp(`^  function ${name}\\([^)]*\\) \\{\\n[\\s\\S]*?^  \\}`, "m"))
   assert.ok(found, `${name} is defined`)
@@ -91,7 +91,7 @@ for (const [field, value] of [["status", "ready"], ["fix", "new command"], ["set
 }
 {
   const { ctx, calls } = session()
-  ctx.service.routeFor = () => ({ host: "app.localhost" })
+  ctx.service.routeFor = () => ({ host: "app.localhost", reach: "local", managed: false, aliasName: "app" })
   ctx.activateVerb({ port: 3000 }, { id: "name" })
   assert.deepEqual(calls, [["expand", 3000, "naming"]])
 }
@@ -136,9 +136,9 @@ for (const [field, value] of [["status", "ready"], ["fix", "new command"], ["set
 {
   const { ctx } = session()
   const entry = { port: 3000, category: "dev", process: { pid: 999999, start: "1" } }
-  ctx.service.routeFor = () => ({ host: "api.project.localhost", aliasName: "api.project", managed: false })
+  ctx.service.routeFor = () => ({ host: "api.project.localhost", reach: "local", aliasName: "api.project", managed: false })
   assert.equal(ctx.verbsFor(entry)[0].label, "rename")
-  ctx.service.routeFor = () => ({ host: "api.project.localhost", aliasName: "api.project", managed: true })
+  ctx.service.routeFor = () => ({ host: "api.project.localhost", reach: "local", aliasName: "api.project", managed: true })
   assert.deepEqual(Array.from(ctx.verbsFor(entry), verb => verb.id), ["share", "pause", "restart", "stop"])
   for (const route of [{ managed: null, aliasName: "" }, { managed: false, aliasName: "" }, { aliasName: "api.project" }]) {
     ctx.service.routeFor = () => route
@@ -149,10 +149,11 @@ for (const [field, value] of [["status", "ready"], ["fix", "new command"], ["set
   const rowSource = readFileSync(new URL("../PortRow.qml", import.meta.url), "utf8")
   const editable = new Function("row", `return ${rowSource.match(/readonly property bool editable: ([^\n]+)/)[1]}`)
   assert.equal(editable({ route: null }), true)
-  assert.equal(editable({ route: { managed: false, aliasName: "api.project" } }), true)
+  assert.equal(editable({ route: { reach: "local", managed: false, aliasName: "api.project" } }), true)
   for (const route of [{ managed: true, aliasName: "api.project" }, { managed: null, aliasName: "" }, { managed: false, aliasName: "" }, {}]) {
     assert.equal(editable({ route }), false)
   }
+  assert.equal(editable({ route: { reach: "lan", managed: false, aliasName: "api.project" } }), false)
   const editor = rowSource.slice(rowSource.indexOf("id: nameField"), rowSource.indexOf("id: tldText"))
   const expression = editor.match(/text: (row.named[^\n]+\n[^\n]+)/)[1]
   const name = new Function("row", `return ${expression}`)
@@ -218,3 +219,41 @@ for (const [field, value] of [["status", "ready"], ["fix", "new command"], ["set
   assert.equal(ctx.settingsOpen, false)
 }
 console.log("Settings setup, revalidation, routing, and selection checks passed")
+
+{
+  const { ctx, calls } = session()
+  const entry = { port: 3000, category: "dev", process: { pid: 999999, start: "1" } }
+  const route = { reach: "lan", managed: false, aliasName: "api.project" }
+  ctx.service.routeFor = () => route
+  assert.equal(ctx.verbsFor(entry).find(verb => verb.id === "name").label, "name setup")
+  assert.equal(ctx.verbsFor(entry).find(verb => verb.id === "unname").label, "remove name")
+  ctx.activateVerbById(entry, "name")
+  assert.equal(ctx.settingsOpen, true)
+  assert.equal(calls.some(call => call[0] === "expand"), false)
+  calls.length = 0
+  ctx.selectedEntry = () => entry
+  ctx.verbIndex = ctx.verbsFor(entry).findIndex(verb => verb.id === "unname")
+  ctx.activateVerbAtCursor()
+  assert.deepEqual(calls, [["unexpose", 3000, "portless"]], "Enter on the removal action stops the exact local route")
+  calls.length = 0
+  ctx.activateVerb(entry, ctx.verbsFor(entry).find(verb => verb.id === "unname"))
+  assert.deepEqual(calls, [["unexpose", 3000, "portless"]], "mouse and keyboard use the same removal")
+  for (const managed of [true, null]) {
+    route.managed = managed
+    calls.length = 0
+    assert.equal(ctx.verbsFor(entry).some(verb => ["name", "unname"].includes(verb.id)), false)
+    ctx.activateVerb(entry, { id: "unname" })
+    ctx.activateVerb(entry, { id: "name" })
+    assert.deepEqual(calls, [], "stale actions cannot mutate protected routes")
+  }
+}
+
+{
+  const rowSource = readFileSync(new URL("../PortRow.qml", import.meta.url), "utf8")
+  const copy = rowSource.match(/PublicAction \{\n          icon: Icons.g\("copy"\)[\s\S]*?\n        \}/)[0]
+  const enabled = copy.match(/enabled: ([^\n]+)/)
+  assert.ok(enabled, "public Copy has a readiness gate")
+  const canCopy = new Function("row", `return ${enabled[1]}`)
+  assert.equal(canCopy({ dnsPending: true }), false)
+  assert.equal(canCopy({ dnsPending: false }), true)
+}

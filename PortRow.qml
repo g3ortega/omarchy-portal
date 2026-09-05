@@ -386,7 +386,8 @@ Item {
           }
 
           // -- the verbs ------------------------------------------------------
-          Row {
+          Flow {
+            width: parent.width
             visible: !row.confirming
             spacing: Style.spacing.sm
 
@@ -428,7 +429,7 @@ Item {
           // -- the name editor ------------------------------------------------
           Item {
             id: nameEditor
-            readonly property bool editable: !row.route || (row.route.managed === false && !!row.route.aliasName)
+            readonly property bool editable: !row.route || (row.route.reach === "local" && row.route.managed === false && !!row.route.aliasName)
             onEditableChanged: if (!editable && row.naming) row.editorCanceled()
             width: parent.width
             visible: row.naming && !row.confirming
@@ -600,6 +601,8 @@ Item {
         PublicAction {
           icon: Icons.g("copy")
           text: "Copy"
+          enabled: !row.dnsPending
+          opacity: enabled ? 1 : 0.5
           onClicked: if (row.service && row.publicTunnel) row.service.copyText(row.publicTunnel.url)
         }
         PublicAction {

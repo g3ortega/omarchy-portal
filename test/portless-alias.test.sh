@@ -76,6 +76,21 @@ for action in start stop; do
 done
 echo 'PASS managed routes reject alias rename and removal without signals'
 
+reset_routes '[{"hostname":"native.localhost","port":3000,"pid":999999},{"hostname":"owned.localhost","port":3000,"pid":0}]'
+write_own "$(namefile portless 3000)" owned
+result=$(cmd_stop portless 3000)
+jq -e '.ok == true' <<<"$result" >/dev/null
+jq -e 'length == 1 and .[0].hostname == "native.localhost" and .[0].pid == 999999' "$PORTLESS_STATE_DIR/routes.json" >/dev/null
+[[ ! -e $(namefile portless 3000) && ! -e $FIXTURE/signals ]]
+echo 'PASS owned static alias removal preserves a managed route on the same port'
+
+reset_routes '[{"hostname":"owned.localhost","port":3000,"pid":999999}]'
+write_own "$(namefile portless 3000)" owned
+result=$(cmd_stop portless 3000)
+jq -e '.ok == false' <<<"$result" >/dev/null
+[[ ! -s $FIXTURE/calls && -e $(namefile portless 3000) && ! -e $FIXTURE/signals ]]
+echo 'PASS stale ownership marker cannot remove a managed matching alias'
+
 reset_routes '[{"hostname":"api.acme.dev.test","port":3000,"pid":0}]'
 [[ $(portless_route_name 3000) == api.acme ]]
 echo 'PASS adopted alias names use the longest matching domain suffix'

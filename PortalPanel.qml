@@ -386,8 +386,10 @@ Panel {
     var expandedHere = selectedPort === entry.port
     if (entry.category !== "system" && entry.kind !== "orphan"
         && (!route || (route.managed === false && !!route.aliasName)))
-      out.push({ id: "name", label: named ? "rename" : "name",
+      out.push({ id: "name", label: named ? (route.reach === "local" ? "rename" : "name setup") : "name",
                  on: expandedHere && expandedKind === "naming", urgent: false })
+    if (route && route.reach !== "local" && route.managed === false && !!route.aliasName)
+      out.push({ id: "unname", label: "remove name", on: false, urgent: false })
     if (service.urlFor(entry.port, entry.url) !== "" && entry.category !== "system"
         && tunnel === null && service.validProcessIdentity(entry.process))
       out.push({ id: "share", label: "share",
@@ -404,8 +406,15 @@ Panel {
   function activateVerb(entry, verb) {
     switch (verb.id) {
     case "name":
-      if (portlessReady || service.routeFor(entry.port)) expand(entry.port, "naming")
+      var route = service.routeFor(entry.port)
+      if (route && (route.managed !== false || !route.aliasName)) break
+      if (route ? route.reach === "local" : portlessReady) expand(entry.port, "naming")
       else openSettings("portless")
+      break
+    case "unname":
+      var removable = service.routeFor(entry.port)
+      if (removable && removable.managed === false && !!removable.aliasName)
+        service.unexpose(entry.port, "portless")
       break
     case "share":
       var tunnel = service.publicTunnelFor(entry.port)

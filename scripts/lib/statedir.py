@@ -28,11 +28,13 @@ and truncation go through the validated descriptor, never the path again.
                                            is walked to by descriptor (every
                                            directory root's or ours, swappable by
                                            nobody else) and executed by descriptor.
-  launch-tracked <dir> <logname> <pidname> -- <argv...>
+  launch-tracked <dir> <logname> <pidname> [--env-stdin] [--exec <path>] -- <argv...>
                                            launch only after the pid record is durable.
                                            The log name may instead be
                                            --discard-output: stdio then goes to
-                                           /dev/null and no log leaf is created
+                                           /dev/null and no log leaf is created.
+                                           --env-stdin reads capped NUL-separated
+                                           KEY=value bytes for the final exec only.
 
 Most commands exit 0 on success, 1 when refused, and 2 on top-level usage.
 Lock commands return 75 on nowait contention and otherwise return their child's status.
@@ -1026,7 +1028,7 @@ def cmd_truncate(a):
         os.close(dirfd)
 
 
-def launch_process(d, logname, pidname, argv, executable=None):
+def launch_process(d, logname, pidname, argv, executable=None, environment=None):
     discard = logname is None
     if not discard:
         check_name(logname, "log name")
@@ -1078,7 +1080,7 @@ def launch_process(d, logname, pidname, argv, executable=None):
                     os._exit(126)
                 os.close(release_r)
                 os.set_inheritable(exefd, True)
-                os.execve(exefd, argv, os.environ)
+                os.execve(exefd, argv, os.environ if environment is None else environment)
             finally:
                 os._exit(127)
 
@@ -1127,11 +1129,23 @@ def cmd_launch(a):
 
 def cmd_launch_tracked(a):
     logname = None if a[1] == "--discard-output" else a[1]
+    environment = None
+    if a[3] == "--env-stdin":
+        raw = sys.stdin.buffer.read(8388609)
+        if len(raw) > 8388608 or (raw and not raw.endswith(b"\0")):
+            raise Refused("invalid or oversized launch environment")
+        environment = {}
+        for entry in raw[:-1].split(b"\0") if raw else []:
+            key, separator, value = entry.partition(b"=")
+            if not separator or not key:
+                raise Refused("invalid launch environment entry")
+            environment[key] = value
+        a = a[:3] + a[4:]
     if len(a) < 5 or a[3] != "--":
         if len(a) < 7 or a[3] != "--exec" or a[5] != "--":
-            raise Refused("usage: launch-tracked <dir> <logname|--discard-output> <pidname> [--exec <path>] -- <argv...>")
-        return launch_process(a[0], logname, a[2], a[6:], a[4])
-    return launch_process(a[0], logname, a[2], a[4:])
+            raise Refused("usage: launch-tracked <dir> <logname|--discard-output> <pidname> [--env-stdin] [--exec <path>] -- <argv...>")
+        return launch_process(a[0], logname, a[2], a[6:], a[4], environment)
+    return launch_process(a[0], logname, a[2], a[4:], environment=environment)
 
 
 COMMANDS = {

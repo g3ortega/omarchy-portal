@@ -598,6 +598,7 @@ cmd_start_portless() {  # <port> <name>
   portless_managed_port "$port" && die "this route is managed by portless run; change its name in the owning app"
   # A port holds one name; drop the previous alias on rename.
   local n; n=$(slug "${name:-port-$port}")
+  n=${n,,}
   [[ -n $n ]] || n="port-$port"
   if [[ -e $(namefile portless "$port") || -L $(namefile portless "$port") ]]; then
     old=$(cat_own "$(namefile portless "$port")" 256) \
@@ -669,7 +670,7 @@ cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
       *) name="$1"; shift ;;
     esac
   done
-  valid_port "$port" || die "invalid port"
+  port=$(canonical_port "$port") || die "invalid port"
   known_provider "$provider" || die "unknown provider"
   if [[ $provider == portless ]]; then cmd_start_portless "$port" "$name"; return; fi
   if [[ -n $target ]]; then
@@ -704,7 +705,8 @@ cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
     pidline=$(cat_own "$pf" 64) || die "$provider on port $port has a pidfile that cannot be read; its records are kept"
     valid_identity_line "$pidline" || die "$provider on port $port has a malformed pidfile; its records are kept"
     if alive_line "$pidline" "$provider"; then
-      existing_url=$(read_own "$(urlfile "$provider" "$port")" 8192)
+      existing_url=$(cat_own "$(urlfile "$provider" "$port")" 8192 \
+        | jq -Rers 'select(index("\u0000") == null and index("\n") == null)')
       if valid_url "$existing_url"; then
         write_own "$(targetfile "$provider" "$port")" "$target" || die "could not bind the existing share to the approved process"
         state_remove "$STATE_DIR" "$provider-$port.idle" || die "could not clear the existing share's idle deadline"
@@ -786,7 +788,6 @@ cmd_stop() {
   local pidline bin
   if [[ $provider == portless ]]; then
     portless_state_load || die "could not read Portless state safely; its records are kept"
-    portless_managed_port "$port" && die "this route is managed by portless run; stop it from the owning app"
     local n n_lower alias_routes marker_dump marker_name="portless-$state_port.name"
     marker_dump=$(state dump "$STATE_DIR" 256 "$STATE_FILES_CAP" "$marker_name" 2>/dev/null) \
       || die "the Portless name record for port $port cannot be read; its records are kept"
@@ -799,6 +800,7 @@ cmd_stop() {
       n_lower=$(portal_marker_lower "$n") \
         || die "the Portless name record for port $port is malformed; its records are kept"
     else
+      portless_managed_port "$port" && die "this route is managed by portless run; stop it from the owning app"
       n=$(portless_route_name "$port") || die "could not identify the existing Portless alias safely"
       n_lower=${n,,}
       [[ -z $n ]] || valid_tld "$n_lower" \
