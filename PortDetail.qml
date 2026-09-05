@@ -11,7 +11,7 @@ import "lib/Format.js" as Format
 // Reached from the row's metrics icon or the l key.
 //
 // Data shape: one pass per scan over the merged series computes exact
-// lo/hi/last for every metric, and a strided view (≤ ~400 points) feeds the
+// lo/hi for every metric, and a strided view (≤ ~400 points) feeds the
 // canvases — paint cost is capped no matter how much disk history a watched
 // port carries.
 Item {
@@ -30,8 +30,8 @@ Item {
   readonly property var stats: service && entry ? (service.stats[entry.port] || null) : null
   readonly property string effectiveUrl: service && entry ? service.urlFor(entry.port, entry.url) : ""
 
-  // Disk history extends the ring backwards. The cutoff is decided once, at
-  // load — the prefix never changes afterwards, so it is never re-filtered.
+  readonly property int historyPort: service && service.pluginDir && entry && watched ? entry.port : 0
+  property string historyStatus: "idle"
   property var diskPrefix: []
 
   // The hovered instant, shared by every card on the page.
@@ -39,8 +39,8 @@ Item {
 
   Connections {
     target: detail.service
-    function onDiskHistoryLoaded(port, samples) {
-      if (!detail.entry || port !== detail.entry.port) return
+    function onDiskHistoryLoaded(port, samples, error) {
+      if (!detail.historyPort || port !== detail.historyPort) return
       var ring = detail.service.history[port] || []
       var cutoff = ring.length > 0 ? ring[0].t : Number.MAX_SAFE_INTEGER
       var prefix = []
@@ -48,15 +48,15 @@ Item {
         if (samples[i].t < cutoff) prefix.push(samples[i])
       }
       detail.diskPrefix = prefix
+      detail.historyStatus = error ? "error" : "ready"
     }
   }
 
-  // j/k walks this page across ports without reloading the component, so the
-  // disk prefix follows the entry rather than the component lifetime. The
-  // initial binding on `entry` fires this too.
-  onEntryChanged: {
+  onHistoryPortChanged: {
     diskPrefix = []
-    if (service && entry && service.isWatched(entry.port)) service.loadDiskHistory(entry.port)
+    hoverIndex = -1
+    historyStatus = historyPort ? "loading" : "idle"
+    if (historyPort) service.loadDiskHistory(historyPort)
   }
 
   // zeroAnchored says whether zero is a reading this metric can actually
@@ -95,7 +95,7 @@ Item {
 
     var agg = ({})
     for (var m = 0; m < metricDefs.length; m++) {
-      agg[metricDefs[m].field] = { lo: null, hi: null, last: null }
+      agg[metricDefs[m].field] = { lo: null, hi: null }
     }
     for (var i = 0; i < full.length; i++) {
       for (var f = 0; f < metricDefs.length; f++) {
@@ -105,7 +105,6 @@ Item {
         var st = agg[key]
         if (st.lo === null || v < st.lo) st.lo = v
         if (st.hi === null || v > st.hi) st.hi = v
-        st.last = v
       }
     }
 
@@ -255,7 +254,8 @@ Item {
           samples: detail.view.samples
           lo: detail.view.stats[modelData.field].lo
           hi: detail.view.stats[modelData.field].hi
-          last: detail.view.stats[modelData.field].last
+          last: detail.stats && detail.stats[modelData.field] != null ? detail.stats[modelData.field] : null
+          loading: detail.historyStatus === "loading"
           hoverIndex: detail.hoverIndex
           onHoverIndexRequested: function (i) { detail.hoverIndex = i }
           zeroAnchored: modelData.zeroAnchored
@@ -280,6 +280,8 @@ Item {
           var ago = Math.max(0, Math.round(Date.now() / 1000) - samples[h].t)
           return Qt.formatDateTime(d, "HH:mm:ss") + "  ·  " + Format.span(ago) + " ago"
         }
+        if (detail.historyStatus === "loading") return "Loading saved history"
+        if (detail.historyStatus === "error") return "Saved history unavailable · showing live samples"
         var n = detail.view.count
         if (n === 0) return "Collecting samples — one every scan."
         var m = detail.view.minutes

@@ -78,7 +78,8 @@ case "${1:-}" in
     valid_port "${2:-}" || die "invalid port"
     f="$METRICS_DIR/$2.jsonl"
     # A line torn by a crash mid-append must not cost the rest of the file.
-    raw=$(cat_own "$f" "$MAX_BYTES")
+    if [[ ! -e $f && ! -L $f ]]; then echo '{"ok":true,"samples":[]}'; exit 0; fi
+    raw=$(cat_own "$f" "$MAX_BYTES") || die "could not read saved history for port $2 safely"
     jq -Rnc '{ok:true, samples:[inputs | fromjson?]}' <<<"$raw" || echo '{"ok":true,"samples":[]}'
     ;;
   *) echo '{"ok":false,"error":"usage: metrics.sh watched|watch <port>|unwatch <port>|append-batch <json-map>|read <port>"}' ;;

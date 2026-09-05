@@ -557,14 +557,15 @@ Item {
 
   // Disk-backed samples for one port, delivered via diskHistoryLoaded. The
   // detail view merges them with the in-memory ring.
-  signal diskHistoryLoaded(int port, var samples)
+  signal diskHistoryLoaded(int port, var samples, string error)
   property int _diskPort: 0
   property int _diskQueued: 0   // j/k faster than the read: remember the last ask
 
   function loadDiskHistory(port) {
     if (diskReadProcess.running) { _diskQueued = port; return }
     _diskPort = port
-    runScript(diskReadProcess, "metrics.sh", ["read", String(port)])
+    if (!runScript(diskReadProcess, "metrics.sh", ["read", String(port)]))
+      diskHistoryLoaded(port, [], "could not load saved history")
   }
 
   function copyText(value, quiet) {
@@ -670,16 +671,16 @@ Item {
   Process {
     id: diskReadProcess
     stdout: StdioCollector { id: diskOut; waitForEnd: true }
-    onExited: function () {
+    onExited: function (exitCode) {
       if (!root.alive) return
+      var port = root._diskPort
+      var queued = root._diskQueued
+      root._diskQueued = 0
       var parsed = root.parseJson(diskOut.text)
-      if (parsed && Array.isArray(parsed.samples)) {
-        root.diskHistoryLoaded(root._diskPort, parsed.samples)
-        if (root._diskQueued && root._diskQueued !== root._diskPort) {
-          var q = root._diskQueued; root._diskQueued = 0
-          root.loadDiskHistory(q)
-        } else root._diskQueued = 0
-      }
+      var success = exitCode === 0 && parsed && parsed.ok === true && Array.isArray(parsed.samples)
+      var error = success ? "" : (parsed && parsed.error ? String(parsed.error) : "could not load saved history")
+      if (queued && queued !== port) root.loadDiskHistory(queued)
+      root.diskHistoryLoaded(port, success ? parsed.samples : [], error)
     }
   }
 

@@ -11,6 +11,7 @@ Item {
   id: card
 
   property string title: ""
+  property bool loading: false
   property var samples: []          // strided [{t, <field>...}] oldest -> newest
   property string field: ""
   // Exact over the full (un-strided) series, provided by the owner.
@@ -144,6 +145,7 @@ Item {
       Canvas {
         id: canvas
         anchors.fill: parent
+        visible: !card.loading
 
         onPaint: {
           var ctx = getContext("2d")
@@ -218,7 +220,7 @@ Item {
 
       // Crosshair as items: hover costs two bindings, zero repaints.
       Rectangle {
-        visible: card.hoverIndex >= 0 && card.phase !== "collecting"
+        visible: !card.loading && card.hoverIndex >= 0 && card.phase !== "collecting"
         x: card.plotX(card.hoverIndex)
         y: card.pad
         width: 1
@@ -227,7 +229,7 @@ Item {
       }
 
       Rectangle {
-        visible: card.hoverIndex >= 0 && card.hasShape && card.series[card.hoverIndex]
+        visible: !card.loading && card.hoverIndex >= 0 && card.hasShape && card.series[card.hoverIndex]
           && card.series[card.hoverIndex].v !== null
         x: card.plotX(card.hoverIndex) - 3
         y: visible ? card.plotY(card.series[card.hoverIndex].v) - 3 : 0
@@ -237,11 +239,11 @@ Item {
 
       Text {
         anchors.centerIn: parent
-        visible: card.phase === "collecting"
+        visible: card.loading || card.phase === "collecting"
         width: plot.width
         horizontalAlignment: Text.AlignHCenter
         textFormat: Text.PlainText
-        text: card.emptyLabel
+        text: card.loading ? "Loading…" : card.emptyLabel
         color: Util.alpha(card.foreground, 0.45)
         font.family: card.fontFamily
         font.pixelSize: Style.font.caption
@@ -251,7 +253,7 @@ Item {
       MouseArea {
         anchors.fill: parent
         hoverEnabled: true
-        enabled: card.series.length > 1
+        enabled: !card.loading && card.series.length > 1
         onPositionChanged: function (mouse) {
           var n = card.series.length
           var i = Math.round((mouse.x - card.pad) / (canvas.width - 2 * card.pad) * (n - 1))
@@ -271,9 +273,10 @@ Item {
         elide: Text.ElideRight
         textFormat: Text.PlainText
         text: {
+          if (card.loading) return ""
           if (card.phase === "collecting") return ""
           if (card.phase === "zero") return card.zeroLabel !== "" ? card.zeroLabel : "none recorded"
-          if (card.phase === "steady") return "steady at " + card.format(card.last)
+          if (card.phase === "steady") return "steady at " + card.format(card.lo)
           // A truncated axis must say so: the band IS the scale.
           return card.zeroAnchored ? "peak " + card.format(card.hi)
             : card.format(card.lo) + " – " + card.format(card.hi)
@@ -285,6 +288,7 @@ Item {
     }
   }
 
+  onLoadingChanged: canvas.requestPaint()
   onSeriesChanged: canvas.requestPaint()
   onForegroundChanged: canvas.requestPaint()
   onAccentChanged: canvas.requestPaint()
