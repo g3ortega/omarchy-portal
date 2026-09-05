@@ -109,3 +109,6 @@ console.log('Actual Canvas code preserves peak envelopes, leaves missing bins un
 
 assert.doesNotMatch(detail, /model: \[0, 0\.5, 1\]/, 'a shared range is not a spatial axis across two independent chart columns')
 assert.match(detail, /horizontalAlignment: Text.AlignHCenter\n      text: Qt\.formatDateTime\(new Date\(detail\.view\.start/, 'the shared time window is stated as one centered interval')
+assert.doesNotMatch(detail, /onWatchedChanged:/, 'watch state does not change the retained-history query')
+assert.match(detail, /onQueryKeyChanged: Qt.callLater\(requestRange, true\)/, 'lazy query-key evaluation cannot mutate the active footer binding')
+assert.match(detail, /Component.onCompleted: Qt.callLater\(requestRange, true\)/, 'construction schedules one initial range load even before service readiness')

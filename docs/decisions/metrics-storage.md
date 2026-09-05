@@ -123,3 +123,37 @@ The actual migration audit compared all original field values and duplicate
 multiplicities across MySQL, Redis, DynamoDB, and both OpenSearch ports.
 All 86,400 original rows were present. Each original file's SHA-256 matched its
 import ledger; newer samples were allowed in the database comparison.
+
+## Separate HTTP and TCP measurements
+
+Schema version 2 adds nullable `tcpRttMs` and `tcpRttCount` columns in one
+transaction. Existing sample IDs, values, duplicate rows, imports, and retry
+records remain unchanged. `latMs` keeps its HTTP response-duration meaning.
+Old rows receive null TCP fields.
+
+The scanner obtains TCP RTT from the established-socket snapshot it already
+uses for connection counts. It averages the kernel RTT estimates across sockets
+with values at each local port. `tcpRttCount` records the contributing socket
+count. Chart buckets average those scan means, without weighting scans by
+socket count. A missing estimate stays null. Estimates can persist while
+connections are idle, so these samples are observations of kernel state rather
+than fresh request timings.
+
+This approach creates no connections and sends no application payloads. An
+active TCP handshake can finish before the application accepts a connection.
+WebSocket Ping requires an established session with the correct endpoint and
+authentication. Neither is a suitable automatic application-health check.
+See the [ss manual](https://man7.org/linux/man-pages/man8/ss.8.html) and
+[WebSocket protocol](https://www.rfc-editor.org/rfc/rfc6455.html#section-5.5.2).
+
+The installed version-1 migration was compared with a consistent database
+snapshot. All 91,938 prior rows retained their IDs and every previous value.
+Their new TCP fields were null. Existing import and retry records remained
+intact. A 400-bucket response with five metrics and long fractional values
+measured 233,366 bytes, within the unchanged 256 KiB SQL response limit.
+
+A 16,384-socket fixture near the 4 MiB snapshot limit exposed repeated string
+copies in the first parser. One streaming aggregation pass reduced that case
+from 11.054 seconds to 0.185 seconds on this machine. Locale-independent byte
+counting rejects oversized snapshots. Real IPv4 and IPv6 fixtures confirmed
+passive RTT values without HTTP probes.

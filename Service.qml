@@ -160,14 +160,10 @@ Item {
   }
 
   // ---- scanning -------------------------------------------------------------
-  // Probe HTTP latency only where it means something and was asked for: the
-  // port whose charts are open, then watched ports, then dev servers with a
-  // URL. The cap keeps a pathological port list from turning the scanner into
-  // a load generator; ordering decides who gets starved by it.
   property int focusPort: 0
   function probeList() {
     var out = [], seen = ({}), live = ({})
-    for (var i = 0; i < ports.length; i++) live[ports[i].port] = true
+    for (var i = 0; i < ports.length; i++) live[ports[i].port] = ports[i].httpProbe
     function add(p) { if (p && live[p] && !seen[p]) { seen[p] = true; out.push(p) } }
     add(focusPort)
     watchedPorts.forEach(add)   // a watched port that is not listening must not spend the cap
@@ -244,11 +240,14 @@ Item {
         upSec: e.upSec,
         latMs: e.latMs,
         httpCode: e.httpCode,
+        tcpRttMs: e.tcpRttMs,
+        tcpRttCount: e.tcpRttCount,
         paused: e.procState === "T"
       }
       nextStats[e.port] = st
       var sample = { t: st.t, conns: st.conns, cpuPct: st.cpuPct,
-                     rssKb: st.rssKb, latMs: st.latMs, httpCode: st.httpCode }
+                     rssKb: st.rssKb, latMs: st.latMs, httpCode: st.httpCode,
+                     tcpRttMs: st.tcpRttMs, tcpRttCount: st.tcpRttCount }
       var ring = history[e.port] || []
       ring.push(sample)
       if (ring.length > maxSamples) ring.splice(0, ring.length - maxSamples)

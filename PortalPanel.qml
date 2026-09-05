@@ -610,6 +610,10 @@ Panel {
         if (t === "?") { root.helpOpen = true; return }
         if (t === ",") { root.toggleSettings(); return }
         if (root.mode === "settings") return
+        if (root.mode === "detail" && t === "t") {
+          if (detailLoader.item) detailLoader.item.toggleLatency()
+          return
+        }
         if (root.mode === "detail" && (t === "[" || t === "]")) {
           root.stepRange(t === "[" ? -1 : 1)
           return
@@ -774,6 +778,7 @@ Panel {
 
         // ---- detail page ----------------------------------------------------
         Loader {
+          id: detailLoader
           width: parent.width
           active: root.detailEntry !== null
           visible: root.mode === "detail"
@@ -1374,7 +1379,8 @@ Panel {
             share:    "h/l choose · enter expose · esc back",
             naming:   "enter save · esc back",
             settings: "j/k move · h/l change · enter setup · esc back",
-            detail:   "[ / ] range · j/k next port · o open · c copy · w watch · esc back",
+            detail:   "[ / ] range · " + (root.detailEntry && root.detailEntry.httpProbe ? "t HTTP/TCP · " : "")
+              + "j/k port · w watch · esc back",
             list:     "j/k move · enter actions · l charts · ? shortcuts"
           })
           width: parent.width

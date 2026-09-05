@@ -9,10 +9,10 @@ import subprocess
 import sys
 import time
 
-FIELDS = ('latMs', 'conns', 'cpuPct', 'rssKb')
+FIELDS = ('latMs', 'conns', 'cpuPct', 'rssKb', 'tcpRttMs')
 RETENTION = 172800
 APPLICATION_ID = 1347701809
-SCHEMA = '''CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY,port INTEGER NOT NULL,t INTEGER NOT NULL,latMs REAL,conns REAL,cpuPct REAL,rssKb REAL,httpCode REAL);
+SCHEMA = '''CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY,port INTEGER NOT NULL,t INTEGER NOT NULL,latMs REAL,conns REAL,cpuPct REAL,rssKb REAL,httpCode REAL,tcpRttMs REAL,tcpRttCount REAL);
 CREATE INDEX IF NOT EXISTS samples_port_t ON samples(port,t);
 CREATE INDEX IF NOT EXISTS samples_t ON samples(t);
 CREATE TABLE IF NOT EXISTS imports(port INTEGER PRIMARY KEY,digest TEXT NOT NULL,lines INTEGER NOT NULL,imported INTEGER NOT NULL,rejected INTEGER NOT NULL);
@@ -31,7 +31,7 @@ def sample_sql(port, sample, condition='1'):
     if not isinstance(sample, dict):
         raise ValueError('invalid metric sample')
     values = [str(port), str(integer(sample.get('t'), 0, 253402300799))]
-    for field in (*FIELDS, 'httpCode'):
+    for field in (*FIELDS, 'httpCode', 'tcpRttCount'):
         value = sample.get(field)
         if value is None:
             values.append('NULL')
@@ -39,7 +39,7 @@ def sample_sql(port, sample, condition='1'):
             raise ValueError('invalid metric value')
         else:
             values.append(str(value))
-    return 'INSERT INTO samples(port,t,latMs,conns,cpuPct,rssKb,httpCode) SELECT ' + ','.join(values) + ' WHERE ' + condition + ';'
+    return 'INSERT INTO samples(port,t,latMs,conns,cpuPct,rssKb,tcpRttMs,httpCode,tcpRttCount) SELECT ' + ','.join(values) + ' WHERE ' + condition + ';'
 
 
 def sql(store, executable, statement, readonly=False):
@@ -116,7 +116,7 @@ def remove_store(directory, params, state):
                 raise ValueError('metrics sidecars have no owned database')
             executable = state.open_exe('/usr/bin/sqlite3')
             identity = sql(store, executable, 'SELECT (SELECT application_id FROM pragma_application_id) AS id, (SELECT user_version FROM pragma_user_version) AS version;', readonly=True)[0]
-            if identity != {'id': APPLICATION_ID, 'version': 1}:
+            if identity['id'] != APPLICATION_ID or identity['version'] not in (1, 2):
                 raise ValueError('not a supported Portal metrics database')
         if not params:
             for name in names:
@@ -151,9 +151,11 @@ def execute(args, state):
         if metadata['journal_mode'] != 'delete':
             raise ValueError('metrics database requires DELETE journaling')
         if metadata['application_id'] == 0 and metadata['version'] == 0 and metadata['tables'] == 0:
-            sql(store, executable, 'BEGIN IMMEDIATE;\n' + SCHEMA + f'PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version=1; COMMIT;')
-        elif metadata['application_id'] != APPLICATION_ID or metadata['version'] != 1:
+            sql(store, executable, 'BEGIN IMMEDIATE;\n' + SCHEMA + f'PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version=2; COMMIT;')
+        elif metadata['application_id'] != APPLICATION_ID or metadata['version'] not in (1, 2):
             raise ValueError('not a supported Portal metrics database')
+        elif metadata['version'] == 1:
+            sql(store, executable, 'BEGIN IMMEDIATE; ALTER TABLE samples ADD COLUMN tcpRttMs REAL; ALTER TABLE samples ADD COLUMN tcpRttCount REAL; PRAGMA user_version=2; COMMIT;')
         imports = sql(store, executable, 'SELECT port,rejected FROM imports;')
         known = {row['port'] for row in imports}
         warnings = sum(row['rejected'] for row in imports)

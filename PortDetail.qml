@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Controls as Controls
 import qs.Ui
 import qs.Commons
 import "lib/Icons.js" as Icons
@@ -30,7 +31,7 @@ Item {
   signal rangeRequested(int seconds)
   property real hoverTime: -1
   property int requestId: 0
-  property string historyStatus: "idle"
+  property string historyStatus: "loading"
   property string historyError: ""
   property string historyWarning: ""
   property var savedView: null
@@ -69,8 +70,8 @@ Item {
     }
     function onMetricsRevisionChanged() { detail.requestRange(false) }
   }
-  onQueryKeyChanged: requestRange(true)
-  onWatchedChanged: requestRange(false)
+  onQueryKeyChanged: Qt.callLater(requestRange, true)
+  Component.onCompleted: Qt.callLater(requestRange, true)
 
   Timer {
     interval: 30000
@@ -79,9 +80,26 @@ Item {
     onTriggered: detail.requestRange(false)
   }
 
+  property string latencyChoice: ""
+  readonly property int latencyPort: entry ? entry.port : 0
+  readonly property string latencyField: entry && entry.httpProbe === true ? (latencyChoice || "latMs") : "tcpRttMs"
+  onLatencyPortChanged: latencyChoice = ""
+
+  function toggleLatency() {
+    if (entry && entry.httpProbe === true)
+      latencyChoice = latencyField === "latMs" ? "tcpRttMs" : "latMs"
+  }
+
+  function formatLatency(value) {
+    if (value === null || value === undefined) return "—"
+    if (value > 0 && value < 0.001) return "<0.001ms"
+    var decimals = value < 1 ? 3 : value < 10 ? 2 : value < 100 ? 1 : 0
+    return Number(value.toFixed(decimals)) + "ms"
+  }
+
   readonly property var metricDefs: [
-    { title: "HTTP LATENCY",     field: "latMs",  fmt: function (v) { return Math.round(v) + "ms" },
-      zeroAnchored: true,  zeroLabel: "instant" },
+    { title: latencyField === "latMs" ? "HTTP LATENCY" : "TCP RTT", field: latencyField, fmt: formatLatency,
+      zeroAnchored: true, zeroLabel: "below timing resolution" },
     { title: "CONNECTIONS", field: "conns",  fmt: function (v) { return String(Math.round(v)) },
       zeroAnchored: true,  zeroLabel: "no connections" },
     { title: "CPU",         field: "cpuPct", fmt: function (v) { return Math.round(v) + "%" },
@@ -91,7 +109,9 @@ Item {
   ]
 
   function emptyReasonFor(field) {
-    return field === "latMs" ? "HTTP response unavailable" : "No samples in this range"
+    if (field === "latMs") return "HTTP response unavailable"
+    if (field === "tcpRttMs") return stats && stats.conns === 0 ? "No active connections" : "No RTT samples in this range"
+    return "No samples in this range"
   }
 
   function timeLabel(time) {
@@ -235,6 +255,11 @@ Item {
           required property var modelData
           width: chartGrid.cardWidth
           title: modelData.title
+          modeOptions: (modelData.field === "latMs" || modelData.field === "tcpRttMs")
+            && detail.entry && detail.entry.httpProbe === true
+            ? [{ value: "latMs", label: "HTTP" }, { value: "tcpRttMs", label: "TCP" }] : []
+          modeValue: detail.latencyField
+          onModeRequested: function (value) { detail.latencyChoice = value }
           field: modelData.field
           format: modelData.fmt
           view: detail.view
@@ -255,6 +280,36 @@ Item {
 
     Text {
       width: parent.width
+      visible: detail.latencyField === "tcpRttMs"
+      text: "Kernel RTT · may stay unchanged while idle"
+      HoverHandler { id: tcpHelpHover }
+      Controls.ToolTip {
+        id: tcpTooltip
+        visible: tcpHelpHover.hovered
+        delay: 500
+        text: "Kernel round-trip estimate averaged across existing port connections"
+          + (detail.stats && detail.stats.tcpRttCount > 0 ? " (" + detail.stats.tcpRttCount + " contributing sockets)" : "")
+          + ". Measures TCP transport, not application response or health."
+        contentItem: Text {
+          text: tcpTooltip.text
+          textFormat: Text.PlainText
+          width: Style.space(280)
+          wrapMode: Text.WordWrap
+          color: Color.tooltip.text
+          font.family: detail.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+        background: Rectangle { color: Color.tooltip.background; radius: Style.cornerRadius }
+      }
+      textFormat: Text.PlainText
+      wrapMode: Text.WordWrap
+      color: Util.alpha(detail.foreground, 0.45)
+      font.family: detail.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Text {
+      width: parent.width
       visible: detail.historyStatus !== "loading"
       horizontalAlignment: Text.AlignHCenter
       text: Qt.formatDateTime(new Date(detail.view.start * 1000), "ddd HH:mm") + " – "
@@ -266,7 +321,12 @@ Item {
     }
 
     Text {
+      id: historyFooter
       width: parent.width
+      height: footerFont.height * 2
+      FontMetrics { id: footerFont; font: historyFooter.font }
+      maximumLineCount: 2
+      elide: Text.ElideRight
       textFormat: Text.PlainText
       wrapMode: Text.WordWrap
       text: {

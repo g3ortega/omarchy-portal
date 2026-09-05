@@ -27,7 +27,7 @@ every share and name Portal created, drops the Portless CA from the browser
 stores Portal added it to, deletes cloudflared if it is still Portal's copy,
 and removes Portal's state), then `omarchy plugin remove g3ortega.portal`.
 
-Portal probes listed ports on `localhost` and calls the local Portless proxy
+Portal probes inferred HTTP services on `localhost` and calls the local Portless proxy
 and ngrok agent. It checks new tunnel hostnames through `1.1.1.1` or
 `dns.google` over HTTPS. A confirmed Cloudflared install downloads the pinned
 release from GitHub. Cloudflared and ngrok connect to their own services.
@@ -35,14 +35,14 @@ release from GitHub. Cloudflared and ngrok connect to their own services.
 ## What it does
 
 - Finds every listening TCP port with a couple of `ss` calls and names the
-  stack behind it (nearly 50: Next, Vite, Rails, Django, Phoenix, Go,
+  stack behind it (over 80: Next, Vite, Rails, Django, Phoenix, Go,
   Postgres, Redis, ...).
 - Gives a port a local name like `https://acme-web.localhost:1355` through
   [Portless](https://github.com/vercel-labs/portless). New proxies serve this machine
   only. Existing LAN routes are labeled "LAN name".
 - Shares a port publicly through Cloudflare or ngrok, and paints anything
   public in your theme's urgent color so you can't forget it's open.
-- Charts HTTP latency, connections, CPU and memory per port. Open the last
+- Charts HTTP latency or TCP RTT, connections, CPU and memory per port. Open the last
   hour, switch to 30 minutes, or inspect up to 48 hours of watched history.
 - Pauses, resumes, restarts and stops a dev server. The loud ones ask first.
 - Works entirely from the keyboard. Press `?` in the panel.
@@ -55,6 +55,16 @@ Provider setup, browser trust, and preferences live in Settings (`,`).
 Local names use an unprivileged proxy on port 1355 by default. Existing proxies
 on port 443 keep their URLs without a port number. Cloudflare sharing does not
 flush system DNS caches or request administrator authentication.
+
+Charts default to HTTP latency for recognized web services and TCP RTT for other
+listeners. On HTTP services, select **TCP** or press `t` to inspect transport
+timing. TCP RTT uses the kernel's estimate from existing connections and sends
+no probe traffic. The value is the mean across sockets with an estimate and can
+stay unchanged while idle. A listener without connections has no TCP RTT.
+This includes the TCP transport beneath WebSockets, but does not measure
+WebSocket message handling or database query time. HTTP eligibility is inferred
+from framework evidence and known service ports. A runtime name or common web
+port alone does not enable HTTP requests.
 
 Listing and sharing are also a CLI (`scripts/portal`) and an IPC target
 (`omarchy-shell g3ortega.portal`).

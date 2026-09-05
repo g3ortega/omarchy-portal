@@ -11,6 +11,8 @@
 set -o pipefail
 set -f          # addresses contain '*'; never let the shell glob them
 MAX_PORTS=512   # past this the scan reports an error, not a growing document
+MAX_ESTABLISHED=16384
+MAX_ESTABLISHED_BYTES=4194304
 MAX_PROBES=64   # direct callers stay bounded; Service normally requests eight
 ARGV_LOGICAL_CAP=8192
 ARGV_SAMPLE_CAP=$((ARGV_LOGICAL_CAP + 1))
@@ -50,11 +52,11 @@ fi
 # test/detect.test.mjs asserts the two lists stay in sync.
 MARKERS=(
   package.json angular.json
-  Gemfile config.ru
+  Gemfile config.ru bin/rails
   manage.py
   mix.exs artisan
   go.mod Cargo.toml
-  pom.xml build.gradle
+  pom.xml build.gradle build.gradle.kts
 )
 
 # package.json dependency names Detect.js tests. Same sync contract as MARKERS;
@@ -62,7 +64,10 @@ MARKERS=(
 FRAMEWORK_DEPS=(
   next nuxt astro @sveltejs/kit svelte @angular/core
   react-router @remix-run/react vite
-  storybook @storybook/react @nestjs/core
+  storybook @storybook/react @nestjs/core @nestjs/platform-express @nestjs/platform-fastify
+  @react-router/dev @react-router/serve @remix-run/serve
+  vitepress @docusaurus/core gatsby @adonisjs/core @strapi/strapi elysia
+  @hapi/hapi webpack-dev-server parcel preact socket.io ws
   react vue express fastify koa hapi
   hono @solidjs/start solid-js
 )
@@ -150,12 +155,42 @@ raw=$(ss -tlnpH 2>/dev/null) \
 
 # Established peers per local port: one ss call covers every row. Unprivileged.
 # With a state filter ss omits the State column, so Local is the third field.
-declare -A PORT_CONNS
-established=$(ss -tnH state established 2>/dev/null) \
+declare -A PORT_CONNS PORT_RTTS PORT_RTT_COUNTS
+established=$(ss -tniHO state established 2>/dev/null | head -c "$((MAX_ESTABLISHED_BYTES + 1))" \
+  | LC_ALL=C awk -v maxbytes="$MAX_ESTABLISHED_BYTES" -v maxrows="$MAX_ESTABLISHED" '
+    {
+      bytes += length($0) + 1
+      if (bytes > maxbytes) error = "established socket snapshot exceeds byte limit"
+      if (NF < 3) next
+      if (++rows > maxrows && error == "") error = "established socket snapshot exceeds row limit"
+      if (error != "") next
+      port = $3
+      sub(/^.*:/, "", port)
+      if (port !~ /^[0-9]+$/ || length(port) > 5 || port + 0 < 1 || port + 0 > 65535) next
+      port = sprintf("%d", port)
+      conns[port]++
+      for (i = 5; i <= NF; i++) {
+        if ($i !~ /^rtt:[0-9]+([.][0-9]+)?\/[0-9]+([.][0-9]+)?$/) continue
+        split(substr($i, 5), rtt, "/")
+        if (length(rtt[1]) <= 18) { total[port] += rtt[1]; count[port]++ }
+        break
+      }
+    }
+    END {
+      if (error != "") { print "error\t" error; exit }
+      for (port in conns)
+        printf "%s\t%d\t%.17g\t%d\n", port, conns[port], count[port] ? total[port] / count[port] : 0, count[port] + 0
+    }') \
   || { echo '{"version":1,"error":"could not query established sockets","ports":[]}'; exit 0; }
-while read -r _rq _sq local_addr _peer; do
-  cport="${local_addr##*:}"
-  [[ $cport =~ ^[0-9]+$ ]] && PORT_CONNS[$cport]=$(( ${PORT_CONNS[$cport]:-0} + 1 ))
+if [[ $established == error$'\t'* ]]; then
+  jq -nc --arg error "${established#*$'\t'}" '{version:1,error:$error,ports:[]}'
+  exit 0
+fi
+while IFS=$'\t' read -r cport conns rtt count; do
+  [[ -n $cport ]] || continue
+  PORT_CONNS[$cport]=$conns
+  PORT_RTT_COUNTS[$cport]=$count
+  (( count > 0 )) && PORT_RTTS[$cport]=$rtt
 done <<<"$established"
 
 CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
@@ -206,9 +241,8 @@ emit() {
       local probe_out t_int t_frac
       probe_out=$(< "$PROBE_DIR/$port")
       http_code="${probe_out%% *}"
-      # seconds.fraction -> integer ms without an awk fork
-      t_int="${probe_out##* }"; t_frac="${t_int#*.}00000"; t_int="${t_int%%.*}"
-      lat_ms=$(( t_int * 1000 + 10#${t_frac:0:3} ))
+      t_int="${probe_out##* }"; t_frac="${t_int#*.}000000"; t_int="${t_int%%.*}"
+      lat_ms="$(( t_int * 1000 + 10#${t_frac:0:3} )).${t_frac:3:3}"
       [[ $http_code == 000 ]] && { http_code=""; lat_ms=""; }
     fi
     if [[ -n $pid && -r /proc/$pid/comm ]]; then
@@ -238,7 +272,7 @@ emit() {
     for f in "$port" "${PORT_ADDRS[$port]}" "$pid" "$comm" "$cmdline" "$cwd" \
              "$root" "$PROJ_NAME" "$PROJ_MARKERS" "$PROJ_DEPS" \
              "${PORT_CONNS[$port]:-0}" "$cpu_ticks" "$rss_kb" "$up_sec" "$pstate" "$argv_b64" \
-             "$lat_ms" "$http_code" "$argv_cut" "${st[19]}" "$exclusive_owner"; do
+             "$lat_ms" "$http_code" "$argv_cut" "${st[19]}" "$exclusive_owner" "${PORT_RTTS[$port]}" "${PORT_RTT_COUNTS[$port]:-0}"; do
       f="${f//$'\t'/ }"; f="${f//$'\n'/ }"
       f="${f//[$'\x01'-$'\x1f'$'\x7f']/}"   # no C0 control survives; argv is already escaped
       joined+="${joined:+$'\t'}$f"
@@ -276,7 +310,9 @@ emit | jq -Rsc '
       httpCode: (.[17] | num),
       argvTruncated: (.[18] == "1"),
       start: (.[19] | num),
-      exclusiveOwner: (.[20] == "true")
+      exclusiveOwner: (.[20] == "true"),
+      tcpRttMs: (.[21] | num),
+      tcpRttCount: (.[22] | num)
     }
     | .cmdline = ([.argv[] | gsub("[\u0000-\u001f\u007f]"; "")] | join(" ") | .[:2048])
     | .scope = (if (.addresses | any(. == "0.0.0.0" or . == "*" or . == "::")) then "all"

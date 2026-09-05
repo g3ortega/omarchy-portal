@@ -132,7 +132,11 @@ d=$(fixture next-app);   pkg next-app '"next":"15.0.0","react":"19.0.0"' "$d"; s
 d=$(fixture vite-app);   pkg vite-app '"vite":"6.0.0","vue":"3.5.0"' "$d";     start 45902 "$d" node "$TMP/srv.js" 45902 vite;    EXPECT[45902]=vite
 d=$(fixture express-app);pkg express-app '"express":"5.0.0"' "$d";             start 45903 "$d" node "$TMP/srv.js" 45903 express; EXPECT[45903]=express
 d=$(fixture hono-app);   pkg hono-app '"hono":"4.6.0"' "$d";                   start 45904 "$d" node "$TMP/srv.js" 45904 hono;    EXPECT[45904]=hono
-d=$(fixture solid-app);  pkg solid-app '"@solidjs/start":"1.0.0"' "$d";        start 45905 "$d" node "$TMP/srv.js" 45905 solid;   EXPECT[45905]=solid
+d=$(fixture solid-app);  pkg solid-app '"@solidjs/start":"1.0.0"' "$d";        start 45905 "$d" node "$TMP/srv.js" 45905 solid;   EXPECT[45905]=solidstart
+d=$(fixture fastify-app); pkg fastify-app '"fastify":"5.0.0"' "$d";          start 45930 "$d" node "$TMP/srv.js" 45930 fastify; EXPECT[45930]=fastify
+d=$(fixture elysia-app); pkg elysia-app '"elysia":"1.0.0"' "$d";             start 45931 "$d" node "$TMP/srv.js" 45931 elysia; EXPECT[45931]=elysia
+d=$(fixture vitepress-app); pkg vitepress-app '"vitepress":"1.0.0","vue":"3.0.0","vite":"6.0.0"' "$d"; start 45932 "$d" node "$TMP/srv.js" 45932 vitepress; EXPECT[45932]=vitepress
+d=$(fixture socketio-app); pkg socketio-app '"socket.io":"4.0.0"' "$d";      start 45933 "$d" node "$TMP/srv.js" 45933 socketio; EXPECT[45933]=socketio
 # --- ruby evidence ---
 if command -v ruby >/dev/null; then
   d=$(fixture rails-app); touch "$d/Gemfile" "$d/config.ru"
@@ -147,11 +151,11 @@ loop do
 end
 RBEOF
   start 45906 "$d" ruby server.rb
-  EXPECT[45906]=rails
+  EXPECT[45906]=rack
 fi
 # --- python evidence ---
 d=$(fixture django-app); touch "$d/manage.py";                start 45907 "$d" "$PY" "$TMP/srv.py" 45907 django;  EXPECT[45907]=django
-d=$(fixture fastapi-app); cp "$TMP/srv.py" "$d/uvicorn";      start 45908 "$d" "$PY" "$d/uvicorn" 45908 fastapi;  EXPECT[45908]=uvicorn
+d=$(fixture uvicorn-app); cp "$TMP/srv.py" "$d/uvicorn";      start 45908 "$d" "$PY" "$d/uvicorn" 45908 uvicorn;  EXPECT[45908]=uvicorn
 d=$(fixture jupyter-lab); cp "$TMP/srv.py" "$d/jupyter";      start 45909 "$d" "$PY" "$d/jupyter" 45909 jupyter;  EXPECT[45909]=jupyter
 # --- marker stacks: real python server under a stack-shaped process name ---
 impersonate() {  # <binname> <port> <fixture> <marker...>
@@ -163,7 +167,7 @@ impersonate() {  # <binname> <port> <fixture> <marker...>
 }
 impersonate goapp    45910 go-svc      go.mod;        EXPECT[45910]=go
 impersonate rustapp  45911 rust-svc    Cargo.toml;    EXPECT[45911]=rust
-impersonate beam.smp 45912 phoenix-app mix.exs;       EXPECT[45912]=phoenix
+impersonate beam.smp 45912 phoenix-app mix.exs;       EXPECT[45912]=elixir
 impersonate java     45913 spring-app  pom.xml;       EXPECT[45913]=javadev
 impersonate artisand 45914 laravel-app artisan;       EXPECT[45914]=laravel
 # --- scanner edge cases: a node with no evidence, control bytes and an oversized

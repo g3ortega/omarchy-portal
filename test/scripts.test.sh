@@ -442,7 +442,7 @@ case "$*" in
       done
     fi
     ;;
-  '-tnH state established') ;;
+  '-tniHO state established') ;;
   *) exit 1 ;;
 esac
 SH
@@ -652,7 +652,7 @@ is "all 512 shared-PID rows return with equal truncated argv" \
   $'512\t1\ttrue'
 is "the shared-PID scan keeps the public row key set" \
   "$(jq -c '[.ports[] | keys] | unique' "$ARGV_SCAN/shared.json" 2>/dev/null)" \
-  '[["addresses","argv","argvTruncated","cmdline","comm","conns","cpuTicks","cwd","deps","exclusiveOwner","httpCode","latMs","markers","pid","port","procState","projectName","projectRoot","rssKb","scope","start","upSec"]]'
+  '[["addresses","argv","argvTruncated","cmdline","comm","conns","cpuTicks","cwd","deps","exclusiveOwner","httpCode","latMs","markers","pid","port","procState","projectName","projectRoot","rssKb","scope","start","tcpRttCount","tcpRttMs","upSec"]]'
 
 for scan_argv_boundary_name in partial-producer partial-base64 successful-empty; do
   is "$scan_argv_boundary_name caches empty argv after one scoped producer and encoder attempt" \
@@ -2584,7 +2584,7 @@ cat > "$scan_stub/ss" <<'SH'
 #!/bin/bash
 case "$*" in
   -tlnpH) printf 'LISTEN 0 5 127.0.0.1:4498 0.0.0.0:* users:(("python3",pid=%s,fd=3),("sleep",pid=%s,fd=4))\n' "$REP_PID" "$OTHER_PID" ;;
-  '-tnH state established') ;;
+  '-tniHO state established') ;;
   *) exit 1 ;;
 esac
 SH

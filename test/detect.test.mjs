@@ -58,18 +58,18 @@ check("plain Node with a package.json", e({
 }), { kind: "node", label: "Node", category: "dev" })
 
 // --- Ruby
-check("Rails via puma", e({
+check("Puma is a Rack server, not proof of Rails", e({
   port: 3000, comm: "ruby", cmdline: "puma 6.4.2 (tcp://0.0.0.0:3000) [acme]",
   markers: ["Gemfile", "config.ru"], projectName: "acme"
-}), { kind: "rails", label: "Rails", category: "dev", name: "acme" })
+}), { kind: "puma", label: "Puma", category: "dev", name: "acme" })
 
-check("Rails via Gemfile + config.ru", e({
+check("Generic Rack project", e({
   port: 3000, comm: "ruby", markers: ["Gemfile", "config.ru"]
-}), { kind: "rails" })
+}), { kind: "rack" })
 
-check("Rails with a package.json is still Rails", e({
+check("Rack with a package.json stays Rack", e({
   port: 3000, comm: "ruby", markers: ["Gemfile", "config.ru", "package.json"]
-}), { kind: "rails" })
+}), { kind: "rack" })
 check("Laravel with a package.json is still Laravel", e({
   port: 8000, comm: "php", markers: ["artisan", "package.json"]
 }), { kind: "laravel" })
@@ -87,15 +87,15 @@ check("Django via manage.py", e({
   port: 8000, comm: "python3", markers: ["manage.py", "requirements.txt"]
 }), { kind: "django", label: "Django", category: "dev" })
 
-check("FastAPI via uvicorn", e({
+check("Uvicorn is not proof of FastAPI", e({
   port: 8000, comm: "python3", cmdline: "uvicorn app.main:app --reload"
-}), { kind: "uvicorn", label: "FastAPI" })
+}), { kind: "uvicorn", label: "Uvicorn" })
 
 // --- Other stacks
-check("Phoenix via mix.exs", e({ port: 4000, comm: "beam.smp", markers: ["mix.exs"] }), { kind: "phoenix" })
+check("Elixir via mix.exs", e({ port: 4000, comm: "beam.smp", markers: ["mix.exs"] }), { kind: "elixir" })
 check("RabbitMQ is not Phoenix", e({ port: 5672, comm: "beam.smp", cmdline: "beam.smp -s rabbit boot" }), { kind: "rabbit" })
 check("Storybook beats vite in the same project", e({ port: 6006, comm: "node", deps: ["storybook", "vite"] }), { kind: "storybook" })
-check("Phoenix gets the elixir brand color", e({ port: 4000, comm: "beam.smp", markers: ["mix.exs"] }), { color: "#4b275f" })
+check("Elixir gets its brand color", e({ port: 4000, comm: "beam.smp", markers: ["mix.exs"] }), { color: "#4b275f" })
 check("Laravel via artisan", e({ port: 8000, comm: "php", markers: ["artisan", "composer.json"] }), { kind: "laravel" })
 check("Go via go.mod", e({ port: 8080, comm: "main", markers: ["go.mod"] }), { kind: "go", label: "Go" })
 check("Rust via Cargo.toml", e({ port: 8080, comm: "server", markers: ["Cargo.toml"] }), { kind: "rust" })
@@ -144,7 +144,7 @@ check("package name beats directory basename", e({
 
 // --- Runtimes and Python tools
 check("Hono via dependency", e({ port: 3000, comm: "node", deps: ["hono"] }), { kind: "hono" })
-check("SolidStart via dependency", e({ port: 3000, comm: "node", deps: ["@solidjs/start"] }), { kind: "solid" })
+check("SolidStart via dependency", e({ port: 3000, comm: "node", deps: ["@solidjs/start"] }), { kind: "solidstart" })
 check("Deno by comm, labeled as itself", e({ port: 8000, comm: "deno" }), { kind: "deno", label: "Deno" })
 check("Bun by comm", e({ port: 3000, comm: "bun" }), { kind: "bun", label: "Bun" })
 check("Jupyter via cmdline", e({ port: 8888, comm: "python3", cmdline: "python3 -m jupyter lab" }), { kind: "jupyter" })
@@ -172,9 +172,9 @@ check("a project at ~/invite is not Vite", e({
 check("a Next app under ~/portless-demo is not the proxy", e({
   port: 3000, comm: "node", cmdline: "node /home/x/portless-demo/node_modules/.bin/next dev", deps: ["next"]
 }), { kind: "next", category: "dev" })
-check("a puma tag mentioning nuxt is still Rails", e({
+check("a puma tag mentioning nuxt stays Puma", e({
   port: 3000, comm: "ruby", cmdline: "puma 6.4.2 (tcp://0.0.0.0:3000) [nuxt-migration]"
-}), { kind: "rails" })
+}), { kind: "puma" })
 check("python3.12 is Python", e({ port: 5000, comm: "python3.12" }), { kind: "python" })
 check("a LAN-only bind gets its own address in the URL", e({
   port: 8080, comm: "node", deps: ["vite"], addresses: ["192.168.1.5"], scope: "lan"
@@ -442,13 +442,13 @@ check("a wildcard bind still opens localhost", e({
     bad.push("panel reopen no longer clears feedback")
 
   const probeList = fn(serviceSrc, "probeList", ["ports", "watchedPorts", "focusPort"])
-  const p = (n, cat, web) => ({ port: n, category: cat, web: web })
+  const p = (n, cat, httpProbe) => ({ port: n, category: cat, web: httpProbe, httpProbe: httpProbe })
   const many = [p(3000, "dev", true), p(3001, "dev", true), p(3002, "dev", true), p(3003, "dev", true), p(3004, "dev", true),
                 p(3005, "dev", true), p(3006, "dev", true), p(3007, "dev", true), p(5432, "service", false), p(9000, "dev", true)]
   eq("the charts' port is probed first", probeList(many, [3007], 3005), [3005, 3007, 3000, 3001, 3002, 3003, 3004, 3006])
   eq("the cap is eight", probeList(many, [], 0).length, 8)
   eq("a watched port that is not listening does not spend the cap", probeList(many, [7777, 3006], 0)[0], 3006)
-  eq("services are not probed unless watched", probeList(many, [5432], 0)[0], 5432)
+  eq("watching does not authorize HTTP to a non-HTTP service", probeList(many, [5432], 0).includes(5432), false)
   eq("nothing listening, nothing probed", probeList([], [3000], 3000), [])
 
   if (bad.length === 0) { pass++; console.log("  ok   panel mode, verb and probe rules") }

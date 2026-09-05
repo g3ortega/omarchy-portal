@@ -10,6 +10,9 @@ Item {
   id: card
 
   property string title: ""
+  property var modeOptions: []
+  property string modeValue: ""
+  signal modeRequested(string value)
   property bool loading: false
   property var view: History.aggregate([], 3600, 0)
   property string field: ""
@@ -40,7 +43,7 @@ Item {
   // as "21M" — would otherwise draw a cliff the numbers cannot explain. If
   // the difference is below what the card displays, there is nothing to plot.
   readonly property string phase: {
-    if (lo === null) return "collecting"
+    if (lo === null || hi === null) return "collecting"
     if (hi === 0 && lo === 0) return "zero"
     if (hi === lo || format(lo) === format(hi)) return "steady"
     return "active"
@@ -60,7 +63,7 @@ Item {
   }
   readonly property real plotSpan: {
     if (phase !== "active") return 1
-    return zeroAnchored ? Math.max(hi * 1.08, 1) : (hi - lo) * 1.3
+    return zeroAnchored ? hi * 1.08 : (hi - lo) * 1.3
   }
 
   function plotX(time) {
@@ -90,10 +93,35 @@ Item {
     spacing: Style.spacing.xs
 
     Item {
+      id: heading
       width: parent.width
-      height: Style.font.heading
+      height: Math.max(Style.font.heading, modeControls.implicitHeight)
+
+      Row {
+        id: modeControls
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.spacing.xxs
+        Repeater {
+          model: card.modeOptions
+          Button {
+            required property var modelData
+            text: modelData.label
+            selected: modelData.value === card.modeValue
+            bordered: true
+            focusable: false
+            horizontalPadding: Style.spacing.xs
+            verticalPadding: 0
+            foreground: card.foreground
+            fontFamily: card.fontFamily
+            fontSize: Style.font.caption
+            onClicked: card.modeRequested(modelData.value)
+          }
+        }
+      }
 
       Text {
+        visible: card.modeOptions.length === 0
         anchors.left: parent.left
         anchors.baseline: heroText.baseline
         textFormat: Text.PlainText
@@ -129,7 +157,7 @@ Item {
     Item {
       id: plot
       width: parent.width
-      height: parent.height - Style.font.heading - Style.font.caption - Style.spacing.xs * 2
+      height: parent.height - heading.height - Style.font.caption - Style.spacing.xs * 2
 
       Canvas {
         id: canvas
