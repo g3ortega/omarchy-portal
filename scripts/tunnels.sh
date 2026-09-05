@@ -533,24 +533,31 @@ finish_start() {  # <provider> <port> <url> [hint]
     '{ok:true,url:$u,reach:$r} + (if $h == "" then {} else {hint:$h} end)'
 }
 
+portless_alias_present() {  # <name> <port>
+  local routes port
+  port=$(canonical_port "$2") || return 1
+  routes=$(portless_alias_routes "$1") || return 1
+  jq -e --argjson p "$port" 'any(.[]; .port == $p and .pid == 0)' <<<"$routes" >/dev/null
+}
+
 rollback_portless() {  # <port> <new name> <old name> <old marker: 0|1> <bin>
-  local port="$1" new="$2" old="$3" old_owned="$4" bin="$5" current
+  local port="$1" new="$2" old="$3" old_owned="$4" bin="$5"
   portless_state_load || return 1
-  current=$(portless_route_name "$port") || return 1
-  if [[ $current == "$new" && $new != "$old" ]]; then
+  if [[ $new != "$old" ]]; then
     portless_alias_safe "$new" "$port" || return 1
-    "$bin" alias --remove "$new" >/dev/null 2>&1 || return 1
-    current=""
-  elif [[ $current != "$old" && -n $current ]]; then
-    return 1
+    if portless_alias_present "$new" "$port"; then
+      "$bin" alias --remove "$new" >/dev/null 2>&1 || return 1
+    fi
   fi
-  if [[ -z $current && -n $old ]]; then
+  if [[ -n $old ]]; then
     portless_alias_safe "$old" "$port" || return 1
-    "$bin" alias "$old" "$port" >/dev/null 2>&1 || return 1
+    if ! portless_alias_present "$old" "$port"; then
+      "$bin" alias "$old" "$port" >/dev/null 2>&1 || return 1
+    fi
   fi
   portless_state_load || return 1
-  current=$(portless_route_name "$port") || return 1
-  [[ $current == "$old" ]] || return 1
+  [[ $new == "$old" ]] || ! portless_alias_present "$new" "$port" || return 1
+  [[ -z $old ]] || { portless_alias_safe "$old" "$port" && portless_alias_present "$old" "$port"; } || return 1
   if (( old_owned )); then
     write_own "$(namefile portless "$port")" "$old"
   else
@@ -595,8 +602,7 @@ cmd_start_portless() {  # <port> <name>
   if [[ $(portless_proxy_scope) != local ]]; then
     die "the proxy is not verified as local-only; repair its listener before naming"
   fi
-  portless_managed_port "$port" && die "this route is managed by portless run; change its name in the owning app"
-  # A port holds one name; drop the previous alias on rename.
+  # Rename the marked alias without changing other routes on this port.
   local n; n=$(slug "${name:-port-$port}")
   n=${n,,}
   [[ -n $n ]] || n="port-$port"
@@ -606,6 +612,7 @@ cmd_start_portless() {  # <port> <name>
     [[ -n $old ]] || die "the Portless name record for port $port is malformed; it was kept"
     old_owned=1
   else
+    portless_managed_port "$port" && die "this route is managed by portless run; change its name in the owning app"
     old=$(portless_route_name "$port") || die "could not identify the existing Portless alias safely"
   fi
   portless_alias_safe "$n" "$port" || die "the name $n belongs to another Portless route; choose another name"
@@ -635,7 +642,7 @@ cmd_start_portless() {  # <port> <name>
       && die "Portless state could not be read after creating the name; it was rolled back"
     die "Portless state could not be read after creating the name, and rollback could not be verified; the name record was kept"
   }
-  [[ $(portless_route_name "$port") == "$n" ]] || {
+  portless_alias_safe "$n" "$port" && portless_alias_present "$n" "$port" || {
     rollback_portless "$port" "$n" "$old" "$old_owned" "$bin" \
       && die "Portless did not record the requested name; it was rolled back"
     die "Portless did not record the requested name, and rollback could not be verified; the name record was kept"

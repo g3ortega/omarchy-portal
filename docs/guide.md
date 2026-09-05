@@ -46,13 +46,27 @@ it cannot bind those actions to one process.
 
 <img src="images/charts.png" width="480" alt="Latency, connections, CPU and memory">
 
-The chart icon (or `l`) opens latency, connections, CPU and memory over time.
-Every port keeps 720 samples in memory, an hour at the default 5-second
-scan. Watch a port and 17280 samples persist across shell restarts, a day at
-the default. An area fill is drawn only
-from a true zero baseline, so zero connections sits on the floor and reads
-"no connections". A value that never moves says "steady at 21M" rather than
-inventing a shape. Hovering any card reads all four out at that instant.
+The chart icon or `l` opens HTTP latency, connections, CPU and memory.
+The default range is **1h**. Select **30m**, **1h**, **3h**, **6h**, **1d**, or
+**2d** for all four charts. The `[` and `]` keys step through the ranges.
+Portal remembers the range while the panel is loaded, without writing settings.
+
+Watch records raw samples for **48 hours**, independent of scan frequency.
+Stopping Watch pauses recording and keeps saved history. Unwatched ports keep
+up to 720 live samples in memory. The footer states the available coverage and
+whether the chart shows saved or live samples.
+
+Plots show an average line and each interval's minimum and maximum. Short CPU
+spikes remain visible when many samples share a pixel. Hovering a chart shows
+the same interval across all four cards. Empty intervals break the line.
+Live values above the plots remain current regardless of the selected range.
+CPU totals activity across cores; 100% represents one busy core. Memory is
+resident process memory. HTTP latency measures an HTTP response, so a MySQL listener can have healthy
+CPU and connection readings while HTTP latency is unavailable.
+
+History writes are checked and retried. Recording and read failures stay visible
+in the detail footer. Legacy JSONL files are imported transactionally and kept
+unchanged. Selecting a shorter range never deletes samples.
 
 ## Local names
 
@@ -197,7 +211,11 @@ repository signatures, install `cloudflared` with `sudo pacman -S cloudflared`.
 ## Requirements
 
 `ss`, `jq`, `curl`, `getent`, `setsid`, `notify-send`, `wl-copy`,
-`xdg-open`. All ship with Omarchy. `node` is needed only for the tests and
+`xdg-open`, system Python 3, and `sqlite3`. SQLite is already required by
+[Qt 6](https://archlinux.org/packages/extra/x86_64/qt6-base/), which
+[Quickshell requires](https://archlinux.org/packages/extra/x86_64/quickshell/).
+The Arch SQLite package includes the CLI. Portal uses its no-follow open mode
+and does not need a database server or an additional privileged setup step. `node` is needed only for the tests and
 for `scripts/portal` while the shell is down. `portal setup` uses `npm`,
 `certutil` and `openssl` when present. Providers are optional.
 

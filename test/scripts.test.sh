@@ -1911,7 +1911,7 @@ LEAF_UNINSTALL="$T/uninstall-leaves"
 mkdir -p "$LEAF_UNINSTALL/app/lib" "$LEAF_UNINSTALL/bin" "$LEAF_UNINSTALL/home" \
   "$LEAF_UNINSTALL/runtime" "$LEAF_UNINSTALL/state/metrics"
 cp "$S/uninstall.sh" "$LEAF_UNINSTALL/app/uninstall.sh"
-cp "$S/lib/portless.sh" "$S/lib/files.sh" "$S/lib/statedir.py" "$S/lib/proc.py" "$LEAF_UNINSTALL/app/lib/"
+cp "$S/lib/portless.sh" "$S/lib/files.sh" "$S/lib/statedir.py" "$S/lib/proc.py" "$S/lib/metrics.py" "$LEAF_UNINSTALL/app/lib/"
 cat >> "$LEAF_UNINSTALL/app/lib/files.sh" <<'SH'
 eval "$(declare -f valid_port | sed '1s/valid_port/portal_uninstall_valid_port/')"
 valid_port() {
@@ -2020,7 +2020,7 @@ PATH="$LEAF_UNINSTALL/bin:/usr/bin:/bin" HOME="$UNREADABLE_UNINSTALL/home" \
   "$LEAF_UNINSTALL/app/uninstall.sh" > "$UNREADABLE_UNINSTALL/out" 2>&1; unreadable_uninstall_rc=$?
 chmod 700 "$UNREADABLE_UNINSTALL/state/metrics"
 is "uninstall fails when an existing state directory cannot be enumerated" \
-  "$unreadable_uninstall_rc $(test -e "$UNREADABLE_UNINSTALL/state/metrics/5100.jsonl" && echo kept || echo lost) $(grep -c '^could not remove Portal metrics$' "$UNREADABLE_UNINSTALL/out" || true)" \
+  "$unreadable_uninstall_rc $(test -e "$UNREADABLE_UNINSTALL/state/metrics/5100.jsonl" && echo kept || echo lost) $(grep -c '^could not safely remove Portal metrics storage$' "$UNREADABLE_UNINSTALL/out" || true)" \
   "1 kept 1"
 
 # A binary that could not be removed keeps its marker, and the removal stops there.
@@ -3375,28 +3375,21 @@ is "a non-array watched file reads as empty" "$("$M" watched | jq -c .ports)" '[
 printf '[1]\n[2]\n' > "$PORTAL_METRICS_DIR/watched.json"
 is "a multi-document watched file reads its first array" "$("$M" watched | jq -c .ports)" '[1]'
 is "watch rejects a bad port" "$("$M" watch 70000 | jq -r .error)" "invalid port"
-"$M" append-batch '{"3000":{"t":1,"conns":2},"junk":{"t":1}}' >/dev/null
-is "append-batch writes one line per valid port" "$(wc -l < "$PORTAL_METRICS_DIR/metrics/3000.jsonl")" "1"
-[[ -e $PORTAL_METRICS_DIR/metrics/junk.jsonl ]] && bad "append-batch wrote an invalid port" || ok "append-batch skips an invalid port"
-printf '{"t":2,"con' >> "$PORTAL_METRICS_DIR/metrics/3000.jsonl"   # a torn line
-is "read survives a torn last line" "$("$M" read 3000 | jq -c '.samples|length')" "1"
+metric_now=$(date +%s)
+metric_batch=$(jq -nc --argjson t "$metric_now" '{"3000":{t:$t,conns:2}}')
+is "append-batch persists valid samples" "$("$M" append-batch "$metric_batch" fixture_1 | jq -c .ok)" true
+"$M" append-batch "$metric_batch" fixture_1 >/dev/null
+is "retry keeps one raw sample" "$("$M" query 3000 1800 "$metric_now" | jq -c '.view.count')" 1
+is "invalid ports reject the batch" "$("$M" append-batch '{"junk":{"t":1}}' | jq -c .ok)" false
+printf '{"t":1,"rssKb":1}\n{torn' > "$PORTAL_METRICS_DIR/metrics/4000.jsonl"
+is "query imports valid legacy lines" "$("$M" query 4000 1800 1800 | jq -c '.view.count')" 1
 ln -s /etc/hostname "$PORTAL_METRICS_DIR/metrics/5000.jsonl"
-is "read refuses a symlinked sample file" "$("$M" read 5000 | jq -c '.samples|length')" "0"
-"$M" append-batch '{"5000":{"t":1}}' >/dev/null
-[[ ! -L $PORTAL_METRICS_DIR/metrics/5000.jsonl && -f $PORTAL_METRICS_DIR/metrics/5000.jsonl && $(wc -c < /etc/hostname) == "$before" ]] && ok "append replaces a planted link with a fresh file and never follows it" || bad "append followed or kept a symlinked path"
+is "query refuses a symlinked legacy file" "$("$M" query 5000 1800 "$metric_now" | jq -c .ok)" false
 mkfifo "$PORTAL_METRICS_DIR/metrics/5001.jsonl"
-is "read of a planted FIFO returns at once, empty" "$(timeout 5 "$M" read 5001 | jq -c '.samples|length')" "0"
-"$M" append-batch '{"5001":{"t":1}}' >/dev/null; [[ -f $PORTAL_METRICS_DIR/metrics/5001.jsonl && ! -p $PORTAL_METRICS_DIR/metrics/5001.jsonl ]] && ok "append replaces a planted FIFO with a fresh file" || bad "append left or blocked on a FIFO"
-big=$(mktemp -p "$PORTAL_METRICS_DIR/metrics"); head -c 9000000 /dev/zero > "$big"; mv "$big" "$PORTAL_METRICS_DIR/metrics/5002.jsonl"
-is "read refuses a file past the cap" "$(timeout 5 "$M" read 5002 | jq -c '.samples|length')" "0"
-# 19300 x ~130 B is past MAX_BYTES, so the append trims to MAX_LINES.
-yes '{"t":1756700000,"conns":0,"cpuPct":0,"rssKb":73000,"latMs":12,"httpCode":200,"pad":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}' | head -n 19300 > "$PORTAL_METRICS_DIR/metrics/4000.jsonl"
-"$M" append-batch '{"4000":{"t":2}}' >/dev/null
-lines=$(wc -l < "$PORTAL_METRICS_DIR/metrics/4000.jsonl"); bytes=$(wc -c < "$PORTAL_METRICS_DIR/metrics/4000.jsonl")
-(( lines > 0 && lines <= 17280 && bytes <= 2097152 )) && ok "append-batch trims to what fits under the cap ($lines lines, $bytes bytes)" || bad "trim left $lines lines, $bytes bytes"
+is "query refuses a legacy FIFO at once" "$(timeout 5 "$M" query 5001 1800 "$metric_now" | jq -c .ok)" false
 "$M" unwatch 3000 >/dev/null
-[[ -e $PORTAL_METRICS_DIR/metrics/3000.jsonl ]] && bad "unwatch left the metric file" || ok "unwatch deletes the metric file"
-is "state files are private" "$(stat -c %a "$PORTAL_METRICS_DIR/metrics/4000.jsonl")" "600"
+is "unwatch preserves retained history" "$("$M" query 3000 1800 "$metric_now" | jq -c '.view.count')" 1
+is "database files are private" "$(stat -c %a "$PORTAL_METRICS_DIR/metrics/store/metrics.db")" 600
 exec 6>"$PORTAL_METRICS_DIR/.metrics.lock"; flock -x 6
 locked_append=$(timeout 2 "$M" append-batch '{"6000":{"t":1}}')
 exec 6>&-

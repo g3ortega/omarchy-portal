@@ -128,7 +128,7 @@ if [[ -e $MARKER || -L $MARKER ]]; then
   # targets retain that record; descriptor-verified absence allows cleanup.
   [[ $path == "$EXPECT_BIN" ]] || { echo "the cloudflared install marker names an unexpected path; nothing was removed" >&2; exit 1; }
   if ! run state remove-digest "${path%/*}" "${path##*/}" "$sum" 134217728; then
-    binary_state=$(state dump "${path%/*}" 0 4096 "${path##*/}" 2>/dev/null) \
+    binary_state=$(state dump-existing "${path%/*}" 0 4096 "${path##*/}" 2>/dev/null) \
       || { echo "could not inspect $path after removal failed; its marker is kept; nothing else was removed" >&2; exit 1; }
     jq -e --arg name "${path##*/}" '(.files | has($name) | not) and (.refused | index($name) == null)' <<<"$binary_state" >/dev/null \
       || { echo "could not remove the exact Portal-installed bytes at $path; its marker is kept; nothing else was removed" >&2; exit 1; }
@@ -147,7 +147,7 @@ portal_leaf_in_scope() {
       [[ $name == ngrok.ok ]] && return 0
       if [[ $name =~ ^(cloudflared|ngrok)-([0-9]+)\.(pid|url|reach|dns|idle|log|target)$ ]]; then
         port=${BASH_REMATCH[2]}
-      elif [[ $name =~ ^portless-([0-9]+)\.(url|reach|name)$ ]]; then
+      elif [[ $name =~ ^portless-([0-9]+)\.(url|reach|name|log)$ ]]; then
         port=${BASH_REMATCH[1]}
       elif [[ $name =~ ^\.restart-([0-9]+)\.pid$ ]]; then
         port=${BASH_REMATCH[1]}
@@ -194,6 +194,14 @@ dry_plan_root() {
   [[ -d $dir && ! -L $dir && -O $dir ]] || return 0
   run rmdir --ignore-fail-on-non-empty -- "$dir"
 }
+metrics_mode=()
+(( DRY )) && metrics_mode+=(--dry-run)
+metrics_result=$(state metrics "$PORTAL_STATE_HOME/metrics" remove-store "${metrics_mode[@]}")
+jq -e '.ok == true' <<<"$metrics_result" >/dev/null 2>&1 \
+  || { echo "could not safely remove Portal metrics storage" >&2; exit 1; }
+if (( DRY )); then
+  jq -r '.files[]? | "would remove Portal metrics file: " + .' <<<"$metrics_result"
+fi
 remove_known "$PORTAL_RUNTIME_DIR" runtime 0 \
   || { echo "could not remove Portal runtime state" >&2; exit 1; }
 remove_known "$PORTAL_STATE_HOME/metrics" metrics \

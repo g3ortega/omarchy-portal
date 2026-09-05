@@ -54,11 +54,17 @@ Item {
   property var _cpuPrev: ({})
   property var _prevDevPorts: null
 
-  // Per-port sample rings for the analytics view: ~1h of 5s samples in
-  // memory for every port, free of charge. Ports the user Watches also get
-  // each sample appended to disk (metrics.sh, XDG_STATE, ~24h retention).
+  // Live rings are bounded separately from the 48-hour watched history.
   property var history: ({})
   property int historyRevision: 0
+  property int metricsRevision: 0
+  property string metricsError: ""
+  property int metricRequestSequence: 0
+  property var _metricBatches: []
+  property int _metricQueuedBytes: 0
+  property int _metricDropped: 0
+  property int _metricBatchSequence: 0
+  readonly property string _metricSession: Date.now().toString(36) + "-" + Math.random().toString(36).slice(2)
   property var watchedPorts: []
   readonly property int maxSamples: 720
 
@@ -257,12 +263,7 @@ Item {
     stats = nextStats
     historyRevision++
 
-    // One append call per scan covers every watched port; a lost batch is
-    // just a lost batch (metrics.sh re-validates before disk).
-    if (pluginDir && Object.keys(watchedBatch).length > 0) {
-      Quickshell.execDetached(["/usr/bin/timeout", "-k", "5", "15", "/usr/bin/bash", pluginDir + "/scripts/metrics.sh",
-                               "append-batch", JSON.stringify(watchedBatch)])
-    }
+    if (pluginDir && Object.keys(watchedBatch).length > 0) saveMetricBatch(watchedBatch)
 
     // Rings for ports that vanished stop occupying memory.
     for (var hk in history) {
@@ -370,6 +371,7 @@ Item {
   }
 
   property string _lastTunnelsKey: ""
+  property var _startedShareUrls: ({})
 
   function applyTunnels(text) {
     var parsed = parseJson(text)
@@ -400,20 +402,20 @@ Item {
     // A public URL that disappears without Portal stopping it is a lost share
     // the user may have handed out; one that appears is announced too, whether
     // the panel or IPC asked for it. A hostname that changes under the same
-    // provider and port is both. Not on the first status after a reload:
-    // those are not news.
+    // provider and port is both. Initial status stays quiet except for
+    // shares the user started before that first poll completed.
     for (var k in tunnels) {
       var stopping = _stoppingShare === k
         || (activeAction && activeAction.shareStopKey === k)
       if (tunnels[k].reach === "public" && !stopping && (!next[k] || next[k].url !== tunnels[k].url))
         notify("Port " + tunnels[k].port + " is no longer shared", tunnels[k].host + " went away")
     }
-    if (!first) {
-      for (var n in next) {
-        if (next[n].reach === "public" && (!tunnels[n] || tunnels[n].url !== next[n].url))
-          notify("Port " + next[n].port + " is public", "reachable from the internet at " + next[n].host)
-      }
+    for (var n in next) {
+      if (next[n].reach === "public" && (!first || _startedShareUrls[n] === next[n].url)
+          && (!tunnels[n] || tunnels[n].url !== next[n].url))
+        notify("Port " + next[n].port + " is public", "reachable from the internet at " + next[n].host)
     }
+    _startedShareUrls = ({})
     if (_stoppingShare && tunnels[_stoppingShare]
         && (!next[_stoppingShare] || next[_stoppingShare].url !== tunnels[_stoppingShare].url))
       _stoppingShare = ""
@@ -555,17 +557,46 @@ Item {
 
   function isWatched(port) { return watchedPorts.indexOf(port) !== -1 }
 
-  // Disk-backed samples for one port, delivered via diskHistoryLoaded. The
-  // detail view merges them with the in-memory ring.
-  signal diskHistoryLoaded(int port, var samples, string error)
-  property int _diskPort: 0
-  property int _diskQueued: 0   // j/k faster than the read: remember the last ask
+  signal metricRangeLoaded(int port, int seconds, int requestId, var view, string error, string warning)
+  property var _metricRead: null
+  property var _metricReadQueued: null
 
-  function loadDiskHistory(port) {
-    if (diskReadProcess.running) { _diskQueued = port; return }
-    _diskPort = port
-    if (!runScript(diskReadProcess, "metrics.sh", ["read", String(port)]))
-      diskHistoryLoaded(port, [], "could not load saved history")
+  function loadMetricRange(port, seconds, end, requestId) {
+    var request = { port: port, seconds: seconds, end: end, id: requestId }
+    if (diskReadProcess.running || metricsAppendProcess.running || (_metricBatches.length > 0 && !metricsRetry.running)) {
+      _metricReadQueued = request
+      return
+    }
+    _metricReadQueued = null
+    _metricRead = request
+    if (!runScript(diskReadProcess, "metrics.sh", ["query", String(port), String(seconds), String(end), "400"]))
+      metricRangeLoaded(port, seconds, requestId, null, "could not load saved history", "")
+  }
+
+  function saveMetricBatch(batch) {
+    var ports = Object.keys(batch)
+    for (var i = 0; i < ports.length; i += 512) {
+      var part = ({})
+      for (var j = i; j < Math.min(i + 512, ports.length); j++) part[ports[j]] = batch[ports[j]]
+      var text = JSON.stringify(part)
+      if (_metricBatches.length >= 120 || _metricQueuedBytes + text.length > 2097152) {
+        _metricDropped++
+        metricsError = "Recording gap: " + _metricDropped + " batches could not be queued"
+        continue
+      }
+      _metricBatches.push({ id: _metricSession + "-" + (++_metricBatchSequence), text: text })
+      _metricQueuedBytes += text.length
+    }
+    if (!metricsRetry.running) flushMetricBatch()
+  }
+
+  function flushMetricBatch() {
+    if (metricsRetry.running || metricsAppendProcess.running || diskReadProcess.running || _metricBatches.length === 0) return
+    var batch = _metricBatches[0]
+    if (!runScript(metricsAppendProcess, "metrics.sh", ["append-batch", batch.text, batch.id])) {
+      metricsError = "History not saved; retrying"
+      metricsRetry.restart()
+    }
   }
 
   function copyText(value, quiet) {
@@ -635,6 +666,8 @@ Item {
       root.activeAction = null
       var parsed = root.parseJson(actionOut.text)
       var ok = parsed && parsed.ok === true
+      if (ok && action && !root._lastTunnelsKey && parsed.reach === "public" && parsed.url)
+        root._startedShareUrls[action.key] = String(parsed.url)
       var targetStopped = parsed && (parsed.effect === "stopped" || parsed.effect === "restarted")
       if (action && action.expectsGone && !ok && !targetStopped) root._forgetGone(action.target)
       if (ok && action && action.shareStopKey && root.tunnels[action.shareStopKey])
@@ -673,15 +706,46 @@ Item {
     stdout: StdioCollector { id: diskOut; waitForEnd: true }
     onExited: function (exitCode) {
       if (!root.alive) return
-      var port = root._diskPort
-      var queued = root._diskQueued
-      root._diskQueued = 0
+      var request = root._metricRead
+      var queued = root._metricReadQueued
+      root._metricReadQueued = null
       var parsed = root.parseJson(diskOut.text)
-      var success = exitCode === 0 && parsed && parsed.ok === true && Array.isArray(parsed.samples)
+      var success = exitCode === 0 && parsed && parsed.ok === true && parsed.view && Array.isArray(parsed.view.buckets)
       var error = success ? "" : (parsed && parsed.error ? String(parsed.error) : "could not load saved history")
-      if (queued && queued !== port) root.loadDiskHistory(queued)
-      root.diskHistoryLoaded(port, success ? parsed.samples : [], error)
+      root.flushMetricBatch()
+      if (queued) root.loadMetricRange(queued.port, queued.seconds, queued.end, queued.id)
+      root.metricRangeLoaded(request.port, request.seconds, request.id, success ? parsed.view : null,
+                             error, success && parsed.warning ? String(parsed.warning) : "")
     }
+  }
+
+  Process {
+    id: metricsAppendProcess
+    stdout: StdioCollector { id: metricsAppendOut; waitForEnd: true }
+    onExited: function (exitCode) {
+      if (!root.alive) return
+      var parsed = root.parseJson(metricsAppendOut.text)
+      if (exitCode === 0 && parsed && parsed.ok === true) {
+        var saved = root._metricBatches.shift()
+        root._metricQueuedBytes -= saved.text.length
+        root.metricsError = root._metricDropped ? "Recording gap: " + root._metricDropped + " batches could not be queued"
+                           : (parsed.warning ? String(parsed.warning) : "")
+        root.metricsRevision++
+        root.flushMetricBatch()
+      } else {
+        root.metricsError = (parsed && parsed.error ? String(parsed.error) : "History not saved") + "; retrying"
+        metricsRetry.restart()
+      }
+      var queued = root._metricReadQueued
+      if (queued && (root._metricBatches.length === 0 || metricsRetry.running))
+        root.loadMetricRange(queued.port, queued.seconds, queued.end, queued.id)
+    }
+  }
+
+  Timer {
+    id: metricsRetry
+    interval: 5000
+    onTriggered: root.flushMetricBatch()
   }
 
   // ---- timers ---------------------------------------------------------------

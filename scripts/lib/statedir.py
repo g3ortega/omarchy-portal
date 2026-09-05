@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Descriptor-relative state files for Portal's shell helpers.
 
-Every state path Portal touches is predictable, so nothing here trusts a
-pathname twice. A directory is reached by walking every component from `/`
+Ordinary state files use descriptor-relative I/O. The metrics command delegates
+SQLite I/O to a trusted CLI in a bound private directory with no-follow opens.
+For the descriptor-relative commands, no pathname is trusted twice. A directory is reached by walking every component from `/`
 with O_DIRECTORY|O_NOFOLLOW, and the final directory must be a real directory
 the current user owns that nobody else can write to. A leaf is opened
 relative to that directory with O_NOFOLLOW|O_NONBLOCK (a planted FIFO cannot
@@ -13,6 +14,7 @@ and truncation go through the validated descriptor, never the path again.
 
   ensure   <dir>...                       create (0700) and verify directories
   dump     <dir> [maxbytes] [maxfiles] [name...]  JSON text and SHA-256 of every leaf, or only the named ones
+  dump-existing <dir> [maxbytes] [maxfiles] [name...]  same snapshot without creating a missing directory
   read     <path> [maxbytes]              raw bytes to stdout
   write    <path> [mode]                  stdin -> atomic replace
   create   <path> [mode]                  stdin -> atomic no-replace create
@@ -64,6 +66,10 @@ HeldLock = tuple[int, int, CreationLedger]
 
 
 class Refused(Exception):
+    pass
+
+
+class MissingDirectory(Refused):
     pass
 
 
@@ -277,7 +283,7 @@ def open_dir(path, create=False, created: CreationLedger | None = None):
                 nfd = os.open(comp, DIR_FLAGS, dir_fd=fd)
             except FileNotFoundError:
                 if not create:
-                    raise Refused(f"missing: {path}")
+                    raise MissingDirectory(f"missing: {path}")
                 nfd = create_dir_component(fd, comp, path, created)
             except OSError as e:
                 raise Refused(f"refused {path}: {e.strerror} at {comp}")
@@ -552,11 +558,15 @@ def cmd_ensure(a):
         os.close(open_dir(d, create=True))
 
 
-def cmd_dump(a):
+def cmd_dump(a, create=True):
     import json
     cap = int(a[1]) if len(a) > 1 else MAX_BYTES
     maxfiles = int(a[2]) if len(a) > 2 else MAX_FILES
-    dirfd = open_dir(a[0], create=True)
+    try:
+        dirfd = open_dir(a[0], create=create)
+    except MissingDirectory:
+        sys.stdout.write(json.dumps({"files": {}, "refused": [], "sha256": {}}))
+        return
     try:
         names = sorted(os.listdir(dirfd))
         if len(names) > maxfiles:
@@ -1158,9 +1168,17 @@ def cmd_launch_tracked(a):
     return launch_process(a[0], logname, a[2], a[4:], environment=environment)
 
 
+def cmd_metrics(args):
+    import runpy
+    module = runpy.run_path(os.path.join(os.path.dirname(__file__), "metrics.py"))
+    return module["run"](args, sys.modules[__name__])
+
+
 COMMANDS = {
+    "metrics": (cmd_metrics, 2),
     "ensure": (cmd_ensure, 1), "dump": (cmd_dump, 1), "read": (cmd_read, 1), "write": (cmd_write, 1),
-    "create": (cmd_create, 1), "check-env": (cmd_check_env, 0),
+    "create": (cmd_create, 1),
+    "dump-existing": (lambda a: cmd_dump(a, create=False), 1), "check-env": (cmd_check_env, 0),
     "append": (cmd_append, 2), "append-many": (cmd_append_many, 3), "remove": (cmd_remove, 2),
     "remove-digest": (cmd_remove_digest, 4), "truncate": (cmd_truncate, 2), "lock": (cmd_lock, 5),
     "lock-clean": (cmd_lock_clean, 5),

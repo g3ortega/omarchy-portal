@@ -263,8 +263,9 @@ for _ in 1 2 3; do
   "$S/metrics.sh" append-batch "$BATCH" >/dev/null
   sleep 1
 done
-got=$("$S/metrics.sh" read 45901 | jq '.samples | length')
-lat_ok=$("$S/metrics.sh" read 45901 | jq '[.samples[] | select(.httpCode == 200)] | length')
+saved=$("$S/metrics.sh" query 45901 1800 "$(date +%s)")
+got=$(jq '.view.count' <<<"$saved")
+lat_ok=$(jq '[.view.buckets[].latMs.count] | add' <<<"$saved")
 [[ $got -ge 3 && $lat_ok -ge 3 ]] && ok "45901: $got samples persisted, probes recorded" \
   || bad "retention: got=$got lat_ok=$lat_ok"
 

@@ -171,13 +171,16 @@ case "${1:-}" in
     # Wait for the port to actually free before relaunching into EADDRINUSE.
     for ((i = 0; i < 25; i++)); do
       port_busy "$port"; busy_rc=$?
-      (( busy_rc == 2 )) && die_effect "could not query port $port after stopping pid $pid" stopped
-      (( busy_rc == 1 )) && break
+      (( busy_rc != 0 )) && break
       sleep 0.2
     done
-    port_busy "$port"; busy_rc=$?
-    (( busy_rc == 2 )) && die_effect "could not query port $port after stopping pid $pid" stopped
-    (( busy_rc == 0 )) && die_effect "port $port did not free up" stopped
+    if (( busy_rc == 0 )); then port_busy "$port"; busy_rc=$?; fi
+    if (( busy_rc != 1 )); then
+      effect=none
+      proc check "$pid" "$start" || effect=stopped
+      (( busy_rc == 2 )) && die_effect "could not query port $port after signaling pid $pid" "$effect"
+      die_effect "port $port did not free up" "$effect"
+    fi
 
     restart_pid=".restart-$port.pid"
     trap 'cancel_restart "$restart_pid" 143' TERM

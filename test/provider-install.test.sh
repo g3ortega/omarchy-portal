@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -128,4 +129,59 @@ with tempfile.TemporaryDirectory(prefix='portal-install-') as temporary:
     subprocess.run(['bash',str(app/'uninstall.sh'),'--dry'],env=environment(case),check=True,capture_output=True,timeout=15)
     assert not (case/'bin').exists() and (case/'state/installed-cloudflared').exists()
     print('ok dry uninstall does not create a missing binary directory')
+    subprocess.run(['bash',str(app/'uninstall.sh')],env=environment(case),check=True,capture_output=True,timeout=15)
+    assert not (case/'bin').exists() and not (case/'state/installed-cloudflared').exists()
+    print('ok actual uninstall does not create a missing binary directory')
+    case=root/'legacy'
+    case.mkdir()
+    for child in ('state','runtime','home','tmp'):
+        (case/child).mkdir()
+    for name in ('portless-3000.log','portless-00080.log','portless-0.log','foreign.log'):
+        (case/'runtime'/name).write_text('preserved unless Portal owns this name')
+    (case/'secret').write_text('unrelated')
+    (case/'runtime/portless-3001.log').symlink_to(case/'secret')
+    subprocess.run(['bash',str(app/'uninstall.sh')],env=environment(case),check=True,capture_output=True,timeout=15)
+    assert sorted(p.name for p in (case/'runtime').iterdir()) == ['foreign.log','portless-0.log']
+    assert (case/'secret').read_text() == 'unrelated'
+    print('ok legacy Portless logs are removed while invalid ports and unrelated files remain')
+
+    for obstruction in ('none', 'foreign-file', 'foreign-db', 'symlink'):
+        case=root/('sqlite-'+obstruction)
+        case.mkdir()
+        for child in ('state','runtime','home','tmp'):
+            (case/child).mkdir()
+        metrics=case/'state/metrics'
+        created=subprocess.run(['/usr/bin/python3','-I','-S',str(app/'lib/statedir.py'),
+                                'metrics',str(metrics),'stats'],
+                               env=environment(case),text=True,capture_output=True,check=True,timeout=15,
+                               preexec_fn=lambda: os.umask(0o077))
+        assert json.loads(created.stdout)['ok'], created.stdout
+        store=metrics/'store'
+        database=store/'metrics.db'
+        if obstruction == 'foreign-file':
+            (store/'foreign.txt').write_text('unrelated')
+        elif obstruction == 'foreign-db':
+            with sqlite3.connect(database) as connection:
+                connection.execute('PRAGMA application_id=123')
+        elif obstruction == 'symlink':
+            (case/'secret').write_text('unrelated')
+            (store/'metrics.db-journal').symlink_to(case/'secret')
+        before=database.read_bytes()
+        dry=subprocess.run(['bash',str(app/'uninstall.sh'),'--dry'],env=environment(case),capture_output=True,timeout=15)
+        assert (dry.returncode == 0) == (obstruction == 'none'), (obstruction,dry.stderr)
+        assert database.read_bytes() == before
+        result=subprocess.run(['bash',str(app/'uninstall.sh')],env=environment(case),capture_output=True,timeout=15)
+        assert (result.returncode == 0) == (obstruction == 'none'), (obstruction,result.stderr)
+        if obstruction == 'none':
+            assert not store.exists()
+        else:
+            assert database.read_bytes() == before
+        if obstruction == 'foreign-file':
+            assert (store/'foreign.txt').read_text() == 'unrelated'
+        if obstruction == 'symlink':
+            assert (store/'metrics.db-journal').is_symlink()
+            assert (case/'secret').read_text() == 'unrelated'
+    print('ok uninstall removes owned SQLite storage and refuses foreign files, databases, and symlinks')
+
+
 PY

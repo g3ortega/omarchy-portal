@@ -42,13 +42,14 @@ release from GitHub. Cloudflared and ngrok connect to their own services.
   only. Existing LAN routes are labeled "LAN name".
 - Shares a port publicly through Cloudflare or ngrok, and paints anything
   public in your theme's urgent color so you can't forget it's open.
-- Charts latency, connections, CPU and memory per port. Watch a port to keep
-  a day of samples (at the default 5-second scan).
+- Charts HTTP latency, connections, CPU and memory per port. Open the last
+  hour, switch to 30 minutes, or inspect up to 48 hours of watched history.
 - Pauses, resumes, restarts and stops a dev server. The loud ones ask first.
 - Works entirely from the keyboard. Press `?` in the panel.
 
 The bar counts public shares when any are open, otherwise named routes, otherwise
-dev servers. Its icon matches that count. The tooltip lists all active categories.
+dev servers. A zero count hides the number. The Portal icon stays the same; its color
+indicates exposure. The tooltip lists all active categories.
 
 Provider setup, browser trust, and preferences live in Settings (`,`).
 Local names use an unprivileged proxy on port 1355 by default. Existing proxies

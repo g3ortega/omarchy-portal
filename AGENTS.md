@@ -14,7 +14,8 @@ The UI is QML. Helpers are Bash and Python.
 - `scripts/portal` is the CLI. `scripts/tunnels.sh`, `scripts/lifecycle.sh`,
   `scripts/metrics.sh`, and the setup and uninstall scripts own effects.
 - `scripts/lib/files.sh` wraps shell state access. `scripts/lib/statedir.py`
-  owns descriptor-relative state and launches. `scripts/lib/proc.py` owns
+  owns descriptor-relative state and launches. `scripts/lib/metrics.py` owns
+  SQLite retention and bounded queries through that helper. `scripts/lib/proc.py` owns
   capped runs, process identity checks, and pidfd leader signals.
 
 ## Commands
@@ -121,6 +122,10 @@ parity before push and after merge. It refuses installed-only unstaged files.
 - Route state reads, writes, and launches through `statedir.py`. Do not follow
   symlinks. Resolve a binary, check its owner and ancestors, and execute the
   resolved path instead of trusting `PATH`.
+- SQLite runs from a bound private 0700 working directory with `--nofollow`,
+  validated database/sidecar ownership, and a trusted executable. SQLite owns
+  its named database I/O; do not claim it is descriptor-relative leaf I/O.
+  Keep raw history for 48 hours. Range selection never prunes samples.
 - Render data-derived QML strings with `Text.PlainText`. Use
   `HoverHandler { id: ... }` for hover. Moments last five seconds. Setup guidance
   stays until Escape, replacement, or panel reopen.

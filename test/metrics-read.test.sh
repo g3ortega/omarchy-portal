@@ -5,16 +5,18 @@ T=$(mktemp -d)
 trap 'rm -rf -- "$T"' EXIT
 export PORTAL_METRICS_DIR="$T/state"
 mkdir -p "$PORTAL_METRICS_DIR/metrics"
-read_metrics() { bash "$ROOT/scripts/metrics.sh" read 3307; }
+read_metrics() { bash "$ROOT/scripts/metrics.sh" query 3307 1800 1800; }
 file="$PORTAL_METRICS_DIR/metrics/3307.jsonl"
-read_metrics | jq -e '.ok == true and .samples == []' >/dev/null
 printf '%s\n' '{"t":1,"rssKb":100}' '{torn' '{"t":2,"rssKb":101}' > "$file"
-read_metrics | jq -e '.ok == true and .samples == [{t:1,rssKb:100},{t:2,rssKb:101}]' >/dev/null
-: > "$file"
-read_metrics | jq -e '.ok == true and .samples == []' >/dev/null
+read_metrics | jq -e '.ok == true and .view.count == 2 and .view.stats.rssKb == {lo:100,hi:101}' >/dev/null
 rm "$file"
+export PORTAL_METRICS_DIR="$T/empty"
+read_metrics | jq -e '.ok == true and .view.count == 0' >/dev/null
 echo 'ok absent and empty history are empty; valid samples survive torn lines'
 for kind in symlink broken-symlink directory unreadable oversized; do
+  export PORTAL_METRICS_DIR="$T/$kind"
+  mkdir -p "$PORTAL_METRICS_DIR/metrics"
+  file="$PORTAL_METRICS_DIR/metrics/3307.jsonl"
   case $kind in
     symlink) printf 'PRIVATE_HISTORY_SENTINEL' > "$T/secret"; ln -s "$T/secret" "$file" ;;
     broken-symlink) ln -s "$T/missing" "$file" ;;

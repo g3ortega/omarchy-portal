@@ -4,6 +4,7 @@ import QtQuick
 import qs.Ui
 import qs.Commons
 import "lib/Icons.js" as Icons
+import "lib/History.js" as History
 
 // Portal's panel. Service.qml owns the g3ortega.portal IPC target; a second
 // handler on the same target warns at runtime, so this one manages none.
@@ -448,6 +449,13 @@ Panel {
     if (vs.length > 0) activateVerb(e, vs[Math.min(verbIndex, vs.length - 1)])
   }
 
+  property int rangeSeconds: 3600
+
+  function stepRange(delta) {
+    var index = History.ranges.findIndex(function (range) { return range.seconds === root.rangeSeconds })
+    root.rangeSeconds = History.ranges[Util.clamp(index + delta, 0, History.ranges.length - 1)].seconds
+  }
+
   function showDetail(entry) {
     if (!entry) return
     pendingAction = null
@@ -602,6 +610,10 @@ Panel {
         if (t === "?") { root.helpOpen = true; return }
         if (t === ",") { root.toggleSettings(); return }
         if (root.mode === "settings") return
+        if (root.mode === "detail" && (t === "[" || t === "]")) {
+          root.stepRange(t === "[" ? -1 : 1)
+          return
+        }
         if (t === "/") {
           root.detailEntry = null
           search.forceActiveFocus()
@@ -773,6 +785,9 @@ Panel {
             brandColors: root.brandColors
             foreground: root.panelText
             fontFamily: root.fontFamily
+            active: root.opened && root.mode === "detail"
+            rangeSeconds: root.rangeSeconds
+            onRangeRequested: function (seconds) { root.rangeSeconds = seconds }
             onClosed: root.detailEntry = null
           }
         }
@@ -1112,11 +1127,9 @@ Panel {
                   foreground: root.panelText
                   onHasCursorChanged: if (hasCursor) settingsView.reveal(settingRow)
 
-                  MouseArea {
-                    anchors.fill: parent
-                    z: -1
-                    hoverEnabled: true
-                    onEntered: root.settingsIndex = root.setupProviders.length + settingRow.index
+                  HoverHandler {
+                    id: settingHover
+                    onHoveredChanged: if (hovered) root.settingsIndex = root.setupProviders.length + settingRow.index
                   }
 
                   Text {
@@ -1314,8 +1327,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               width: Style.font.bodySmall + Style.spacing.xs
               height: Style.font.bodySmall + Style.spacing.xs
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
+              HoverHandler { id: copyHover; cursorShape: Qt.PointingHandCursor }
               onClicked: {
                 if (root.service && root.feedback) root.service.copyText(root.feedback.command, true)
                 stepBlock.copied = true
@@ -1336,7 +1348,7 @@ Panel {
                 fontSize: Style.font.bodySmall
                 scale: stepBlock.copied ? 1.3 : 1
                 Behavior on scale { NumberAnimation { duration: 150 } }
-                color: stepBlock.copied || copyHit.containsMouse ? Color.accent : Util.alpha(Color.accent, 0.7)
+                color: stepBlock.copied || copyHover.hovered ? Color.accent : Util.alpha(Color.accent, 0.7)
               }
             }
           }
@@ -1362,7 +1374,7 @@ Panel {
             share:    "h/l choose · enter expose · esc back",
             naming:   "enter save · esc back",
             settings: "j/k move · h/l change · enter setup · esc back",
-            detail:   "j/k next port · o open · c copy · w watch · esc back",
+            detail:   "[ / ] range · j/k next port · o open · c copy · w watch · esc back",
             list:     "j/k move · enter actions · l charts · ? shortcuts"
           })
           width: parent.width

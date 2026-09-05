@@ -91,6 +91,24 @@ jq -e '.ok == false' <<<"$result" >/dev/null
 [[ ! -s $FIXTURE/calls && -e $(namefile portless 3000) && ! -e $FIXTURE/signals ]]
 echo 'PASS stale ownership marker cannot remove a managed matching alias'
 
+for outcome in renamed broken; do
+  reset_routes '[{"hostname":"native.localhost","port":3000,"pid":999999},{"hostname":"owned.localhost","port":3000,"pid":0}]'
+  write_own "$(namefile portless 3000)" owned
+  if [[ $outcome == broken ]]; then result=$(FAIL_ALIAS_NAME=broken cmd_start_portless 3000 broken)
+  else result=$(cmd_start_portless 3000 renamed); fi
+  if [[ $outcome == broken ]]; then
+    jq -e '.ok == false and (.error | contains("alias failed"))' <<<"$result" >/dev/null
+    expected=owned
+  else
+    jq -e '.ok == true' <<<"$result" >/dev/null
+    expected=renamed
+  fi
+  jq -e --arg name "$expected.localhost" 'any(.[]; .hostname == "native.localhost" and .pid == 999999)
+    and any(.[]; .hostname == $name and .port == 3000 and .pid == 0)' "$PORTLESS_STATE_DIR/routes.json" >/dev/null
+  [[ $(cat "$(namefile portless 3000)") == "$expected" && ! -e $FIXTURE/signals ]]
+done
+echo 'PASS exact owned aliases rename and roll back beside managed siblings'
+
 reset_routes '[{"hostname":"api.acme.dev.test","port":3000,"pid":0}]'
 [[ $(portless_route_name 3000) == api.acme ]]
 echo 'PASS adopted alias names use the longest matching domain suffix'

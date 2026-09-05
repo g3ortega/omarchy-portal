@@ -3,18 +3,17 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import qs.Ui
 import qs.Commons
+import "lib/History.js" as History
 
-// Fill only zero-anchored plots. A truncated axis shows relative change.
-// The owner supplies strided samples and exact full-series bounds to cap painting cost.
-// The crosshair is an overlay, so hovering does not repaint the canvas.
+// Buckets preserve extrema; hover reads the same time interval in every card.
 Item {
   id: card
 
   property string title: ""
   property bool loading: false
-  property var samples: []          // strided [{t, <field>...}] oldest -> newest
+  property var view: History.aggregate([], 3600, 0)
   property string field: ""
-  // Exact over the full (un-strided) series, provided by the owner.
+  // Exact bounds over every raw sample in the selected window.
   property var lo: null
   property var hi: null
   property var last: null
@@ -48,26 +47,13 @@ Item {
   }
   readonly property bool hasShape: phase === "active"
 
-  readonly property var series: {
-    var out = []
-    for (var i = 0; i < samples.length; i++) {
-      var v = samples[i][field]
-      out.push({ t: samples[i].t, v: (v === undefined || v === null) ? null : Number(v) })
-    }
-    return out
-  }
-
-  // Owned by the page, not the card: every card renders the same sample
-  // array, so one X is one instant across all of them. Hovering any card
-  // reads out all four — "one readout, every series" — instead of making the
-  // reader chase the same moment card by card.
-  property int hoverIndex: -1
-  signal hoverIndexRequested(int index)
+  readonly property var series: view.buckets
+  property real hoverTime: -1
+  signal hoverTimeRequested(real time)
+  readonly property int hoverIndex: hoverTime < 0 ? -1 : History.bucketAt(view, hoverTime)
 
   // Shared plot geometry for the canvas and the crosshair overlay.
   readonly property int pad: 2
-  // Shapeless phases paint one flat rule and never call plotY; only the
-  // active phase needs a real axis.
   readonly property real plotFloor: {
     if (phase !== "active" || zeroAnchored) return 0
     return lo - (hi - lo) * 0.15                        // headroom below a truncated band
@@ -77,12 +63,16 @@ Item {
     return zeroAnchored ? Math.max(hi * 1.08, 1) : (hi - lo) * 1.3
   }
 
-  function plotX(i) {
-    var n = series.length
-    return pad + (n < 2 ? 0 : (canvas.width - 2 * pad) * i / (n - 1))
+  function plotX(time) {
+    return pad + (canvas.width - 2 * pad) * (time - view.start) / (view.end - view.start)
   }
-  function plotY(v) {
-    return canvas.height - pad - (canvas.height - 2 * pad) * (v - plotFloor) / plotSpan
+  function plotY(value) {
+    if (!hasShape) return phase === "zero" ? canvas.height - pad : canvas.height / 2
+    return canvas.height - pad - (canvas.height - 2 * pad) * (value - plotFloor) / plotSpan
+  }
+  function hoverAt(x) {
+    var fraction = Util.clamp((x - pad) / Math.max(1, plot.width - 2 * pad), 0, 1)
+    hoverTimeRequested(view.start + fraction * (view.end - view.start))
   }
 
   implicitHeight: Style.space(96)
@@ -119,11 +109,10 @@ Item {
         anchors.top: parent.top
         textFormat: Text.PlainText
         text: {
-          // The page states the hovered instant once; each card just answers
-          // for its own metric.
-          if (card.hoverIndex >= 0 && card.series[card.hoverIndex]) {
-            var h = card.series[card.hoverIndex]
-            return h.v === null ? "no sample" : card.format(h.v)
+          if (card.hoverTime >= 0) {
+            var bucket = card.series[card.hoverIndex]
+            return !bucket || bucket[card.field].avg === null ? "no sample"
+              : card.format(bucket[card.field].avg)
           }
           return card.last === null ? "—" : card.format(card.last)
         }
@@ -150,91 +139,43 @@ Item {
         onPaint: {
           var ctx = getContext("2d")
           ctx.reset()
-          var s = card.series
-          var n = s.length
           if (card.lo === null) return
-          var pad = card.pad
-
-          // Recessive baseline — the one line the grid gets.
-          ctx.strokeStyle = Util.alpha(card.foreground, 0.12)
-          ctx.lineWidth = 1
-          ctx.beginPath(); ctx.moveTo(pad, height - pad); ctx.lineTo(width - pad, height - pad); ctx.stroke()
-
-          // No shape to show: one flat rule, quietly. Zero sits on the
-          // baseline because that is where zero is; a steady non-zero value
-          // sits mid-plot, where its height claims nothing.
-          if (!card.hasShape) {
-            var flatY = card.phase === "zero" ? height - pad : height / 2
-            ctx.strokeStyle = Util.alpha(card.accent, 0.45)
+          var previous = null
+          for (var i = 0; i < card.series.length; i++) {
+            var bucket = card.series[i]
+            var metric = bucket[card.field]
+            if (metric.count === 0) { previous = null; continue }
+            var x = card.plotX((bucket.t + bucket.end) / 2)
+            var y = card.plotY(metric.avg)
+            ctx.strokeStyle = Util.alpha(card.accent, 0.55)
             ctx.lineWidth = 2
-            ctx.lineCap = "round"
-            ctx.beginPath(); ctx.moveTo(pad, flatY); ctx.lineTo(width - pad, flatY); ctx.stroke()
-            return
-          }
-
-          // Area, then line, broken at nulls so gaps read as gaps.
-          function eachRun(cb) {
-            var start = -1
-            for (var i = 0; i <= n; i++) {
-              var ok = i < n && s[i].v !== null
-              if (ok && start === -1) start = i
-              if (!ok && start !== -1) { cb(start, i - 1); start = -1 }
-            }
-          }
-
-          // Area only when the axis is anchored at zero: otherwise the fill
-          // would claim a magnitude the plot is not measuring.
-          if (card.zeroAnchored) {
-            ctx.fillStyle = Util.alpha(card.accent, 0.12)
-            eachRun(function (a, b) {
-              ctx.beginPath()
-              ctx.moveTo(card.plotX(a), height - pad)
-              for (var i = a; i <= b; i++) ctx.lineTo(card.plotX(i), card.plotY(s[i].v))
-              ctx.lineTo(card.plotX(b), height - pad)
-              ctx.closePath(); ctx.fill()
-            })
-          }
-
-          ctx.strokeStyle = card.accent
-          ctx.lineWidth = 2
-          ctx.lineJoin = "round"
-          eachRun(function (a, b) {
             ctx.beginPath()
-            for (var i = a; i <= b; i++) {
-              if (i === a) ctx.moveTo(card.plotX(i), card.plotY(s[i].v))
-              else ctx.lineTo(card.plotX(i), card.plotY(s[i].v))
-            }
+            ctx.moveTo(x, card.plotY(metric.lo))
+            ctx.lineTo(x, card.plotY(metric.hi))
             ctx.stroke()
-          })
-
-          // The endpoint dot marks "where it is now".
-          for (var last = n - 1; last >= 0; last--) {
-            if (s[last].v !== null) {
+            ctx.strokeStyle = card.accent
+            ctx.lineWidth = 1.5
+            if (History.connected(previous, bucket, card.field)) {
+              ctx.beginPath()
+              ctx.moveTo(card.plotX((previous.t + previous.end) / 2), card.plotY(previous[card.field].avg))
+              ctx.lineTo(x, y)
+              ctx.stroke()
+            } else {
               ctx.fillStyle = card.accent
-              ctx.beginPath(); ctx.arc(card.plotX(last), card.plotY(s[last].v), 3, 0, Math.PI * 2); ctx.fill()
-              break
+              ctx.fillRect(x - 1, y - 1, 2, 2)
             }
+            previous = bucket
           }
         }
       }
 
-      // Crosshair as items: hover costs two bindings, zero repaints.
       Rectangle {
-        visible: !card.loading && card.hoverIndex >= 0 && card.phase !== "collecting"
-        x: card.plotX(card.hoverIndex)
+        visible: !card.loading && card.hoverTime >= card.view.start && card.hoverTime <= card.view.end
+        x: card.plotX(card.hoverTime)
         y: card.pad
         width: 1
         height: plot.height - card.pad * 2
         color: Util.alpha(card.foreground, 0.35)
-      }
-
-      Rectangle {
-        visible: !card.loading && card.hoverIndex >= 0 && card.hasShape && card.series[card.hoverIndex]
-          && card.series[card.hoverIndex].v !== null
-        x: card.plotX(card.hoverIndex) - 3
-        y: visible ? card.plotY(card.series[card.hoverIndex].v) - 3 : 0
-        width: 6; height: 6; radius: 3
-        color: card.accent
       }
 
       Text {
@@ -250,16 +191,14 @@ Item {
         wrapMode: Text.WordWrap
       }
 
-      MouseArea {
-        anchors.fill: parent
-        hoverEnabled: true
-        enabled: !card.loading && card.series.length > 1
-        onPositionChanged: function (mouse) {
-          var n = card.series.length
-          var i = Math.round((mouse.x - card.pad) / (canvas.width - 2 * card.pad) * (n - 1))
-          card.hoverIndexRequested(Util.clamp(i, 0, n - 1))
+      HoverHandler {
+        id: plotHover
+        enabled: !card.loading
+        onPointChanged: if (hovered) card.hoverAt(point.position.x)
+        onHoveredChanged: {
+          if (hovered) card.hoverAt(point.position.x)
+          else card.hoverTimeRequested(-1)
         }
-        onExited: card.hoverIndexRequested(-1)
       }
     }
 
@@ -274,6 +213,11 @@ Item {
         textFormat: Text.PlainText
         text: {
           if (card.loading) return ""
+          if (card.hoverTime >= 0) {
+            var bucket = card.series[card.hoverIndex]
+            var metric = bucket ? bucket[card.field] : null
+            return metric && metric.count > 0 ? "min " + card.format(metric.lo) + " · max " + card.format(metric.hi) : ""
+          }
           if (card.phase === "collecting") return ""
           if (card.phase === "zero") return card.zeroLabel !== "" ? card.zeroLabel : "none recorded"
           if (card.phase === "steady") return "steady at " + card.format(card.lo)
@@ -289,7 +233,9 @@ Item {
   }
 
   onLoadingChanged: canvas.requestPaint()
-  onSeriesChanged: canvas.requestPaint()
+  onViewChanged: canvas.requestPaint()
+  onLoChanged: canvas.requestPaint()
+  onHiChanged: canvas.requestPaint()
   onForegroundChanged: canvas.requestPaint()
   onAccentChanged: canvas.requestPaint()
   Component.onCompleted: canvas.requestPaint()

@@ -1,9 +1,10 @@
 #!/bin/bash
 # Owner-only state files, through scripts/lib/statedir.py: every read and
-# write is descriptor-relative to a directory walked from / without following
+# JSON-file write is descriptor-relative to a directory walked from / without following
 # links, leaves are bound after open (regular, ours, one link, capped), writes
 # are exclusive temporaries renamed into place. Third-party state (Portless's
-# directory) is read the same way.
+# directory) is read the same way. SQLite owns database and journal I/O from
+# a validated private working directory with its no-follow open flag.
 STATEDIR_PY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/statedir.py"
 PROC_PY="${STATEDIR_PY%/*}/proc.py"
 state() { /usr/bin/python3 -I -S "$STATEDIR_PY" "$@"; }   # -I: no env or cwd can redirect the interpreter
