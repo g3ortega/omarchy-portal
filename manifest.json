@@ -97,7 +97,7 @@
           "Icon only"
         ],
         "defaultValue": "Count",
-        "description": "Show the number of running dev servers next to the icon."
+        "description": "Show public shares, otherwise named routes, otherwise dev servers next to the matching icon."
       }
     ]
   }

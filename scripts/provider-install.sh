@@ -65,6 +65,9 @@ install_cloudflared() {
   tmp=$(mktemp -d) || die "mktemp failed"
   chmod 700 "$tmp"
   trap 'rm -rf "$tmp"' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
 
   curl -q -fsSL --proto =https --proto-redir =https --max-redirs 3 --max-time 300 \
     --max-filesize 134217728 -o "$tmp/cloudflared" "$url" \
@@ -83,18 +86,28 @@ install_cloudflared() {
     || { exec {dl}<&-; die "downloaded file is not an ELF binary"; }
 
   own_dir "$BIN_DIR" || { exec {dl}<&-; die "$BIN_DIR is not a private directory of yours"; }
-  state create "$target" 755 < "/proc/self/fd/$dl" || { exec {dl}<&-; die "could not install into $BIN_DIR"; }
-  exec {dl}<&-
-  # Without the marker removal could not tell this copy from the user's own:
-  # no marker, no install.
-  if ! { own_dir "${MARK%/*}" && jq -nc --arg p "$target" --arg s "$sum" '{path:$p, sha256:$s}' | state create "$MARK"; }; then
-    state remove-digest "$BIN_DIR" cloudflared "$sum" 134217728 \
-      || die "could not record the install under ${MARK%/*}; the installed path changed before digest-bound rollback"
-    die "could not record the install under ${MARK%/*}; the installed copy was removed again"
+  local marker marker_sum target_state
+  marker=$(jq -nc --arg p "$target" --arg s "$sum" '{path:$p, sha256:$s}')
+  marker_sum=$(printf '%s' "$marker" | sha256sum | cut -d' ' -f1)
+  # Publish ownership first so interruption cannot leave an unowned executable.
+  if ! { own_dir "${MARK%/*}" && printf '%s' "$marker" | state create "$MARK"; }; then
+    exec {dl}<&-
+    die "could not record the install under ${MARK%/*}; no executable was installed"
   fi
+  if ! state create "$target" 755 < "/proc/self/fd/$dl"; then
+    exec {dl}<&-
+    target_state=$(state dump "$BIN_DIR" 0 4096 cloudflared 2>/dev/null) \
+      || die "could not inspect $BIN_DIR after installation failed; its ownership marker was kept"
+    jq -e '(.files | has("cloudflared") | not) and (.refused | index("cloudflared") == null)' <<<"$target_state" >/dev/null \
+      || die "could not confirm installation into $BIN_DIR; its ownership marker was kept"
+    state remove-digest "${MARK%/*}" "${MARK##*/}" "$marker_sum" 4096 \
+      || die "could not install into $BIN_DIR; the ownership marker changed before rollback"
+    die "could not install into $BIN_DIR; its ownership marker was removed again"
+  fi
+  exec {dl}<&-
 
   rm -rf -- "$tmp" || die "could not remove the private download directory $tmp"
-  trap - EXIT
+  trap - EXIT TERM INT HUP
   jq -nc --arg v "$CLOUDFLARED_VERSION" --arg p "$BIN_DIR/cloudflared" \
     '{ok:true, version:$v, path:$p, note:"official Cloudflare release, checksum-pinned"}'
 }

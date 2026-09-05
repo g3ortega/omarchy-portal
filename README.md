@@ -47,6 +47,9 @@ release from GitHub. Cloudflared and ngrok connect to their own services.
 - Pauses, resumes, restarts and stops a dev server. The loud ones ask first.
 - Works entirely from the keyboard. Press `?` in the panel.
 
+The bar counts public shares when any are open, otherwise named routes, otherwise
+dev servers. Its icon matches that count. The tooltip lists all active categories.
+
 Provider setup, browser trust, and preferences live in Settings (`,`).
 Local names use an unprivileged proxy on port 1355 by default. Existing proxies
 on port 443 keep their URLs without a port number. Cloudflare sharing does not

@@ -98,10 +98,22 @@ BarWidget {
 
   readonly property bool showCount: String(setting("barLabel", "Count")) !== "Icon only"
 
-  // A public tunnel is a security-relevant state, so it gets its own glyph and
-  // the theme's urgent color rather than being folded into the count.
-  readonly property bool broadcasting: service ? service.hasPublicTunnel : false
-  readonly property int devCount: service ? service.devCount : 0
+  function summarizeCounts(counts, devCount) {
+    var lines = []
+    if (counts.pub > 0) lines.push(counts.pub + (counts.pub === 1 ? " public share" : " public shares"))
+    if (counts.named > 0) lines.push(counts.named + (counts.named === 1 ? " named route" : " named routes"))
+    if (devCount > 0 || lines.length === 0)
+      lines.push(devCount + (devCount === 1 ? " dev server" : " dev servers"))
+    return {
+      icon: counts.pub > 0 ? "broadcast" : counts.named > 0 ? "localRoute" : "portal",
+      count: counts.pub > 0 ? counts.pub : counts.named > 0 ? counts.named : devCount,
+      tooltip: lines.join(" · ")
+    }
+  }
+
+  readonly property var indicator: summarizeCounts(service ? service.tunnelCounts : ({ pub: 0, named: 0 }),
+                                                  service ? service.devCount : 0)
+  readonly property bool broadcasting: indicator.icon === "broadcast"
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -149,19 +161,13 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     active: root.opened
-    readonly property string glyph: Icons.g(root.broadcasting ? "broadcast" : "portal")
+    readonly property string glyph: Icons.g(root.indicator.icon)
     // Vertical bars have no room for a label.
-    text: root.vertical || !root.showCount ? glyph : glyph + " " + root.devCount
+    text: root.vertical || !root.showCount ? glyph : glyph + " " + root.indicator.count
     foreground: root.broadcasting
       ? (root.bar ? root.bar.urgent : Color.urgent)
       : (root.bar ? root.bar.barForeground : Color.foreground)
-    tooltipText: {
-      if (!root.service) return "Portal"
-      var lines = root.devCount + (root.devCount === 1 ? " dev server" : " dev servers")
-      if (root.broadcasting) lines += " · exposed publicly"
-      else if (root.service.tunnelCount > 0) lines += " · shared locally"
-      return lines
-    }
+    tooltipText: root.service ? root.indicator.tooltip : "Portal"
     onPressed: function (buttonCode) {
       if (buttonCode === Qt.LeftButton) root.toggle()
       else if (buttonCode === Qt.RightButton && root.service) root.service.refreshAll()

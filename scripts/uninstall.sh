@@ -124,11 +124,15 @@ if [[ -e $MARKER || -L $MARKER ]]; then
   [[ -n $path && $sum =~ ^[0-9a-f]{64}$ ]] || { echo "the cloudflared install marker is malformed; nothing was removed" >&2; exit 1; }
   # Only the one path Portal installs to is ever a delete candidate, and the
   # digest is taken from the bytes the state helper binds, not from a pathname.
-  # The marker is removed only together with the binary; a binary that is gone,
-  # changed, or not at our path leaves the record in place for a retry.
+  # An interrupted install may publish only its marker. Changed or unreadable
+  # targets retain that record; descriptor-verified absence allows cleanup.
   [[ $path == "$EXPECT_BIN" ]] || { echo "the cloudflared install marker names an unexpected path; nothing was removed" >&2; exit 1; }
-  run state remove-digest "${path%/*}" "${path##*/}" "$sum" 134217728 \
-    || { echo "could not remove the exact Portal-installed bytes at $path; its marker is kept; nothing else was removed" >&2; exit 1; }
+  if ! run state remove-digest "${path%/*}" "${path##*/}" "$sum" 134217728; then
+    binary_state=$(state dump "${path%/*}" 0 4096 "${path##*/}" 2>/dev/null) \
+      || { echo "could not inspect $path after removal failed; its marker is kept; nothing else was removed" >&2; exit 1; }
+    jq -e --arg name "${path##*/}" '(.files | has($name) | not) and (.refused | index($name) == null)' <<<"$binary_state" >/dev/null \
+      || { echo "could not remove the exact Portal-installed bytes at $path; its marker is kept; nothing else was removed" >&2; exit 1; }
+  fi
   run state_remove "$PORTAL_STATE_HOME" installed-cloudflared \
     || { echo "cloudflared was removed, but its install marker could not be cleared; nothing else was removed" >&2; exit 1; }
 fi

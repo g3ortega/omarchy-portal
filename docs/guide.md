@@ -127,7 +127,7 @@ Preferences persist to shell.json through the shell's API, so
 | `showSystemPorts` | System ports | `Off` | Include DNS, printing, SSH, and Portal's own proxy and tunnel processes |
 | `iconColors` | Icon colors | `Brand` | Framework colors, or your theme's palette |
 | `refreshSeconds` | Rescan every | `5` | Seconds between scans (2 to 120) |
-| `barLabel` | Bar label | `Count` | Dev-server count next to the bar icon, or icon only |
+| `barLabel` | Bar label | `Count` | Public shares, otherwise named routes, otherwise dev servers; or icon only |
 
 Switching the TLD keeps the names you already have: the restart command
 unions the new suffix with every one the proxy already serves.
