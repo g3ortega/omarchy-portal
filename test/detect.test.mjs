@@ -284,7 +284,7 @@ check("a wildcard bind still opens localhost", e({
   eq("an existing name can be renamed without the proxy", verbsFor(svc({ route: {} }), false, -1, "", dev)[0].label, "rename")
   eq("a truncated command line cannot be restarted", ids(verbsFor(svc({}), true, -1, "", { ...dev, argvTruncated: true })), ["name", "share", "pause", "stop"])
   eq("a paused process offers resume, urgently", verbsFor(svc({ stats: { 3000: { paused: true } } }), true, -1, "", dev)[2], { id: "pause", label: "resume", on: false, urgent: true })
-  eq("a shared port offers to stop sharing, urgently", verbsFor(svc({ tunnel: { url: "x" } }), true, -1, "", dev)[1], { id: "share", label: "stop sharing", on: false, urgent: true })
+  eq("a shared port omits the duplicate sharing verb", verbsFor(svc({ tunnel: { url: "x" } }), true, -1, "", dev).some(v => v.id === "share"), false)
   eq("the open section's verb is marked on", verbsFor(svc({}), true, 3000, "naming", dev)[0].on, true)
   eq("no URL means no share verb", ids(verbsFor(svc({ url: "" }), true, -1, "", dev)), ["name", "pause", "restart", "stop"])
 

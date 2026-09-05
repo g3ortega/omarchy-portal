@@ -328,9 +328,9 @@ Panel {
       out.push({ id: "name", label: named ? "rename" : "name",
                  on: expandedHere && expandedKind === "naming", urgent: false })
     if (service.urlFor(entry.port, entry.url) !== "" && entry.category !== "system"
-        && (tunnel !== null || service.validProcessIdentity(entry.process)))
-      out.push({ id: "share", label: tunnel ? "stop sharing" : "share",
-                 on: expandedHere && expandedKind === "sharing", urgent: tunnel !== null })
+        && tunnel === null && service.validProcessIdentity(entry.process))
+      out.push({ id: "share", label: "share",
+                 on: expandedHere && expandedKind === "sharing", urgent: false })
     if (stoppable)
       out.push({ id: "pause", label: paused ? "resume" : "pause", on: false, urgent: paused })
     if (entry.category === "dev" && service.canRestart(entry))
