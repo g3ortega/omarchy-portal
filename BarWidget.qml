@@ -163,7 +163,7 @@ BarWidget {
     active: root.opened
     readonly property string glyph: Icons.g(root.indicator.icon)
     // Vertical bars have no room for a label.
-    text: root.vertical || !root.showCount ? glyph : glyph + " " + root.indicator.count
+    text: root.vertical || !root.showCount || root.indicator.count <= 0 ? glyph : glyph + " " + root.indicator.count
     foreground: root.broadcasting
       ? (root.bar ? root.bar.urgent : Color.urgent)
       : (root.bar ? root.bar.barForeground : Color.foreground)
