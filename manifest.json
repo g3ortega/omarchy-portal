@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "g3ortega",
   "license": "MIT",
-  "description": "Every listening port with the framework identified, live connections/cpu/memory per row, pause-resume-restart, stable local names (name.localhost) via Portless, and one-click public exposure via Cloudflare or ngrok.",
+  "description": "Listening TCP ports with framework detection, live metrics, process controls, local names via Portless, and public sharing via Cloudflare or ngrok.",
   "kinds": [
     "service",
     "bar-widget"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Portal",
-    "description": "Listening ports, what is running on them, and one-click sharing.",
+    "description": "Listening ports, what is running on them, and public sharing.",
     "category": "System",
     "aliases": [
       "ports",
@@ -86,7 +86,7 @@
         "max": 120,
         "step": 1,
         "defaultValue": 5,
-        "description": "Seconds between port scans. The scan is a single ss call and a few file reads."
+        "description": "Seconds between port scans. Scans collect socket and process metrics and probe selected HTTP services."
       },
       {
         "key": "barLabel",
@@ -97,7 +97,7 @@
           "Icon only"
         ],
         "defaultValue": "Count",
-        "description": "Show public shares, otherwise named routes, otherwise dev servers next to the matching icon."
+        "description": "Show public shares, otherwise named routes, otherwise dev servers next to the Portal icon. Hide the count when zero."
       }
     ]
   }

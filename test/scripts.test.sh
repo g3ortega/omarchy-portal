@@ -2159,11 +2159,21 @@ dns_budget_result=$(PORTAL_STATE_DIR="$DNS_STATE" PORTLESS_STATE_DIR="$PORTLESS_
 is "status shares one DNS deadline and still returns every pending row" \
   "$dns_budget_result" "true 7 7 2 0"
 crowd=$(mktemp -d); for i in $(seq 1 600); do : > "$crowd/f$i"; done
-is "a state directory with too many entries dumps nothing" "$(state_dump "$crowd" | jq -c '.files|length')" "0"
+if crowd_dump=$(state dump "$crowd" 65536 2>/dev/null); then
+  bad "a state directory with too many entries is refused"
+else
+  ok "a state directory with too many entries is refused"
+fi
+is "a refused state dump emits no successful map" "$crowd_dump" ""
 rm -rf "$crowd"
 # State is read only from plain files we own; a planted link is not a file.
 ln -s /etc/hostname "$STATE_DIR/cloudflared-4445.url"; ln -s /proc/self/stat "$STATE_DIR/cloudflared-4445.pid"
-is "read_own returns nothing for a symlink" "$(read_own "$STATE_DIR/cloudflared-4445.url")" ""
+if linked_read=$(cat_own "$STATE_DIR/cloudflared-4445.url"); then
+  bad "cat_own refuses a symlink"
+else
+  ok "cat_own refuses a symlink"
+fi
+is "a refused symlink read emits nothing" "$linked_read" ""
 before=$(wc -c < /etc/hostname)
 write_own "$STATE_DIR/cloudflared-4445.url" "replaced"
 [[ -L $STATE_DIR/cloudflared-4445.url ]] && bad "write_own followed a link" || ok "write_own replaces a link with a file"
