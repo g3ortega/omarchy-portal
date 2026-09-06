@@ -154,6 +154,16 @@ check("Django via manage.py", e({
   port: 8000, comm: "python3", markers: ["manage.py", "requirements.txt"]
 }), { kind: "django", label: "Django", category: "dev" })
 
+for (const role of ["master", "worker"]) {
+  const title = `gunicorn: ${role} [app:app]`
+  check(`Gunicorn ${role} process title retains HTTP classification`, e({
+    port: 41000, comm: title.slice(0, 15), cmdline: title
+  }), { kind: "gunicorn", httpProbe: true })
+}
+check("Gunicorn helper name is not a Python runtime", e({
+  port: 41000, comm: "gunicorn-helper", cmdline: "gunicorn-helper", markers: ["manage.py"]
+}), { kind: "unknown", httpProbe: false })
+
 check("Uvicorn is not proof of FastAPI", e({
   port: 8000, comm: "python3", cmdline: "uvicorn app.main:app --reload"
 }), { kind: "uvicorn", label: "Uvicorn" })
