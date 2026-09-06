@@ -144,6 +144,9 @@ case "${1:-}" in
     jq -nc --arg effect "$effect" '{ok:true,effect:$effect}'
     ;;
   restart)
+    # Reserve six seconds of the action's twenty for rollback's five-second grace and state cleanup.
+    read -r uptime _ </proc/uptime
+    restart_deadline=$(( ${uptime/./} + 1400 ))
     pid="${2:-}" start="${3:-}" port="${4:-}" argv_json="${6:-}"
     target "$pid" "$start" "$port"
     # The working directory and environment are read from the live process,
@@ -229,9 +232,7 @@ case "${1:-}" in
       2) die_effect "the replacement process left an invalid identity record; it was kept" stopped ;;
       129|130|143) cancel_restart "$restart_pid" "$identity_rc" ;;
     esac
-    # Report success only once the port is serving again; the relaunch is
-    # detached, so give it a moment. An exec that failed leaves the port free.
-    for ((i = 0; i < 50; i++)); do
+    while read -r uptime _ </proc/uptime && (( ${uptime/./} < restart_deadline )); do
       port_busy "$port"; busy_rc=$?
       (( busy_rc == 2 )) && fail_restart "$new_pid" "$new_start" "$restart_pid" "could not query port $port after restart"
       (( busy_rc == 0 )) && break

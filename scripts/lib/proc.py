@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Process handling for Portal's shell helpers.
 
-  run <stdout-cap> <deadline> -- <argv...>
+  run <stdout-cap> <deadline> [--cleanup-grace <seconds>] -- <argv...>
       Run argv in a session of its own. Its stdout is held up to the cap and
       its stderr up to 4096 bytes; past the cap, or past the deadline
-      (seconds), the whole process group is ended (TERM, then KILL ten
-      seconds later) and nothing is passed on: exit 125 for overflow, 124 for
-      the deadline, so a reader never parses a document that was cut short.
+      (seconds), the whole process group is ended (TERM, then KILL after the
+      cleanup grace, ten seconds by default) and nothing is passed on.
+      Exit 125 for overflow, 124 for the deadline, so a reader never parses
+      a document that was cut short.
       TERM, INT, or HUP sent to this wrapper ends and reaps the group before
       returning 128 plus that signal. Otherwise the child's output and its
       own exit status are returned.
+      Nested rollback commands may shorten cleanup to 0..10 seconds so they
+      finish before their caller's cleanup deadline.
   signal <pid> <starttime> <SIG>
       Signal the process that is <pid> and started at <starttime> (kernel
       ticks, field 22 of /proc/<pid>/stat) through a pidfd, so a pid reused
@@ -100,37 +103,74 @@ def cmd_end(a):
     return 1
 
 
+def group_alive(pid, ignore_zombies=False):
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    if not ignore_zombies:
+        return True
+    # Keeping the zombie leader reserves the group ID through the last
+    # signal. Ignore zombies when checking whether its descendants remain.
+    group = str(pid).encode()
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    with open(f"{entry.path}/stat", "rb") as stat:
+                        fields = stat.read(4096).rsplit(b")", 1)[1].split()
+                except FileNotFoundError:
+                    continue
+                except PermissionError:
+                    try:
+                        if os.getpgid(int(entry.name)) != pid:
+                            continue
+                    except ProcessLookupError:
+                        continue
+                    return True
+                if fields[2] == group and fields[0] not in (b"Z", b"X"):
+                    return True
+    except (OSError, IndexError):
+        return True
+    return False
+
+
 def end_group(pid, grace=GRACE):
     """TERM the whole group, and if anything is still in it after the grace
     period, KILL the group. The leader exiting does not end this: a descendant
     that inherited the pipes and ignores TERM is still a group member."""
-    reaped = False
+    owned_child = True
 
-    def reap():
-        nonlocal reaped
-        if reaped:
-            return
+    def child_exited():
+        nonlocal owned_child
         try:
-            if os.waitpid(pid, os.WNOHANG)[0]:
-                reaped = True
+            return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
         except ChildProcessError:
-            reaped = True
-
-    def group_gone():
-        try:
-            os.killpg(pid, 0)   # signal 0 sends nothing; it asks whether the group still has members
-            return False
-        except OSError:
+            owned_child = False
             return True
 
+    exited = child_exited()
     try:
         os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        # A just-forked child may not have reached setsid yet. An unreaped
+        # direct child still owns its PID, so this cannot hit a successor.
+        if owned_child and not exited:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
     except OSError:
         pass
     limit = time.monotonic() + grace
     while time.monotonic() < limit:
-        reap()
-        if group_gone():
+        if not exited:
+            exited = child_exited()
+        if not group_alive(pid, owned_child and exited) and exited:
             break
         time.sleep(0.05)
     else:
@@ -138,7 +178,12 @@ def end_group(pid, grace=GRACE):
             os.killpg(pid, signal.SIGKILL)
         except OSError:
             pass
-    if not reaped:
+        if owned_child and not exited:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    if owned_child:
         try:
             os.waitpid(pid, 0)
         except ChildProcessError:
@@ -146,6 +191,15 @@ def end_group(pid, grace=GRACE):
 
 
 def cmd_run(a):
+    cleanup_grace = RUN_GRACE
+    if len(a) > 2 and a[2] == "--cleanup-grace":
+        try:
+            cleanup_grace = float(a[3])
+        except (IndexError, ValueError):
+            return 2
+        if not 0 <= cleanup_grace <= RUN_GRACE:
+            return 2
+        a = a[:2] + a[4:]
     if len(a) < 3 or a[2] != "--" or not a[0].isdigit():
         sys.stderr.write(__doc__)
         return 2
@@ -240,7 +294,7 @@ def cmd_run(a):
             if status is not None:
                 break
         if status is not None:
-            end_group(pid, RUN_GRACE)
+            end_group(pid, cleanup_grace)
             close_reads()
             reaped = True
             sys.stderr.buffer.write(err[:STDERR_CAP])
@@ -258,7 +312,7 @@ def cmd_run(a):
                 reaped = True
                 break
             if time.monotonic() > limit:
-                end_group(pid, RUN_GRACE)
+                end_group(pid, cleanup_grace)
                 close_reads()
                 reaped = True
                 code = 124 << 8
@@ -272,13 +326,13 @@ def cmd_run(a):
         return os.WEXITSTATUS(code)
     except ForwardedSignal:
         if not reaped:
-            end_group(pid, RUN_GRACE)
+            end_group(pid, cleanup_grace)
             reaped = True
         close_reads()
         return 128 + forwarded[0]
     except BaseException:
         if not reaped:
-            end_group(pid, RUN_GRACE)
+            end_group(pid, cleanup_grace)
         close_reads()
         raise
     finally:

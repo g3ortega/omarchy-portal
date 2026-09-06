@@ -10,7 +10,10 @@ set -- noop
 source "$ROOT/scripts/tunnels.sh" >/dev/null || true
 ss() { echo 'LISTEN 0 128 127.0.0.1:3000 0.0.0.0:* users:(("node",pid=999999,fd=3))'; }
 proc_start() { echo 1; }
-proc() { [[ $1 == check && $2 == 999999 && $3 == 1 ]] || { echo unexpected-proc >> "$T/signals"; return 99; }; }
+proc() {
+  if [[ $1 == run ]]; then /usr/bin/python3 -I -S "$PROC_PY" "$@"; return; fi
+  [[ $1 == check && $2 == 999999 && $3 == 1 ]] || { echo unexpected-proc >> "$T/signals"; return 99; }
+}
 kill() { echo kill >> "$T/signals"; return 99; }
 alive_line() { [[ $1 == '999999 1' ]]; }
 stop_line() { echo refused-stop >> "$T/stops"; return 1; }

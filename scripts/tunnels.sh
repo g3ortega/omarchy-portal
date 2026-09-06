@@ -543,17 +543,18 @@ portless_alias_present() {  # <name> <port>
 
 rollback_portless() {  # <port> <new name> <old name> <old marker: 0|1> <bin>
   local port="$1" new="$2" old="$3" old_owned="$4" bin="$5"
+  # Both nested calls must finish before the outer action's ten-second cleanup expires.
   portless_state_load || return 1
   if [[ $new != "$old" ]]; then
     portless_alias_safe "$new" "$port" || return 1
     if portless_alias_present "$new" "$port"; then
-      "$bin" alias --remove "$new" >/dev/null 2>&1 || return 1
+      proc run 4096 2 --cleanup-grace 1 -- "$bin" alias --remove "$new" >/dev/null 2>&1 || return 1
     fi
   fi
   if [[ -n $old ]]; then
     portless_alias_safe "$old" "$port" || return 1
     if ! portless_alias_present "$old" "$port"; then
-      "$bin" alias "$old" "$port" >/dev/null 2>&1 || return 1
+      proc run 4096 2 --cleanup-grace 1 -- "$bin" alias "$old" "$port" >/dev/null 2>&1 || return 1
     fi
   fi
   portless_state_load || return 1
@@ -590,7 +591,7 @@ cancel_public_start() {  # <provider> <port> <exit status>
 
 cancel_portless_start() {  # <port> <new name> <old name> <old marker: 0|1> <bin> <exit status>
   local marker
-  trap - TERM INT HUP
+  trap '' TERM INT HUP
   marker=$(cat_own "$(namefile portless "$1")" 256) || exit "$6"
   [[ $marker == "$2" ]] && rollback_portless "$1" "$2" "$3" "$4" "$5" >/dev/null 2>&1
   exit "$6"
