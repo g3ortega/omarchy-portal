@@ -23,7 +23,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc libc6-dev libnss3-tools openssl sqlite3 qt6-declarative-dev-tools
+            gcc libc6-dev libnss3-tools openssl sqlite3 qt6-declarative-dev-tools \
+            qml6-module-qtquick qml6-module-qtqml-workerscript \
+            qml6-module-qttest qml6-module-qtquick-window
 
       # The manifest validator and the qs.Ui / qs.Commons QML modules both live
       # in the Omarchy tree; test/test.sh consumes them via OMARCHY_PATH.

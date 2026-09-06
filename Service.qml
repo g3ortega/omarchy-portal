@@ -551,7 +551,7 @@ Item {
   }
 
   function setupProvider(provider) {
-    _runAction({ key: provider + ":setup" }, ["setup", String(provider)], "setup failed")
+    return _runAction({ key: provider + ":setup" }, ["setup", String(provider)], "setup failed")
   }
 
   function toggleWatched(port) {

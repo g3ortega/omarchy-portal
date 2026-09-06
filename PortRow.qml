@@ -18,19 +18,13 @@ Item {
   property bool selected: false
   // Which panel this row has open, if any: "" | actions | naming | sharing.
   property string expandedKind: ""
-  // Non-empty while this row's pending action awaits an answer: the verb the
-  // answer wears, what it names, and the consequence in a few words.
-  property string confirmKind: ""
-  property string confirmLabel: ""
-  property string confirmClause: ""
   // The verb line, built by the panel (one model for mouse and keyboard) and
   // only rendered here. verbCursor is the keyboard's place in it.
   property var verbs: []
   property int verbCursor: -1
-  readonly property bool confirming: confirmKind !== ""
   readonly property bool sharing: expandedKind === "sharing"
   readonly property bool naming: expandedKind === "naming"
-  readonly property bool expanded: expandedKind !== "" || confirming
+  readonly property bool expanded: expandedKind !== ""
   readonly property var route: service && entry ? service.routeFor(entry.port) : null
   readonly property var publicTunnel: service && entry ? service.publicTunnelFor(entry.port) : null
   readonly property bool dnsPending: publicTunnel !== null && publicTunnel.dns === "pending"
@@ -47,16 +41,11 @@ Item {
   signal editorDone()
   signal editorCanceled()
   signal verbClicked(var verb)
-  signal confirmAccepted()
-  signal confirmCanceled()
   signal providerChosen(var provider)
 
   readonly property bool revealed: hover.hovered || selected || expanded
 
-  // Every secondary line — the URL subrow, the verbs, the editors — starts
-  // exactly where the main line's title does: one alignment axis, read off
-  // the title column itself so nothing can drift from it.
-  readonly property real titleAxis: titleColumn.x
+  readonly property real portAxis: portText.x
   readonly property real iconAxis: iconGlyph.x + iconGlyph.width / 2
   readonly property var stats: service && entry ? (service.stats[entry.port] || null) : null
   readonly property bool paused: stats ? stats.paused === true : false
@@ -186,7 +175,7 @@ Item {
         anchors.leftMargin: Style.spacing.md
         anchors.verticalCenter: parent.verticalCenter
         width: Style.space(46)
-        horizontalAlignment: Text.AlignRight
+        horizontalAlignment: Text.AlignLeft
         textFormat: Text.PlainText
         text: row.entry ? String(row.entry.port) : ""
         color: row.foreground
@@ -300,89 +289,15 @@ Item {
         Column {
           id: expansion
           anchors.left: parent.left
-          anchors.leftMargin: row.titleAxis
+          anchors.leftMargin: row.portAxis
           anchors.right: parent.right
           anchors.rightMargin: Style.spacing.md
           anchors.verticalCenter: parent.verticalCenter
           spacing: Style.spacing.sm
 
-          // -- the confirmation -----------------------------------------------
-          // In place of the verbs, in their register. The answers are
-          // anchored to the right edge so they can never overflow off it —
-          // a long name or clause must cost the clause (it elides), never
-          // the cancel. Only the destructive word wears urgent.
-          Item {
-            width: parent.width
-            visible: row.confirming
-            implicitHeight: confirmAnswers.implicitHeight + Style.spacing.xs
-
-            Text {
-              id: confirmQuestion
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-              width: Math.min(implicitWidth,
-                parent.width - confirmAnswers.width - Style.spacing.lg * 2)
-              elide: Text.ElideMiddle
-              textFormat: Text.PlainText
-              text: row.confirmKind + " " + row.confirmLabel + "?"
-              color: Util.alpha(row.foreground, 0.85)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
-            }
-
-            Text {
-              anchors.left: confirmQuestion.right
-              anchors.leftMargin: Style.spacing.sm
-              anchors.right: confirmAnswers.left
-              anchors.rightMargin: Style.spacing.lg
-              anchors.verticalCenter: parent.verticalCenter
-              visible: width > Style.space(40)
-              elide: Text.ElideRight
-              textFormat: Text.PlainText
-              readonly property var clause: ({ pause: "resume brings it back", restart: "re-runs its own command line" })
-              text: row.confirmClause || clause[row.confirmKind] || ""
-              color: Util.alpha(row.foreground, 0.4)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-
-            Row {
-              id: confirmAnswers
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.spacing.sm
-
-              LinkText {
-                anchors.verticalCenter: parent.verticalCenter
-                text: row.confirmKind
-                color: Util.alpha(Color.urgent, 0.95)
-                font.pixelSize: Style.font.bodySmall
-                onClicked: row.confirmAccepted()
-              }
-
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: "·"
-                color: Util.alpha(row.foreground, 0.3)
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-              }
-
-              LinkText {
-                anchors.verticalCenter: parent.verticalCenter
-                text: "cancel"
-                color: Util.alpha(row.foreground, 0.7)
-                font.pixelSize: Style.font.bodySmall
-                onClicked: row.confirmCanceled()
-              }
-            }
-          }
-
           // -- the verbs ------------------------------------------------------
           Flow {
             width: parent.width
-            visible: !row.confirming
             spacing: Style.spacing.sm
 
             Repeater {
@@ -428,7 +343,7 @@ Item {
               && (!row.route || (row.route.reach === "local" && row.route.managed === false && !!row.route.aliasName))
             onEditableChanged: if (!editable && row.naming) row.editorCanceled()
             width: parent.width
-            visible: row.naming && !row.confirming
+            visible: row.naming
             implicitHeight: Style.spacing.controlHeight
             onVisibleChanged: if (visible) { nameField.forceActiveFocus(); nameField.selectAll() }
 
@@ -484,7 +399,7 @@ Item {
           // because one click here reaches the internet — the color is the
           // warning, not a shouted label.
           Row {
-            visible: row.sharing && !row.publicTunnel && !row.confirming
+            visible: row.sharing && !row.publicTunnel
             spacing: Style.spacing.sm
 
             Text {
@@ -524,8 +439,8 @@ Item {
                   anchors.verticalCenter: parent.verticalCenter
                   active: choice.index === row.shareCursor
                   text: {
-                    if (choice.starting) return choice.modelData.label + " — starting…"
-                    if (choice.installing) return choice.modelData.label + " — installing…"
+                    if (choice.starting) return choice.modelData.label + " · opening portal…"
+                    if (choice.installing) return choice.modelData.label + " · installing…"
                     if (!choice.ready) return choice.modelData.label + " · set up"
                     return choice.modelData.label
                   }
@@ -547,7 +462,7 @@ Item {
       OpticalGlyph {
         id: shareGlyph
         anchors.left: parent.left
-        anchors.leftMargin: row.titleAxis - width - Style.spacing.sm
+        anchors.leftMargin: row.portAxis - width - Style.spacing.sm
         anchors.verticalCenter: publicUrl.verticalCenter
         width: Style.font.caption + Style.spacing.sm
         height: Style.font.caption
@@ -559,7 +474,7 @@ Item {
       Text {
         id: publicUrl
         anchors.left: parent.left
-        anchors.leftMargin: row.titleAxis
+        anchors.leftMargin: row.portAxis
         anchors.right: parent.right
         anchors.rightMargin: Style.spacing.md
         anchors.top: parent.top
@@ -582,7 +497,7 @@ Item {
 
       Row {
         anchors.left: parent.left
-        anchors.leftMargin: row.titleAxis
+        anchors.leftMargin: row.portAxis
         anchors.bottom: parent.bottom
         spacing: Style.spacing.lg
 
