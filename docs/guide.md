@@ -46,7 +46,10 @@ it cannot bind those actions to one process.
 
 <img src="images/charts.png" width="480" alt="Latency, connections, CPU and memory">
 
-The chart icon or `l` opens HTTP latency, connections, CPU and memory.
+The chart icon or `l` opens latency, connections, CPU and memory.
+Recognized HTTP services default to HTTP response timing. Other listeners
+default to TCP RTT. The HTTP/TCP buttons inside the latency card, or `t`,
+switch measurements on HTTP services.
 The default range is **1h**. Select **30m**, **1h**, **3h**, **6h**, **1d**, or
 **2d** for all four charts. The `[` and `]` keys step through the ranges.
 Portal remembers the range while the panel is loaded, without writing settings.
@@ -61,8 +64,10 @@ spikes remain visible when many samples share a pixel. Hovering a chart shows
 the same interval across all four cards. Empty intervals break the line.
 Live values above the plots remain current regardless of the selected range.
 CPU totals activity across cores; 100% represents one busy core. Memory is
-resident process memory. HTTP latency measures an HTTP response, so a MySQL listener can have healthy
-CPU and connection readings while HTTP latency is unavailable.
+resident process memory. TCP RTT averages the kernel's estimates for existing
+connections without sending probe traffic. It can remain unchanged while idle
+and is unavailable without connections. It does not measure database queries or
+WebSocket message handling. HTTP and TCP history stay separate.
 
 History writes are checked and retried. Recording and read failures stay visible
 in the detail footer. Legacy JSONL files are imported transactionally and kept

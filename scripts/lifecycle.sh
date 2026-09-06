@@ -132,7 +132,7 @@ case "${1:-}" in
     jq -nc --arg effect "$effect" '{ok:true,effect:$effect}'
     ;;
   restart)
-    pid="${2:-}" start="${3:-}" port="${4:-}" cwd="${5:-}" argv_json="${6:-}"
+    pid="${2:-}" start="${3:-}" port="${4:-}" argv_json="${6:-}"
     target "$pid" "$start" "$port"
     # The working directory and environment are read from the live process,
     # then its identity is checked again, so both belong to that process.
@@ -145,8 +145,6 @@ case "${1:-}" in
       || die "invalid command line recorded for pid $pid"
     mapfile -d '' argv < <(jq --raw-output0 '.[] | strings' <<<"$argv_json" 2>/dev/null)
     [[ ${#argv[@]} -gt 0 ]] || die "no command line recorded for pid $pid"
-    # The process's environment and executable, while it still exists; the
-    # identity is checked again afterwards, so what was read is that process's.
     envs=(); mapfile -d '' envs < "/proc/$pid/environ" 2>/dev/null \
       || die "could not read the environment of pid $pid"
     { if (( ${#envs[@]} )); then printf '%s\0' "${envs[@]}"; fi; } | state check-env >/dev/null \

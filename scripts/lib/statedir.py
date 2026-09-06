@@ -9,8 +9,8 @@ the current user owns that nobody else can write to. A leaf is opened
 relative to that directory with O_NOFOLLOW|O_NONBLOCK (a planted FIFO cannot
 block, a link is refused), then fstat decides: regular, ours, writable by nobody
 else, one link, under the byte cap. Writes create a random adjacent temporary with O_CREAT|O_EXCL
-mode 0600, fsync it, renameat it into place and fsync the directory. Appends
-and truncation go through the validated descriptor, never the path again.
+mode 0600, fsync it, renameat it into place and fsync the directory. Truncation
+goes through the validated descriptor, never the path again.
 
   ensure   <dir>...                       create (0700) and verify directories
   dump     <dir> [maxbytes] [maxfiles] [name...]  JSON text and SHA-256 of every leaf, or only the named ones
@@ -18,8 +18,6 @@ and truncation go through the validated descriptor, never the path again.
   read     <path> [maxbytes]              raw bytes to stdout
   write    <path> [mode]                  stdin -> atomic replace
   create   <path> [mode]                  stdin -> atomic no-replace create
-  append   <path> <maxlines> [maxbytes]   stdin lines -> descriptor append, trimmed
-  append-many <dir> <maxlines> <maxbytes> stdin rows "<name>\t<line>" -> one append each
   remove   <dir> <name>...                unlink leaves (never directories)
   remove-digest <dir> <name> <sha256> <maxbytes>  remove only the bound matching file
   truncate <path> <maxbytes>              empty the file once it is past the cap
@@ -843,74 +841,6 @@ def cmd_lock_clean(a):
     return run_locked(a, True)
 
 
-def append_one(dirfd, name, data, maxlines, cap):
-    try:
-        fd = open_leaf(dirfd, name, os.O_WRONLY | os.O_APPEND, cap * 2)
-    except Refused:
-        fd = None   # not a sample file of ours: replaced, never appended to
-    if fd is None:
-        atomic_write(dirfd, name, data)
-        size = len(data)
-    else:
-        try:
-            write_all(fd, data)
-            size = os.fstat(fd).st_size
-        finally:
-            os.close(fd)
-    # A file too small to hold maxlines lines (three bytes is the shortest)
-    # needs no count; past that the count is read. Past the byte cap or the
-    # line cap, keep the newest lines that fit, so the file is never past
-    # either after a call and a reader needs no margin.
-    if size <= cap and size < maxlines * 3:
-        return
-    body = read_leaf(dirfd, name, cap * 2 + len(data)) or b""
-    if size <= cap and body.count(b"\n") <= maxlines:
-        return
-    lines = body.splitlines(keepends=True)
-    lines = lines[-maxlines:]
-    while lines and sum(map(len, lines)) > cap:
-        lines.pop(0)
-    atomic_write(dirfd, name, b"".join(lines))
-
-
-def cmd_append(a):
-    maxlines = int(a[1])
-    cap = int(a[2]) if len(a) > 2 else 8 * MAX_BYTES
-    d, name = split(a[0])
-    data = sys.stdin.buffer.read(cap + 1)
-    if len(data) > cap:
-        raise Refused("refused: content past the cap")
-    dirfd = open_dir(d, create=True)
-    try:
-        try:
-            fcntl.flock(dirfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise Refused("append directory is busy")
-        append_one(dirfd, name, data, maxlines, cap)
-    finally:
-        os.close(dirfd)
-
-
-def cmd_append_many(a):
-    maxlines, cap = int(a[1]), int(a[2])
-    batch = sys.stdin.buffer.read(MAX_BYTES + 1)
-    if len(batch) > MAX_BYTES:
-        raise Refused("refused: batch past the cap")
-    dirfd = open_dir(a[0], create=True)
-    try:
-        try:
-            fcntl.flock(dirfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise Refused("append directory is busy")
-        for row in batch.splitlines():
-            name, _, line = row.partition(b"\t")
-            if not name or b"/" in name or name in (b".", b"..") or not line:
-                raise Refused(f"refused row: {row[:64]!r}")
-            append_one(dirfd, name.decode(), line + b"\n", maxlines, cap)
-    finally:
-        os.close(dirfd)
-
-
 def cmd_remove(a):
     dirfd = open_dir(a[0])
     try:
@@ -1179,7 +1109,7 @@ COMMANDS = {
     "ensure": (cmd_ensure, 1), "dump": (cmd_dump, 1), "read": (cmd_read, 1), "write": (cmd_write, 1),
     "create": (cmd_create, 1),
     "dump-existing": (lambda a: cmd_dump(a, create=False), 1), "check-env": (cmd_check_env, 0),
-    "append": (cmd_append, 2), "append-many": (cmd_append_many, 3), "remove": (cmd_remove, 2),
+    "remove": (cmd_remove, 2),
     "remove-digest": (cmd_remove_digest, 4), "truncate": (cmd_truncate, 2), "lock": (cmd_lock, 5),
     "lock-clean": (cmd_lock_clean, 5),
     "launch": (cmd_launch, 4), "launch-tracked": (cmd_launch_tracked, 5),

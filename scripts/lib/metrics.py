@@ -147,7 +147,6 @@ def execute(args, state):
         validate_store(store, state)
         executable = state.open_exe('/usr/bin/sqlite3')
 
-
         metadata = sql(store, executable, 'SELECT (SELECT application_id FROM pragma_application_id) AS application_id, (SELECT user_version FROM pragma_user_version) AS version, (SELECT journal_mode FROM pragma_journal_mode) AS journal_mode, (SELECT count(*) FROM sqlite_schema) AS tables;')[0]
         if metadata['journal_mode'] != 'delete':
             raise ValueError('metrics database requires DELETE journaling')
@@ -161,7 +160,6 @@ def execute(args, state):
         known = {row['port'] for row in imports}
         warnings = sum(row['rejected'] for row in imports)
         ports = set()
-        batch = None
         if action == 'append':
             raw = sys.stdin.buffer.read(1048577)
             if len(raw) > 1048576:

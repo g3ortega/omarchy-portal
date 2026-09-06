@@ -3180,11 +3180,16 @@ spec = importlib.util.spec_from_file_location("sd", sys.argv[2]); sd = importlib
 real = os.write
 os.write = lambda fd, data: real(fd, bytes(data)[:5])   # the kernel takes five bytes at a time
 dirfd = sd.open_dir(sys.argv[1], create=True)
-sd.append_one(dirfd, "3000.jsonl", b'{"t":1,"a":1}\n', 100, 1 << 20)
-sd.append_one(dirfd, "3000.jsonl", b'{"t":2,"a":2}\n', 100, 1 << 20)
+fd = os.open("3000.jsonl", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dirfd)
+try:
+    sd.write_all(fd, b'{"t":1,"a":1}\n')
+    sd.write_all(fd, b'{"t":2,"a":2}\n')
+finally:
+    os.close(fd)
 sd.atomic_write(dirfd, "whole", b"0123456789" * 3)
+os.close(dirfd)
 PY
-is "append completes short writes" "$(cat "$SW/3000.jsonl" | tr '\n' ' ')" '{"t":1,"a":1} {"t":2,"a":2} '
+is "descriptor writes complete short writes" "$(cat "$SW/3000.jsonl" | tr '\n' ' ')" '{"t":1,"a":1} {"t":2,"a":2} '
 is "atomic writes complete short writes" "$(wc -c < "$SW/whole")" "30"
 rm -rf "$SW"
 
@@ -3395,7 +3400,7 @@ locked_append=$(timeout 2 "$M" append-batch '{"6000":{"t":1}}')
 exec 6>&-
 is "metric append fails fast behind a watched-state update" "$(jq -c .ok <<<"$locked_append") $(test -e "$PORTAL_METRICS_DIR/metrics/6000.jsonl" && echo wrote || echo clean)" "false clean"
 
-RB="$T/review"; mkdir -p "$RB/lock" "$RB/append" "$RB/portless" "$RB/cli" "$RB/bin" "$RB/fake"
+RB="$T/review"; mkdir -p "$RB/lock" "$RB/portless" "$RB/cli" "$RB/bin" "$RB/fake"
 printf 'keep' > "$RB/victim"; ln -s "$RB/victim" "$RB/lock/.lifecycle.lock"
 state lock "$RB/lock" nowait .lifecycle.lock -- /usr/bin/true >/dev/null 2>&1; rc=$?
 is "a lifecycle lock symlink is refused" "$rc $(cat "$RB/victim")" "1 keep"
@@ -4623,11 +4628,6 @@ PATH="$CLEAN_UNINSTALL/bin:/usr/bin:/bin" HOME="$REVERSE_FOREIGN/home" \
 is "uninstall preserves and reports a foreign nested metrics parent" \
   "$reverse_foreign_rc $(cat "$REVERSE_FOREIGN/state/a/foreign") $(grep -c 'holds files that are not Portal' "$REVERSE_FOREIGN/out" || true)" \
   "0 keep 1"
-
-exec 7<"$RB/append"; flock -x 7
-printf 'x\n' | timeout 2 /usr/bin/python3 -I -S "$S/lib/statedir.py" append "$RB/append/sample" 10 1024 >/dev/null 2>&1; rc=$?
-exec 7>&-
-is "append refuses a held directory lock without blocking" "$rc" "1"
 
 p1start=$(cut -d')' -f2- /proc/1/stat 2>/dev/null | awk '{print $20}')
 /usr/bin/python3 -I -S "$PR" check 1 "${p1start:-1}" >/dev/null 2>&1; rc=$?

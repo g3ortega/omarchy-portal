@@ -1,9 +1,6 @@
 import QtQuick
 import qs.Commons
 
-// A Text that reads truncated content aloud on hover: at rest it elides
-// exactly like the Text it replaces; hovered past its edge, the full string
-// loops by at a constant vintage pace. Anything that fits never moves.
 Item {
   id: ticker
 

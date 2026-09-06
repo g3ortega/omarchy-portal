@@ -294,7 +294,6 @@ emit | jq -Rsc '
       addresses: (.[1] | words | unique),
       pid: (.[2] | num),
       comm: .[3],
-      cmdline: .[4],
       cwd: .[5],
       projectRoot: .[6],
       projectName: .[7],
