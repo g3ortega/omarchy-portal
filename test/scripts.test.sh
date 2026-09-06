@@ -2226,7 +2226,7 @@ is "a failed pid record prevents provider execution" "$rc $(test -e "$TRACKED/ra
 LT="$T/lockinh"; mkdir -p "$LT"
 { exec 8>"$LT/.lifecycle.lock"; } 2>/dev/null && flock -n -x 8 2>/dev/null || bad "could not hold a test lock"
 lout=$(state launch "$LT" inh.log -- /usr/bin/sleep 300); lpid=${lout%% *}
-exec 8>&- 2>/dev/null || true
+{ exec 8>&-; } 2>/dev/null || true
 if ls -l "/proc/$lpid/fd" 2>/dev/null | grep -q "lifecycle.lock"; then bad "the tunnel inherited the lifecycle lock"; else ok "the tunnel inherits no lock descriptor"; fi
 flock -n -x "$LT/.lifecycle.lock" -c true 2>/dev/null && ok "the lock is acquirable while the tunnel lives" || bad "the tunnel still holds the lock"
 kill "$lpid" 2>/dev/null
