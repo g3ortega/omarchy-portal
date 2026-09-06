@@ -404,7 +404,8 @@ Panel {
         && (!route || (route.managed === false && !!route.aliasName)))
       out.push({ id: "name", label: named ? (portlessReady && route.reach === "local" ? "rename" : "name setup") : "name",
                  on: expandedHere && expandedKind === "naming", urgent: false })
-    if (service.actionProviderFor("portless") && route && route.reach !== "local" && route.managed === false && !!route.aliasName)
+    if (service.actionProviderFor("portless") && route && (!portlessReady || route.reach !== "local")
+        && route.managed === false && !!route.aliasName)
       out.push({ id: "unname", label: "remove name", on: false, urgent: false })
     if (service.publicProviders.length > 0 && service.urlFor(entry.port, entry.url) !== "" && entry.category !== "system"
         && tunnel === null && service.validProcessIdentity(entry.process))

@@ -129,7 +129,13 @@ case "${1:-}" in
     target "${2:-}" "${3:-}" "${4:-}"
     proc signal "$2" "$3" "$sig" || die "could not $1 pid $2"
     effect=none
-    if [[ $1 == stop ]] && ! proc check "$2" "$3"; then effect=stopped; fi
+    if [[ $1 == stop ]]; then
+      for ((i = 0; i < 25; i++)); do
+        proc check "$2" "$3" || break
+        sleep 0.2
+      done
+      if ! proc check "$2" "$3"; then effect=stopped; fi
+    fi
     jq -nc --arg effect "$effect" '{ok:true,effect:$effect}'
     ;;
   restart)

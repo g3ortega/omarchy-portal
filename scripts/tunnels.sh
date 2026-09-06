@@ -580,10 +580,12 @@ public_start_failed() {  # <provider> <port> <pidline> <reason>
   die "$reason; the tunnel did not stop, so its ownership records were kept"
 }
 
-cancel_public_start() {  # <provider> <port> <pidline> <exit status>
-  trap - TERM INT HUP
-  if [[ -n $3 ]] && stop_line "$3" "$1"; then clear_share "$1" "$2" || true; fi
-  exit "$4"
+cancel_public_start() {  # <provider> <port> <exit status>
+  local identity
+  trap '' TERM INT HUP
+  if identity=$(cat_own "$(pidfile "$1" "$2")" 64) && valid_identity_line "$identity" \
+      && stop_line "$identity" "$1"; then clear_share "$1" "$2" || true; fi
+  exit "$3"
 }
 
 cancel_portless_start() {  # <port> <new name> <old name> <old marker: 0|1> <bin> <exit status>
@@ -733,9 +735,19 @@ cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
   write_own "$(targetfile "$provider" "$port")" "$target" \
     || die "could not record the approved process before starting $provider"
   local argv=(); mapfile -t argv < <("${provider}_argv" "$port")
-  trap 'cancel_public_start "$provider" "$port" "$pidline" 143' TERM
-  trap 'cancel_public_start "$provider" "$port" "$pidline" 130' INT
-  trap 'cancel_public_start "$provider" "$port" "$pidline" 129' HUP
+  SOCKS_READY=0
+  if target_owns_port "$target" "$port"; then
+    target_rc=0
+  else
+    target_rc=$?
+  fi
+  (( target_rc == 0 )) || {
+    (( target_rc == 2 )) && die "could not query attributed listening sockets"
+    die "port $port is no longer served by the approved process"
+  }
+  trap 'cancel_public_start "$provider" "$port" 143' TERM
+  trap 'cancel_public_start "$provider" "$port" 130' INT
+  trap 'cancel_public_start "$provider" "$port" 129' HUP
   pidline=$(
     if [[ $provider == cloudflared ]]; then
       unset TUNNEL_NAME TUNNEL_HELLO_WORLD TUNNEL_BASTION
@@ -743,8 +755,9 @@ cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
     state launch-tracked "$STATE_DIR" "${lf##*/}" "${pf##*/}" -- "$bin" "${argv[@]}"
   ) || {
     trap - TERM INT HUP
-    clear_share "$provider" "$port" || die "could not start $provider, and its pre-launch records could not be cleared"
-    die "could not start $provider"
+    pidline=$(cat_own "$pf" 64) && valid_identity_line "$pidline" \
+      && public_start_failed "$provider" "$port" "$pidline" "could not start $provider"
+    die "could not start $provider; its ownership records were kept"
   }
   valid_identity_line "$pidline" \
     || die "$provider returned a malformed tracked pid; its ownership records were kept"

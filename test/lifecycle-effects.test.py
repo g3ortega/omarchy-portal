@@ -4,6 +4,8 @@ from pathlib import Path
 import socket
 import subprocess
 import tempfile
+import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,17 +24,52 @@ with tempfile.TemporaryDirectory(prefix='portal-stop-effect-') as temporary:
     start = identity(server.pid)
     try:
         port = int(server.stdout.readline())
+        began = time.monotonic()
         result = subprocess.run(['/usr/bin/bash', str(ROOT/'scripts/lifecycle.sh'), 'stop',
             str(server.pid), start, str(port)], env={**os.environ, 'PORTAL_STATE_DIR': temporary+'/state'},
             capture_output=True, text=True, timeout=15)
         output = json.loads(result.stdout)
+        elapsed = time.monotonic() - began
+        assert elapsed < 7, elapsed
         assert server.poll() is None
         with socket.create_connection(('127.0.0.1',port), timeout=1):
             pass
         assert output == {'ok': True, 'effect': 'none'}, output
     finally:
         server.communicate(timeout=5)
-    print('ok delivered TERM does not claim an ignored stop completed')
+    print(f'ok ignored TERM remains effect:none after bounded wait ({elapsed:.3f}s)')
+
+with tempfile.TemporaryDirectory(prefix='portal-delayed-stop-') as temporary:
+    server = subprocess.Popen(['/usr/bin/python3', '-I', '-S', '-c', '''
+import signal,socket,sys,time
+def stop(signum, frame):
+    time.sleep(0.35)
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen()
+print(s.getsockname()[1],flush=True)
+sys.stdin.read()
+'''], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    start = identity(server.pid)
+    waiter = threading.Thread(target=server.wait)
+    try:
+        port = int(server.stdout.readline())
+        waiter.start()
+        began = time.monotonic()
+        result = subprocess.run(['/usr/bin/bash', str(ROOT/'scripts/lifecycle.sh'), 'stop',
+            str(server.pid), start, str(port)], env={**os.environ, 'PORTAL_STATE_DIR': temporary+'/state'},
+            capture_output=True, text=True, timeout=15)
+        elapsed = time.monotonic() - began
+        output = json.loads(result.stdout)
+        assert output == {'ok': True, 'effect': 'stopped'}, output
+        waiter.join(timeout=2)
+        assert not waiter.is_alive() and server.returncode == 0
+        assert 0.3 <= elapsed < 2, elapsed
+    finally:
+        server.communicate(timeout=5)
+        if waiter.ident is not None:
+            waiter.join(timeout=5)
+    print(f'ok delayed TERM completion reports stopped after exact identity exits ({elapsed:.3f}s)')
 
 with tempfile.TemporaryDirectory(prefix='portal-restart-path-') as temporary:
     case = Path(temporary)

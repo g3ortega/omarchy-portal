@@ -107,4 +107,24 @@ ctx.activateVerbById(entry, 'share')
 assert.equal(backend.calls.length, 1, 'active public share can stop without its binary')
 assert.equal(backend.calls[0][1][0], 'stop')
 
+backend.providers[0] = { ...backend.providers[0], available: true, status: 'setup' }
+backend.routeFor = () => ({ reach: 'local', managed: false, aliasName: 'app.localhost' })
+assert.ok(ids().includes('unname'), 'owned local names remain removable while Portless needs setup')
+ctx.activateVerbById(entry, 'unname')
+assert.deepEqual(Array.from(backend.calls.at(-1)[1]), ['stop', 'portless', '3000'])
+
+backend.providers[0].status = 'ready'
+assert.equal(ids().includes('unname'), false, 'ready local names use the existing editor removal')
+backend.providers[0].status = 'setup'
+backend.routeFor = () => ({ reach: 'local', managed: true, aliasName: 'app.localhost' })
+assert.equal(ids().includes('unname'), false, 'native managed routes remain protected')
+backend.routeFor = () => ({ reach: 'local', managed: false, aliasName: '' })
+assert.equal(ids().includes('unname'), false, 'removal needs an identified alias')
+backend.routeFor = () => ({ reach: 'local', managed: false, aliasName: 'app.localhost' })
+backend.providers[0].available = false
+assert.equal(ids().includes('unname'), false, 'missing tools keep name removal hidden')
+const callsBeforeUnavailableRemoval = backend.calls.length
+ctx.activateVerbById(entry, 'unname')
+assert.equal(backend.calls.length, callsBeforeUnavailableRemoval)
+
 console.log('Provider availability gates verbs, shortcuts, stale choices, confirmations and starts while preserving active public stops')
