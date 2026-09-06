@@ -33,7 +33,6 @@ Item {
   property int requestId: 0
   property string historyStatus: "loading"
   property string historyError: ""
-  property string historyWarning: ""
   property var savedView: null
   readonly property string queryKey: active && service && service.pluginDir && entry
     ? service.pluginDir + ":" + entry.port + ":" + rangeSeconds : ""
@@ -50,7 +49,6 @@ Item {
       savedView = null
       hoverTime = -1
       historyError = ""
-      historyWarning = ""
       historyStatus = queryKey ? "loading" : "idle"
     }
     if (!queryKey || !service || !entry) return
@@ -60,11 +58,10 @@ Item {
 
   Connections {
     target: detail.service
-    function onMetricRangeLoaded(port, seconds, id, result, error, warning) {
+    function onMetricRangeLoaded(port, seconds, id, result, error) {
       if (!detail.queryKey || !detail.entry || id !== detail.requestId || port !== detail.entry.port
           || seconds !== detail.rangeSeconds) return
       detail.historyError = error
-      detail.historyWarning = warning
       if (!error) detail.savedView = result
       detail.historyStatus = error ? "error" : "ready"
     }
@@ -357,7 +354,7 @@ Item {
       textFormat: Text.PlainText
       wrapMode: Text.WordWrap
       text: [detail.historyError ? "Saved history unavailable: " + detail.historyError : "",
-             detail.historyWarning, detail.service ? detail.service.metricsError : ""]
+             detail.service ? detail.service.metricsError : ""]
         .filter(function (text) { return text !== "" }).join(" · ")
       color: Color.urgent
       font.family: detail.fontFamily

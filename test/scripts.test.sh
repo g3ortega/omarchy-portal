@@ -1888,16 +1888,16 @@ plan=$(PORTAL_BIN_DIR="$M/my bin" PORTAL_METRICS_DIR=$M PORTAL_STATE_DIR=$M/rt "
 grep -qF "would: state remove-digest $M/my bin cloudflared $d 134217728" <<<"$plan" && ok "uninstall finds a marked binary in a path with a space" || bad "uninstall lost the marked binary: $plan"
 # State roots pointed at a shared directory lose only Portal's own entries.
 mkdir -p "$M/shared/metrics" "$M/rt2" "$M/rt2/cloudflared-2.url"; printf keep > "$M/link-target"
-: > "$M/shared/thesis.txt"; : > "$M/shared/trusted-stores"; : > "$M/shared/metrics/3000.jsonl"; : > "$M/rt2/cloudflared-1.url"; : > "$M/rt2/notes.txt"
+: > "$M/shared/thesis.txt"; : > "$M/shared/trusted-stores"; : > "$M/shared/metrics/records.txt"; : > "$M/rt2/cloudflared-1.url"; : > "$M/rt2/notes.txt"
 ln -s "$M/link-target" "$M/shared/watched.json"; mkfifo "$M/rt2/ngrok.ok"
 ln -s "$M/link-target" "$M/shared/unknown-link"; mkfifo "$M/rt2/unknown-fifo"
 plan=$(PORTAL_METRICS_DIR=$M/shared PORTAL_STATE_DIR=$M/rt2 "$S/uninstall.sh" --dry 2>/dev/null)
 grep -q 'rm -rf' <<<"$plan" && bad "uninstall would remove a state root wholesale" || ok "uninstall never removes a state root wholesale"
-planned_regular=0; for name in trusted-stores 3000.jsonl cloudflared-1.url; do grep -Fq "$name" <<<"$plan" && planned_regular=$((planned_regular + 1)); done
-is "uninstall removes Portal's entries by name" "$planned_regular" "3"
+planned_regular=0; for name in trusted-stores cloudflared-1.url; do grep -Fq "$name" <<<"$plan" && planned_regular=$((planned_regular + 1)); done
+is "uninstall removes Portal's entries by name" "$planned_regular" "2"
 planned_special=0; for name in watched.json ngrok.ok; do grep -Fq "$name" <<<"$plan" && planned_special=$((planned_special + 1)); done
 is "uninstall includes exact known symlink and FIFO leaves" "$planned_special" "2"
-grep -qE 'thesis|notes|unknown-link|unknown-fifo|cloudflared-2\.url' <<<"$plan" && bad "uninstall would touch unknown leaves or directories" || ok "and leaves unknown leaves and directories alone"
+grep -qE 'thesis|notes|records\.txt|unknown-link|unknown-fifo|cloudflared-2\.url' <<<"$plan" && bad "uninstall would touch unknown leaves or directories" || ok "and leaves unknown leaves and directories alone"
 remove_rc=0
 timeout 5 /usr/bin/python3 -I -S "$S/lib/statedir.py" remove "$M/shared" watched.json >/dev/null 2>&1 || remove_rc=$?
 timeout 5 /usr/bin/python3 -I -S "$S/lib/statedir.py" remove "$M/rt2" ngrok.ok cloudflared-2.url >/dev/null 2>&1 || remove_rc=$?
@@ -1947,13 +1947,7 @@ leaf_runtime_kept=(
 )
 for leaf in "${leaf_runtime_kept[@]}"; do : > "$LEAF_UNINSTALL/runtime/$leaf"; done
 
-leaf_metrics_owned=(4000.jsonl 65535.jsonl 00001.jsonl 00008.jsonl)
-for leaf in "${leaf_metrics_owned[@]}"; do : > "$LEAF_UNINSTALL/state/metrics/$leaf"; done
-leaf_metrics_kept=(
-  0.jsonl 65536.jsonl 065536.jsonl 99999.jsonl 123456.jsonl
-  18446744073709551617.jsonl .6102.jsonl.0123456789abcdef.tmp junk.jsonl
-  $'5003.jsonl\n5004.jsonl'
-)
+leaf_metrics_kept=(notes.txt report.csv $'foreign\nnotes')
 for leaf in "${leaf_metrics_kept[@]}"; do : > "$LEAF_UNINSTALL/state/metrics/$leaf"; done
 
 : > "$LEAF_UNINSTALL/state/trusted-stores"
@@ -1972,10 +1966,6 @@ PATH="$LEAF_UNINSTALL/bin:/usr/bin:/bin" HOME="$LEAF_UNINSTALL/home" \
 leaf_owned_remaining=0
 for leaf in "${leaf_runtime_owned[@]}"; do
   [[ -e $LEAF_UNINSTALL/runtime/$leaf || -L $LEAF_UNINSTALL/runtime/$leaf ]] \
-    && leaf_owned_remaining=$((leaf_owned_remaining + 1))
-done
-for leaf in "${leaf_metrics_owned[@]}"; do
-  [[ -e $LEAF_UNINSTALL/state/metrics/$leaf || -L $LEAF_UNINSTALL/state/metrics/$leaf ]] \
     && leaf_owned_remaining=$((leaf_owned_remaining + 1))
 done
 for leaf in trusted-stores watched.json ca-import.pem cloudflared-3003.log ngrok.ok; do
@@ -2005,14 +1995,14 @@ done
 is "uninstall keeps out-of-range stable-looking leaves and every random temporary envelope" \
   "$leaf_kept_missing $(grep -c "holds files that are not Portal's" "$LEAF_UNINSTALL/out" || true)" "0 2"
 leaf_ports=$(sort -u "$LEAF_UNINSTALL/ports" 2>/dev/null)
-expected_leaf_ports=$(printf '%s\n' 3000 3001 3002 00001 00008 3004 3003 0 65536 065536 99999 123456 18446744073709551617 4000 65535 | sort -u)
+expected_leaf_ports=$(printf '%s\n' 3000 3001 3002 00001 00008 3004 3003 0 65536 065536 99999 123456 18446744073709551617 | sort -u)
 is "uninstall delegates every stable decimal port, and no temporary port, to valid_port" \
   "$leaf_ports" "$expected_leaf_ports"
 
 UNREADABLE_UNINSTALL="$T/uninstall-unreadable"
 mkdir -p "$UNREADABLE_UNINSTALL/home" "$UNREADABLE_UNINSTALL/runtime" \
   "$UNREADABLE_UNINSTALL/state/metrics"
-: > "$UNREADABLE_UNINSTALL/state/metrics/5100.jsonl"
+: > "$UNREADABLE_UNINSTALL/state/metrics/notes.txt"
 chmod 100 "$UNREADABLE_UNINSTALL/state/metrics"
 PATH="$LEAF_UNINSTALL/bin:/usr/bin:/bin" HOME="$UNREADABLE_UNINSTALL/home" \
   PORTAL_STATE_DIR="$UNREADABLE_UNINSTALL/runtime" PORTAL_METRICS_DIR="$UNREADABLE_UNINSTALL/state" \
@@ -2020,7 +2010,7 @@ PATH="$LEAF_UNINSTALL/bin:/usr/bin:/bin" HOME="$UNREADABLE_UNINSTALL/home" \
   "$LEAF_UNINSTALL/app/uninstall.sh" > "$UNREADABLE_UNINSTALL/out" 2>&1; unreadable_uninstall_rc=$?
 chmod 700 "$UNREADABLE_UNINSTALL/state/metrics"
 is "uninstall fails when an existing state directory cannot be enumerated" \
-  "$unreadable_uninstall_rc $(test -e "$UNREADABLE_UNINSTALL/state/metrics/5100.jsonl" && echo kept || echo lost) $(grep -c '^could not safely remove Portal metrics storage$' "$UNREADABLE_UNINSTALL/out" || true)" \
+  "$unreadable_uninstall_rc $(test -e "$UNREADABLE_UNINSTALL/state/metrics/notes.txt" && echo kept || echo lost) $(grep -c '^could not safely remove Portal metrics storage$' "$UNREADABLE_UNINSTALL/out" || true)" \
   "1 kept 1"
 
 # A binary that could not be removed keeps its marker, and the removal stops there.
@@ -3180,7 +3170,7 @@ spec = importlib.util.spec_from_file_location("sd", sys.argv[2]); sd = importlib
 real = os.write
 os.write = lambda fd, data: real(fd, bytes(data)[:5])   # the kernel takes five bytes at a time
 dirfd = sd.open_dir(sys.argv[1], create=True)
-fd = os.open("3000.jsonl", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dirfd)
+fd = os.open("records.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dirfd)
 try:
     sd.write_all(fd, b'{"t":1,"a":1}\n')
     sd.write_all(fd, b'{"t":2,"a":2}\n')
@@ -3189,7 +3179,7 @@ finally:
 sd.atomic_write(dirfd, "whole", b"0123456789" * 3)
 os.close(dirfd)
 PY
-is "descriptor writes complete short writes" "$(cat "$SW/3000.jsonl" | tr '\n' ' ')" '{"t":1,"a":1} {"t":2,"a":2} '
+is "descriptor writes complete short writes" "$(cat "$SW/records.txt" | tr '\n' ' ')" '{"t":1,"a":1} {"t":2,"a":2} '
 is "atomic writes complete short writes" "$(wc -c < "$SW/whole")" "30"
 rm -rf "$SW"
 
@@ -3386,19 +3376,13 @@ is "append-batch persists valid samples" "$("$M" append-batch "$metric_batch" fi
 "$M" append-batch "$metric_batch" fixture_1 >/dev/null
 is "retry keeps one raw sample" "$("$M" query 3000 1800 "$metric_now" | jq -c '.view.count')" 1
 is "invalid ports reject the batch" "$("$M" append-batch '{"junk":{"t":1}}' | jq -c .ok)" false
-printf '{"t":1,"rssKb":1}\n{torn' > "$PORTAL_METRICS_DIR/metrics/4000.jsonl"
-is "query imports valid legacy lines" "$("$M" query 4000 1800 1800 | jq -c '.view.count')" 1
-ln -s /etc/hostname "$PORTAL_METRICS_DIR/metrics/5000.jsonl"
-is "query refuses a symlinked legacy file" "$("$M" query 5000 1800 "$metric_now" | jq -c .ok)" false
-mkfifo "$PORTAL_METRICS_DIR/metrics/5001.jsonl"
-is "query refuses a legacy FIFO at once" "$(timeout 5 "$M" query 5001 1800 "$metric_now" | jq -c .ok)" false
 "$M" unwatch 3000 >/dev/null
 is "unwatch preserves retained history" "$("$M" query 3000 1800 "$metric_now" | jq -c '.view.count')" 1
 is "database files are private" "$(stat -c %a "$PORTAL_METRICS_DIR/metrics/store/metrics.db")" 600
 exec 6>"$PORTAL_METRICS_DIR/.metrics.lock"; flock -x 6
-locked_append=$(timeout 2 "$M" append-batch '{"6000":{"t":1}}')
+locked_append=$(timeout 2 "$M" append-batch "$(jq -nc --argjson t "$metric_now" '{"6000":{t:$t}}')")
 exec 6>&-
-is "metric append fails fast behind a watched-state update" "$(jq -c .ok <<<"$locked_append") $(test -e "$PORTAL_METRICS_DIR/metrics/6000.jsonl" && echo wrote || echo clean)" "false clean"
+is "metric append fails fast behind a watched-state update" "$(jq -c .ok <<<"$locked_append") $("$M" query 6000 1800 "$metric_now" | jq -c .view.count)" "false 0"
 
 RB="$T/review"; mkdir -p "$RB/lock" "$RB/portless" "$RB/cli" "$RB/bin" "$RB/fake"
 printf 'keep' > "$RB/victim"; ln -s "$RB/victim" "$RB/lock/.lifecycle.lock"

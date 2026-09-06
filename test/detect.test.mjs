@@ -269,6 +269,7 @@ check("a wildcard bind still opens localhost", e({
   const verbsFor = fn(panelSrc, "verbsFor", ["service", "portlessReady", "selectedPort", "expandedKind", "entry"])
   const svc = (o) => ({
     routeFor: () => o.route || null, publicTunnelFor: () => o.tunnel || null,
+    actionProviderFor: () => ({ available: true }), publicProviders: [{ id: "cloudflared", available: true }],
     stats: o.stats || {}, urlFor: () => o.url === undefined ? "http://localhost:1" : o.url,
     validProcessIdentity: (p) => !!(p && p.pid > 1 && Number(p.start) > 0),
     canRestart: (e) => !!(e.process && e.argv.length && !e.argvTruncated)
@@ -281,7 +282,7 @@ check("a wildcard bind still opens localhost", e({
   eq("no pid means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, pid: null, process: null })), ["name"])
   eq("no start means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, start: null, process: null })), ["name"])
   eq("name remains discoverable before setup", ids(verbsFor(svc({}), false, -1, "", dev)), ["name", "share", "pause", "restart", "stop"])
-  eq("an existing name can be renamed without the proxy", verbsFor(svc({ route: { reach: "local", managed: false, aliasName: "app" } }), false, -1, "", dev)[0].label, "rename")
+  eq("an existing name offers setup without the proxy", verbsFor(svc({ route: { reach: "local", managed: false, aliasName: "app" } }), false, -1, "", dev)[0].label, "name setup")
   eq("a truncated command line cannot be restarted", ids(verbsFor(svc({}), true, -1, "", { ...dev, argvTruncated: true })), ["name", "share", "pause", "stop"])
   eq("a paused process offers resume, urgently", verbsFor(svc({ stats: { 3000: { paused: true } } }), true, -1, "", dev)[2], { id: "pause", label: "resume", on: false, urgent: true })
   eq("a shared port omits the duplicate sharing verb", verbsFor(svc({ tunnel: { url: "x" } }), true, -1, "", dev).some(v => v.id === "share"), false)

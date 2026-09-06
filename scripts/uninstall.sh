@@ -155,10 +155,6 @@ portal_leaf_in_scope() {
         return 1
       fi
       ;;
-    metrics)
-      [[ $name =~ ^([0-9]+)\.jsonl$ ]] || return 1
-      port=${BASH_REMATCH[1]}
-      ;;
     state)
       case $name in
         trusted-stores|watched.json|ca-import.pem) return 0 ;;

@@ -118,7 +118,7 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property var portlessProvider: service ? service.providerFor("portless") : null
-  readonly property bool portlessReady: portlessProvider !== null && portlessProvider.status === "ready"
+  readonly property bool portlessReady: portlessProvider !== null && portlessProvider.available === true && portlessProvider.status === "ready"
 
   readonly property var publicProviders: service ? service.publicProviders : []
   readonly property bool broadcasting: service ? service.hasPublicTunnel : false
@@ -255,6 +255,7 @@ Panel {
 
   Connections {
     target: root.service
+    function onProvidersChanged() { root.revalidateProviders() }
     function onActionFailed(message) { root.showMoment(message, true) }
     function onActionMoment(message) { root.showMoment(message) }
     function onActionHint(message) {
@@ -286,8 +287,22 @@ Panel {
   }
 
   function pendingStillValid(action) {
-    if (!action || !service) return false
-    return stillListed(action.entry)
+    if (!action || !service || !stillListed(action.entry)) return false
+    if (action.kind === "share") {
+      var provider = service.actionProviderFor(action.provider)
+      return provider !== null && provider.status === "ready" && provider.reach === "public"
+    }
+    return true
+  }
+
+  function revalidateProviders() {
+    if ((expandedKind === "naming" && !portlessReady)
+        || (expandedKind === "sharing" && publicProviders.length === 0)) {
+      collapse()
+      keyCatcher.forceActiveFocus()
+    }
+    shareIndex = Util.clamp(shareIndex, 0, Math.max(0, publicProviders.length - 1))
+    if (pendingAction && !pendingStillValid(pendingAction)) pendingAction = null
   }
 
   readonly property var groupOrder: [
@@ -385,13 +400,13 @@ Panel {
     var paused = st ? st.paused === true : false
     var stoppable = service.validProcessIdentity(entry.process) && entry.category !== "system"
     var expandedHere = selectedPort === entry.port
-    if (entry.category !== "system" && entry.kind !== "orphan"
+    if (service.actionProviderFor("portless") && entry.category !== "system" && entry.kind !== "orphan"
         && (!route || (route.managed === false && !!route.aliasName)))
-      out.push({ id: "name", label: named ? (route.reach === "local" ? "rename" : "name setup") : "name",
+      out.push({ id: "name", label: named ? (portlessReady && route.reach === "local" ? "rename" : "name setup") : "name",
                  on: expandedHere && expandedKind === "naming", urgent: false })
-    if (route && route.reach !== "local" && route.managed === false && !!route.aliasName)
+    if (service.actionProviderFor("portless") && route && route.reach !== "local" && route.managed === false && !!route.aliasName)
       out.push({ id: "unname", label: "remove name", on: false, urgent: false })
-    if (service.urlFor(entry.port, entry.url) !== "" && entry.category !== "system"
+    if (service.publicProviders.length > 0 && service.urlFor(entry.port, entry.url) !== "" && entry.category !== "system"
         && tunnel === null && service.validProcessIdentity(entry.process))
       out.push({ id: "share", label: "share",
                  on: expandedHere && expandedKind === "sharing", urgent: false })
@@ -405,11 +420,14 @@ Panel {
   }
 
   function activateVerb(entry, verb) {
+    if (!entry || !service) return
+    if (!(verb.id === "share" && service.publicTunnelFor(entry.port))
+        && !verbsFor(entry).some(function (current) { return current.id === verb.id })) return
     switch (verb.id) {
     case "name":
       var route = service.routeFor(entry.port)
       if (route && (route.managed !== false || !route.aliasName)) break
-      if (route ? route.reach === "local" : portlessReady) expand(entry.port, "naming")
+      if (portlessReady && (!route || route.reach === "local")) expand(entry.port, "naming")
       else openSettings("portless")
       break
     case "unname":
@@ -487,6 +505,8 @@ Panel {
 
   function chooseProvider(port, provider) {
     if (!service || !provider) return
+    provider = service.actionProviderFor(provider.id)
+    if (!provider || provider.reach !== "public") return
     var entry = entryForPort(port)
     if (!entry) return
     if (provider.status === "ready") {

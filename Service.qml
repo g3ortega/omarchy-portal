@@ -117,6 +117,11 @@ Item {
     return null
   }
 
+  function actionProviderFor(id) {
+    var provider = providerFor(id)
+    return provider && provider.available === true ? provider : null
+  }
+
   function validProcessIdentity(process) {
     if (!process) return false
     var pid = String(process.pid)
@@ -137,7 +142,7 @@ Item {
   // separately-built arrays that drift in order.
   readonly property var publicProviders: {
     var out = []
-    for (var i = 0; i < providers.length; i++) if (providers[i].reach === "public") out.push(providers[i])
+    for (var i = 0; i < providers.length; i++) if (providers[i].reach === "public" && providers[i].available === true) out.push(providers[i])
     return out
   }
 
@@ -482,7 +487,7 @@ Item {
   }
 
   function shareTarget(port, provider) {
-    return exposureKey(port, provider) !== "" && providerFor(String(provider)) !== null
+    return exposureKey(port, provider) !== "" && actionProviderFor(String(provider)) !== null
   }
 
   function stopTarget(port, provider) {
@@ -498,17 +503,17 @@ Item {
     var key = exposureKey(port, provider)
     if (!key) return false
     var n = parseInt(port, 10)
-    var p = providerFor(String(provider))
-    var existingLocal = String(provider) === "portless" && routeFor(n) !== null
-    if (!p && !existingLocal) return false
-    if (p && p.reach === "public" && !validProcessIdentity(target)) return false
+    var p = actionProviderFor(String(provider))
+    if (!p || p.status !== "ready") return false
+    if (p.reach === "public" && !validProcessIdentity(target)) return false
     var args = ["start", String(provider), String(n)]
     if (name) args.push(String(name))
-    if (p && p.reach === "public") args.push("--target", String(target.pid), String(target.start))
+    if (p.reach === "public") args.push("--target", String(target.pid), String(target.start))
     return _runAction({ key: key }, args, "could not expose that port")
   }
 
   function unexpose(port, provider) {
+    if (String(provider) === "portless" && !actionProviderFor("portless")) return false
     if (!stopTarget(port, provider)) return false
     var n = parseInt(port, 10)
     var key = exposureKey(port, provider)
@@ -556,7 +561,7 @@ Item {
 
   function isWatched(port) { return watchedPorts.indexOf(port) !== -1 }
 
-  signal metricRangeLoaded(int port, int seconds, int requestId, var view, string error, string warning)
+  signal metricRangeLoaded(int port, int seconds, int requestId, var view, string error)
   property var _metricRead: null
   property var _metricReadQueued: null
 
@@ -569,7 +574,7 @@ Item {
     _metricReadQueued = null
     _metricRead = request
     if (!runScript(diskReadProcess, "metrics.sh", ["query", String(port), String(seconds), String(end), "400"]))
-      metricRangeLoaded(port, seconds, requestId, null, "could not load saved history", "")
+      metricRangeLoaded(port, seconds, requestId, null, "could not load saved history")
   }
 
   function saveMetricBatch(batch) {
@@ -714,7 +719,7 @@ Item {
       root.flushMetricBatch()
       if (queued) root.loadMetricRange(queued.port, queued.seconds, queued.end, queued.id)
       root.metricRangeLoaded(request.port, request.seconds, request.id, success ? parsed.view : null,
-                             error, success && parsed.warning ? String(parsed.warning) : "")
+                             error)
     }
   }
 
@@ -728,7 +733,7 @@ Item {
         var saved = root._metricBatches.shift()
         root._metricQueuedBytes -= saved.text.length
         root.metricsError = root._metricDropped ? "Recording gap: " + root._metricDropped + " batches could not be queued"
-                           : (parsed.warning ? String(parsed.warning) : "")
+                           : ""
         root.metricsRevision++
         root.flushMetricBatch()
       } else {

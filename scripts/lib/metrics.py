@@ -1,5 +1,4 @@
 """Raw metric retention and bounded chart queries through statedir."""
-import hashlib
 import json
 import math
 import os
@@ -16,7 +15,6 @@ MAX_SQL_OUTPUT = 512 * 1024
 SCHEMA = '''CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY,port INTEGER NOT NULL,t INTEGER NOT NULL,latMs REAL,conns REAL,cpuPct REAL,rssKb REAL,httpCode REAL,tcpRttMs REAL,tcpRttCount REAL);
 CREATE INDEX IF NOT EXISTS samples_port_t ON samples(port,t);
 CREATE INDEX IF NOT EXISTS samples_t ON samples(t);
-CREATE TABLE IF NOT EXISTS imports(port INTEGER PRIMARY KEY,digest TEXT NOT NULL,lines INTEGER NOT NULL,imported INTEGER NOT NULL,rejected INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS batches(id TEXT PRIMARY KEY,t INTEGER NOT NULL);
 '''
 
@@ -117,7 +115,7 @@ def remove_store(directory, params, state):
                 raise ValueError('metrics sidecars have no owned database')
             executable = state.open_exe('/usr/bin/sqlite3')
             identity = sql(store, executable, 'SELECT (SELECT application_id FROM pragma_application_id) AS id, (SELECT user_version FROM pragma_user_version) AS version;', readonly=True)[0]
-            if identity['id'] != APPLICATION_ID or identity['version'] not in (1, 2):
+            if identity['id'] != APPLICATION_ID or identity['version'] != 2:
                 raise ValueError('not a supported Portal metrics database')
         if not params:
             for name in names:
@@ -152,14 +150,8 @@ def execute(args, state):
             raise ValueError('metrics database requires DELETE journaling')
         if metadata['application_id'] == 0 and metadata['version'] == 0 and metadata['tables'] == 0:
             sql(store, executable, 'BEGIN IMMEDIATE;\n' + SCHEMA + f'PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version=2; COMMIT;')
-        elif metadata['application_id'] != APPLICATION_ID or metadata['version'] not in (1, 2):
+        elif metadata['application_id'] != APPLICATION_ID or metadata['version'] != 2:
             raise ValueError('not a supported Portal metrics database')
-        elif metadata['version'] == 1:
-            sql(store, executable, 'BEGIN IMMEDIATE; ALTER TABLE samples ADD COLUMN tcpRttMs REAL; ALTER TABLE samples ADD COLUMN tcpRttCount REAL; PRAGMA user_version=2; COMMIT;')
-        imports = sql(store, executable, 'SELECT port,rejected FROM imports;')
-        known = {row['port'] for row in imports}
-        warnings = sum(row['rejected'] for row in imports)
-        ports = set()
         if action == 'append':
             raw = sys.stdin.buffer.read(1048577)
             if len(raw) > 1048576:
@@ -167,7 +159,6 @@ def execute(args, state):
             batch = json.loads(raw)
             if not isinstance(batch, dict) or len(batch) > 512:
                 raise ValueError('invalid metric batch')
-            ports = {integer(port, 1, 65535) for port in batch}
             batch_id = params[0] if params else ''
             if batch_id and not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}', batch_id):
                 raise ValueError('invalid batch identity')
@@ -180,20 +171,6 @@ def execute(args, state):
                 raise ValueError('invalid time range')
             end = integer(params[2], 0, 253402300799)
             maximum = integer(params[3] if len(params) > 3 else 400, 1, 400)
-            ports = {port}
-        for port in sorted(ports - known):
-            body = state.read_leaf(parent, f'{port}.jsonl', 2097152)
-            migrated = []
-            rejected = 0
-            lines = (body or b'').splitlines()
-            for line in lines:
-                try:
-                    migrated.append(sample_sql(port, json.loads(line)))
-                except (ValueError, TypeError, OverflowError, UnicodeError):
-                    rejected += 1
-            digest = hashlib.sha256(body or b'').hexdigest()
-            sql(store, executable, 'BEGIN IMMEDIATE;\nCREATE TEMP TABLE import_check(ok INTEGER CHECK(ok=1));\n' + '\n'.join(migrated) + f"\nINSERT INTO import_check SELECT count(*)={len(migrated)} FROM samples WHERE port={port};\nINSERT INTO imports VALUES({port},'{digest}',{len(lines)},{len(migrated)},{rejected});\nCOMMIT;")
-            warnings += rejected
         if action == 'append':
             now = int(time.time())
             cutoff = now - RETENTION
@@ -201,7 +178,7 @@ def execute(args, state):
             sql(store, executable, 'BEGIN IMMEDIATE;\n' + '\n'.join(statements) + ledger + f'\nDELETE FROM samples WHERE t < {cutoff};\nDELETE FROM batches WHERE t < {cutoff};\nCOMMIT;')
             result = {'ok': True}
         elif action == 'stats':
-            result = {'ok': True, 'storage': sql(store, executable, 'SELECT count(*) AS count,min(t) AS first,max(t) AS last FROM samples;')[0], 'imports': sql(store, executable, 'SELECT * FROM imports;')}
+            result = {'ok': True, 'storage': sql(store, executable, 'SELECT count(*) AS count,min(t) AS first,max(t) AS last FROM samples;')[0]}
         else:
             start = end - seconds
             width = seconds / maximum
@@ -215,8 +192,6 @@ def execute(args, state):
                     bucket[field] = {key: row[field + suffix] for key, suffix in [('lo', 'Lo'), ('hi', 'Hi'), ('avg', 'Avg'), ('count', 'Count')]}
                 buckets.append(bucket)
             result = {'ok': True, 'view': {'start': start, 'end': end, 'bucketSeconds': width, 'count': summary['count'], 'first': summary['first'], 'last': summary['last'], 'buckets': buckets, 'stats': {f: {'lo': summary[f + 'Lo'], 'hi': summary[f + 'Hi']} for f in FIELDS}}}
-        if warnings:
-            result['warning'] = f'{warnings} malformed legacy history lines were preserved in the original files'
         print(json.dumps(result, separators=(',', ':'), allow_nan=False))
     finally:
         for fd in (executable, store, parent):

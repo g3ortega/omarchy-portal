@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import tempfile
 import time
 
@@ -19,13 +20,13 @@ def call(home, *args):
 
 with tempfile.TemporaryDirectory(prefix='portal-metrics-store-') as temporary:
     home = Path(temporary) / 'state'
-    legacy = home / 'metrics' / '3307.jsonl'
-    legacy.parent.mkdir(parents=True)
-    rows = [{'t': NOW-3600, 'rssKb': 10}, {'t': NOW, 'rssKb': 90}, {'t': NOW, 'rssKb': None}, {'t': NOW-172801, 'rssKb': 1}]
-    original = ('\n'.join(map(json.dumps, rows)) + '\n{torn\n').encode()
-    legacy.write_bytes(original)
+    assert call(home, 'stats')['ok']
+    db = home / 'metrics/store/metrics.db'
+    with sqlite3.connect(db) as connection:
+        connection.executemany('INSERT INTO samples(port,t,rssKb) VALUES(3307,?,?)',
+                               [(NOW-3600, 10), (NOW, 90), (NOW, None), (NOW-172801, 1)])
     result = call(home, 'query', 3307, 3600, NOW)
-    assert result['ok'] and result['view']['count'] == 3 and result['warning'], result
+    assert result['ok'] and result['view']['count'] == 3, result
     assert result['view']['stats']['rssKb'] == {'lo': 10, 'hi': 90}
     assert result['view']['buckets'][-1]['rssKb']['count'] == 1
     assert call(home, 'query', 3307, 3600, NOW)['view'] == result['view']
@@ -34,11 +35,11 @@ with tempfile.TemporaryDirectory(prefix='portal-metrics-store-') as temporary:
     assert call(home, 'append-batch', batch, 'session_1')['ok']
     assert call(home, 'query', 3307, 172800, NOW)['view']['count'] == 4
     assert call(home, 'stats')['storage']['count'] == 4
-    assert call(home, 'unwatch', 3307)['ok'] and legacy.read_bytes() == original
+    assert call(home, 'unwatch', 3307)['ok']
     assert call(home, 'query', 3307, 172800, NOW)['view']['count'] == 4
     assert not call(home, 'query', 3307, 604800, NOW)['ok']
     assert not call(home, 'append-batch', '{"3307":{"t":1,"rssKb":-1}}')['ok']
-    print('ok migration preserves duplicates/originals/torn lines; retries, retention, unwatch and null extrema')
+    print('ok native samples preserve duplicates; retries, retention, unwatch and null extrema')
     for name in ('metrics.db', 'metrics.db-journal', 'metrics.db-wal', 'metrics.db-shm'):
         for kind in ('symlink', 'fifo', 'hardlink', 'directory', 'mode'):
             isolated = Path(temporary) / (name + '-' + kind)

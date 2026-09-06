@@ -348,10 +348,11 @@ portless_exact_alias() {
 cmd_providers() {
   local portless_ok=1
   portless_state_load || portless_ok=0
-  local row name label reach status detail fix pair tld clause tsv=""
+  local row name label reach status detail fix pair tld clause available tsv=""
   for row in "${PROVIDERS[@]}"; do
     IFS=: read -r name label reach <<<"$row"
-    tld=""; clause=""
+    tld=""; clause=""; available=false
+    provider_bin "$name" >/dev/null 2>&1 && available=true
     if [[ $name == portless ]] && (( portless_ok == 0 )); then
       status=unavailable; detail="State could not be read safely"; fix=""
     else
@@ -360,10 +361,10 @@ cmd_providers() {
       [[ $name == portless ]] && tld=$(portless_tld)
       declare -f "${name}_setup_clause" >/dev/null && clause=$("${name}_setup_clause")
     fi
-    tsv+="$name"$'\t'"$label"$'\t'"$status"$'\t'"$detail"$'\t'"$reach"$'\t'"$tld"$'\t'"$fix"$'\t'"$clause"$'\n'
+    tsv+="$name"$'\t'"$label"$'\t'"$status"$'\t'"$detail"$'\t'"$reach"$'\t'"$tld"$'\t'"$fix"$'\t'"$clause"$'\t'"$available"$'\n'
   done
   printf '%s' "$tsv" | jq -Rsc 'split("\n") | map(select(length > 0) | split("\t")
-    | {id: .[0], label: .[1], status: .[2], detail: .[3], reach: .[4], tld: .[5], fix: .[6], setupClause: .[7]})
+    | {id: .[0], label: .[1], status: .[2], detail: .[3], reach: .[4], tld: .[5], fix: .[6], setupClause: .[7], available: (.[8] == "true")})
     | {ok: true, providers: .}'
 }
 

@@ -11,13 +11,18 @@ const functions = names.map(name => {
 }).join("\n")
 
 function session(provider = { id: "portless", status: "setup", fix: "", setupClause: "Starts the proxy" }) {
+  provider = { available: true, reach: provider.id === "portless" ? "local" : "public", ...provider }
+  const actionProviders = { cloudflared: {id:"cloudflared",label:"Cloudflare",available:true,reach:"public",status:"ready"},
+    ngrok: {id:"ngrok",available:true,reach:"public",status:"setup"}, [provider.id]: provider }
   const calls = []
   const ctx = vm.createContext({
     pendingSetup: null, setupProviders: [provider], settingsIndex: 0, settingDefs: [],
     helpOpen: false, pendingAction: null, detailEntry: null, settingsOpen: false,
-    portlessReady: false, publicProviders: [], selectedPort: -1, expandedKind: "",
+    portlessReady: false, publicProviders: [actionProviders.cloudflared], selectedPort: -1, expandedKind: "",
     service: {
       busyAction: "", providerFor: id => provider.id === id ? provider : null,
+      actionProviderFor: id => actionProviders[id]?.available === true ? actionProviders[id] : null,
+      publicProviders: [actionProviders.cloudflared],
       setupProvider: id => calls.push(["setup", id]),
       unexpose: (...args) => calls.push(["unexpose", ...args]),
       copyText: (...args) => calls.push(["copy", ...args]),
@@ -91,6 +96,7 @@ for (const [field, value] of [["status", "ready"], ["fix", "new command"], ["set
 }
 {
   const { ctx, calls } = session()
+  ctx.portlessReady = true
   ctx.service.routeFor = () => ({ host: "app.localhost", reach: "local", managed: false, aliasName: "app" })
   ctx.activateVerb({ port: 3000 }, { id: "name" })
   assert.deepEqual(calls, [["expand", 3000, "naming"]])
@@ -137,7 +143,7 @@ for (const [field, value] of [["status", "ready"], ["fix", "new command"], ["set
   const { ctx } = session()
   const entry = { port: 3000, category: "dev", process: { pid: 999999, start: "1" } }
   ctx.service.routeFor = () => ({ host: "api.project.localhost", reach: "local", aliasName: "api.project", managed: false })
-  assert.equal(ctx.verbsFor(entry)[0].label, "rename")
+  assert.equal(ctx.verbsFor(entry)[0].label, "name setup")
   ctx.service.routeFor = () => ({ host: "api.project.localhost", reach: "local", aliasName: "api.project", managed: true })
   assert.deepEqual(Array.from(ctx.verbsFor(entry), verb => verb.id), ["share", "pause", "restart", "stop"])
   for (const route of [{ managed: null, aliasName: "" }, { managed: false, aliasName: "" }, { aliasName: "api.project" }]) {
@@ -147,7 +153,8 @@ for (const [field, value] of [["status", "ready"], ["fix", "new command"], ["set
 }
 {
   const rowSource = readFileSync(new URL("../PortRow.qml", import.meta.url), "utf8")
-  const editable = new Function("row", `return ${rowSource.match(/readonly property bool editable: ([^\n]+)/)[1]}`)
+  const editableBody = rowSource.match(/readonly property bool editable: ([^\n]+\n[^\n]+)/)[1]
+  const editable = row => new Function("row", "provider", `return ${editableBody}`)(row, {status:"ready"})
   assert.equal(editable({ route: null }), true)
   assert.equal(editable({ route: { reach: "local", managed: false, aliasName: "api.project" } }), true)
   for (const route of [{ managed: true, aliasName: "api.project" }, { managed: null, aliasName: "" }, { managed: false, aliasName: "" }, {}]) {

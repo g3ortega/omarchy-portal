@@ -51,7 +51,10 @@ The bar counts public shares when any are open, otherwise named routes, otherwis
 dev servers. A zero count hides the number. The Portal icon stays the same; its color
 indicates exposure. The tooltip lists all active categories.
 
-Provider setup, browser trust, and preferences live in Settings (`,`).
+Portless, Cloudflared, and ngrok are optional. Listing, process actions, and
+charts work without them. Naming and sharing actions appear when their tools
+are available. Install and configure providers in Settings (`,`), alongside
+browser trust and preferences.
 Local names use an unprivileged proxy on port 1355 by default. Existing proxies
 on port 443 keep their URLs without a port number. Cloudflare sharing does not
 flush system DNS caches or request administrator authentication.

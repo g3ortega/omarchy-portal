@@ -37,10 +37,9 @@ The inspected files were `/usr/share/omarchy/shell/plugins/clipboard/Clipboard.q
 `/usr/share/omarchy/shell/plugins/notifications/Service.qml`, and
 `~/.config/omarchy/plugins/quickshell.spotify/Service.qml`.
 
-These implementations do not provide a high-volume metric store. Extending
-Portal's JSONL line limit would increase whole-file rewrites and send larger
-histories to the QML thread. Hourly segments reduce writes, but require a new
-segment index, range reader, retention walker, and migration protocol.
+These implementations suit small histories. Metric history needs indexed
+time queries and bounded chart responses. Hourly files would require a
+segment index, range reader, and retention walker.
 
 SQLite provides transactions and indexed time queries through the existing
 Python helper. No database daemon or Rust build is needed. Arch's
@@ -69,10 +68,8 @@ performance here. FULL synchronization and the nonblocking Portal metrics lock
 protect transactions. A row ID preserves samples with duplicate timestamps.
 Stable batch IDs make retries idempotent after an uncertain write result.
 
-Each legacy port file is imported in a transaction with a count check and an
-import ledger. Original JSONL files stay unchanged. Malformed lines remain in
-the originals and produce a warning. A failed migration does not delete its
-source. Normal recording prunes database samples older than 48 hours.
+A fresh store creates the current SQLite schema directly. Normal recording
+prunes database samples older than 48 hours.
 
 Writes are observed by the service. Failed batches remain queued for retry.
 The service serializes chart reads with writes and drains queued writes before
@@ -104,9 +101,7 @@ Range queries fell from 217–276 ms to 86–134 ms. Those measurements include
 Bash, Python, SQLite, validation, and synchronization. Responses stayed between
 150 and 169 KB with long fractional values across all four metrics.
 
-A copy of the actual MySQL file imported all 17,280 raw rows with matching
-source digest and unchanged original bytes. A repeated full-history query
-took about 102 ms. Timings describe this machine and fixture, not every disk.
+Timings describe this machine and fixture, not every disk.
 
 Shared Quickshell RSS includes every loaded plugin. It cannot be attributed
 to Portal alone, so chart-processing and helper costs are reported separately.
@@ -119,17 +114,10 @@ selected range. With the panel closed, recording continued without range reads.
 A deliberate lock refusal displayed the storage failure, then drained all queued
 writes and cleared the error after release.
 
-The actual migration audit compared all original field values and duplicate
-multiplicities across MySQL, Redis, DynamoDB, and both OpenSearch ports.
-All 86,400 original rows were present. Each original file's SHA-256 matched its
-import ledger; newer samples were allowed in the database comparison.
-
 ## Separate HTTP and TCP measurements
 
-Schema version 2 adds nullable `tcpRttMs` and `tcpRttCount` columns in one
-transaction. Existing sample IDs, values, duplicate rows, imports, and retry
-records remain unchanged. `latMs` keeps its HTTP response-duration meaning.
-Old rows receive null TCP fields.
+The schema stores nullable `tcpRttMs` and `tcpRttCount` fields separately
+from HTTP response duration in `latMs`. Missing measurements remain null.
 
 The scanner obtains TCP RTT from the established-socket snapshot it already
 uses for connection counts. It averages the kernel RTT estimates across sockets
@@ -146,10 +134,7 @@ authentication. Neither is a suitable automatic application-health check.
 See the [ss manual](https://man7.org/linux/man-pages/man8/ss.8.html) and
 [WebSocket protocol](https://www.rfc-editor.org/rfc/rfc6455.html#section-5.5.2).
 
-The installed version-1 migration was compared with a consistent database
-snapshot. All 91,938 prior rows retained their IDs and every previous value.
-Their new TCP fields were null. Existing import and retry records remained
-intact. A final 400-bucket response with five metrics and long fractional values
+A 400-bucket response with five metrics and long fractional values
 measured 233,366 bytes locally. SQLite versions format the intermediate SQL
 JSON differently, and the Ubuntu CI version exceeded the original 256 KiB
 limit. The SQL response limit is now 512 KiB. The fixed projection has at most

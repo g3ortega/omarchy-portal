@@ -423,7 +423,9 @@ Item {
           // -- the name editor ------------------------------------------------
           Item {
             id: nameEditor
-            readonly property bool editable: !row.route || (row.route.reach === "local" && row.route.managed === false && !!row.route.aliasName)
+            readonly property var provider: row.service ? row.service.actionProviderFor("portless") : null
+            readonly property bool editable: provider !== null && provider.status === "ready"
+              && (!row.route || (row.route.reach === "local" && row.route.managed === false && !!row.route.aliasName))
             onEditableChanged: if (!editable && row.naming) row.editorCanceled()
             width: parent.width
             visible: row.naming && !row.confirming

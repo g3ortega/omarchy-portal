@@ -35,9 +35,9 @@ for (const [text, code] of [["", 0], ["not-json", 0], ['{"ok":false,"error":"ref
 }
 console.log("ok failed range reads complete and dispatch the newest range on the same port")
 {
-  const { ctx, events } = session('{"ok":true,"view":{"buckets":[]},"warning":"legacy partial line retained"}')
+  const { ctx, events } = session('{"ok":true,"view":{"buckets":[]}}')
   ctx.exitHandler(0)
-  assert.deepEqual(plain(events[1]), ["complete", 3307, 3600, 1, { buckets: [] }, "", "legacy partial line retained"])
+  assert.deepEqual(plain(events[1]), ["complete", 3307, 3600, 1, { buckets: [] }, ""])
 }
 {
   const { ctx, events } = session("", null, false)
@@ -66,4 +66,4 @@ console.log("ok failed range reads complete and dispatch the newest range on the
   ctx.exitHandler(0)
   assert.deepEqual(events, [])
 }
-console.log("ok read completion preserves request identity, navigation, warnings, and shutdown")
+console.log("ok read completion preserves request identity, navigation, and shutdown")

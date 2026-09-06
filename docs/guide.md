@@ -33,7 +33,9 @@ Restart re-runs the process's own argv in its own directory and environment.
 Restart refuses duplicate environment names before stopping the process.
 A server started through mise, nvm, or a shell hook uses the same launcher.
 Signals only go to processes you own. Stop, pause, and restart ask first and
-name the process. Resume never asks.
+name the process. Resume never asks. Naming and sharing actions appear only
+when their provider tools are available. Keyboard shortcuts follow the same
+rule. Settings always lists supported providers and their setup instructions.
 
 Press `s` to share the selected port or stop its existing public share.
 Stopping a share still works when its server is no longer listening.
@@ -70,8 +72,8 @@ and is unavailable without connections. It does not measure database queries or
 WebSocket message handling. HTTP and TCP history stay separate.
 
 History writes are checked and retried. Recording and read failures stay visible
-in the detail footer. Legacy JSONL files are imported transactionally and kept
-unchanged. Selecting a shorter range never deletes samples.
+in the detail footer. History uses SQLite from the first sample. Selecting a
+shorter range never deletes samples.
 
 ## Local names
 
@@ -99,15 +101,15 @@ Portal leaves running proxies alone, including those owned by root.
 
 | Provider | Reach | URL | Needs |
 |---|---|---|---|
-| Cloudflare | public | `https://<words>.trycloudflare.com` | nothing; a confirmed click installs a checksum-pinned release |
+| Cloudflare | public | `https://<words>.trycloudflare.com` | `cloudflared`; Settings can install a checksum-pinned release |
 | ngrok | public | `https://<id>.ngrok-free.app`, or your reserved domain | `ngrok` and an authtoken |
 | Portless | this machine by default; existing LAN routes keep their reach | `https://<name>.localhost:1355` by default | `portless`; setup in Settings |
 
-Providers are detected, not assumed. Each shows ready, needs setup (with a
-fix where one exists), or not installed. Sharing asks first, in place, naming the
-port and the provider, and a desktop notification confirms every new public
-URL, whether the panel or IPC asked for it. An unavailable provider opens Settings. Installation and browser trust ask
-for confirmation there, independently of the selected port. Anything reachable from
+Settings lists every provider with its readiness and setup guidance. The share
+picker lists available tools. An installed tool that needs setup opens Settings.
+Sharing asks first, in place, naming the port and provider. A desktop notification
+confirms every new public URL, whether the panel or IPC asked for it. Installation
+and browser trust ask for confirmation in Settings. Anything reachable from
 the internet is drawn in the theme's urgent color in the row, in the panel,
 and on the bar.
 

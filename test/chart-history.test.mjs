@@ -13,12 +13,12 @@ const requests = []
 const ctx = vm.createContext({
   entry: { port: 3307 }, rangeSeconds: 3600, queryKey: 'plugin:3307:3600',
   service: { metricRequestSequence: 10, loadMetricRange: (...args) => requests.push(args) },
-  savedView: null, hoverTime: 7, historyError: '', historyWarning: '', historyStatus: 'idle'
+  savedView: null, hoverTime: 7, historyError: '', historyStatus: 'idle'
 })
 ctx.detail = ctx
 vm.runInContext(request[0], ctx)
-const complete = (port, seconds, id, view, error = '', warning = '') => {
-  ctx.result = [port, seconds, id, view, error, warning]
+const complete = (port, seconds, id, view, error = '') => {
+  ctx.result = [port, seconds, id, view, error]
   vm.runInContext(`(function (${loaded[1]}) {${loaded[2]}})(...result)`, ctx)
 }
 ctx.requestRange(true)
