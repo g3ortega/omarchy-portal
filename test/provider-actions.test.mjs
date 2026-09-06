@@ -59,7 +59,7 @@ Object.defineProperty(ctx, 'portlessReady', {
 })
 vm.runInContext(functions(panel, [
   'verbsFor', 'activateVerb', 'activateVerbById', 'chooseProvider',
-  'pendingStillValid', 'revalidateProviders'
+  'pendingStillValid', 'revalidateProviders', 'confirmAccept'
 ]), ctx)
 const ids = () => Array.from(ctx.verbsFor(entry), x => x.id)
 
@@ -94,6 +94,15 @@ backend.providers[1] = { ...backend.providers[1], available: true, status: 'read
 assert.ok(ids().includes('share'))
 ctx.chooseProvider(3000, backend.providers[1])
 assert.equal(ctx.pendingAction.kind, 'share')
+assert.equal(backend.expose(3000, 'cloudflared', '', entry.process), true)
+backend.activeAction = backend.calls.pop()[0]
+assert.equal(ctx.pendingStillValid(ctx.pendingAction), false, 'first accepted start invalidates consent before its status poll')
+ctx.revalidateProviders()
+assert.equal(ctx.pendingAction, null)
+backend.activeAction = { key: 'ngrok:3001', shareStartPort: 3001 }
+ctx.chooseProvider(3000, backend.providers[1])
+assert.equal(ctx.pendingStillValid(ctx.pendingAction), true, 'another port does not invalidate consent')
+backend.activeAction = null
 const stale = backend.providers[1]
 backend.providers[1] = { ...stale, available: false }
 ctx.revalidateProviders()
@@ -103,6 +112,13 @@ assert.equal(ctx.pendingAction, null)
 
 backend.tunnels = { 'cloudflared:3000': { provider: 'cloudflared' } }
 backend.publicTunnelFor = () => backend.tunnels['cloudflared:3000']
+backend.providers[1] = { ...backend.providers[1], available: true }
+ctx.pendingAction = { kind: 'share', entry, provider: 'cloudflared' }
+assert.equal(ctx.pendingStillValid(ctx.pendingAction), false, 'another panel has already shared this listener')
+ctx.confirmAccept()
+assert.equal(ctx.pendingAction, null)
+assert.equal(backend.calls.length, 0, 'stale confirmation never queues a second provider')
+backend.providers[1].available = false
 ctx.activateVerbById(entry, 'share')
 assert.equal(backend.calls.length, 1, 'active public share can stop without its binary')
 assert.equal(backend.calls[0][1][0], 'stop')

@@ -171,19 +171,20 @@ for (const [field, value] of [["status", "ready"], ["fix", "new command"], ["set
     editor.match(/onAccepted: \{([\s\S]*?)\n              \}/)[1])
   const calls = []
   const row = { named: true, entry: { port: 3000 }, editorDone: () => calls.push("done"),
-    service: { expose: (...args) => calls.push(args), unexpose: (...args) => calls.push(args) } }
+    service: { expose: (...args) => { calls.push(args); return true },
+      unexpose: (...args) => { calls.push(args); return true } } }
   accepted(row, { editable: true }, "api.project")
   assert.deepEqual(calls, [[3000, "portless", "api.project"], "done"])
   calls.length = 0
   accepted(row, { editable: false }, "replacement")
   accepted(row, { editable: false }, "")
-  assert.deepEqual(calls, ["done", "done"])
+  assert.deepEqual(calls, [], "disabled editing neither queues an action nor closes the editor")
   const remove = rowSource.slice(rowSource.indexOf("id: removeLink"))
   const clicked = new Function("row", "nameEditor",
     remove.match(/onClicked: \{([\s\S]*?)\n              \}/)[1])
   calls.length = 0
   clicked(row, { editable: false })
-  assert.deepEqual(calls, ["done"])
+  assert.deepEqual(calls, [], "disabled removal leaves the editor unchanged")
 }
 {
   const settingsSource = source.slice(source.indexOf("id: settingsView"))

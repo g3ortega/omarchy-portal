@@ -76,3 +76,9 @@ assert.equal(phase(2, null, ctx.formatLatency), 'collecting', 'a mode switch can
 assert.match(card, /model: card.modeOptions/)
 assert.match(card, /onClicked: card.modeRequested\(modelData.value\)/)
 assert.doesNotMatch(detail, /text: "Latency"/, 'the selector belongs inside the latency card')
+
+let repaints = 0
+const fieldChanged = card.match(/^  onFieldChanged: (.+)$/m)
+assert.ok(fieldChanged, 'metric selection invalidates Canvas even when range and bounds are unchanged')
+vm.runInNewContext(fieldChanged[1], { canvas: { requestPaint() { repaints++ } } })
+assert.equal(repaints, 1)

@@ -80,6 +80,7 @@ with tempfile.TemporaryDirectory(prefix='portal-restart-path-') as temporary:
 lifecycle_mutation() { :; }
 proc() {
   if [[ $1 == signal ]]; then printf '%s\\n' "$*" >> "$CASE/signals"; return 0; fi
+  if [[ $1 == check && -e $CASE/signals ]]; then return 1; fi
   /usr/bin/python3 -I -S "$PROC_PY" "$@"
 }
 kill() { printf '%s\\n' "$*" >> "$CASE/forbidden"; return 99; }
@@ -107,6 +108,7 @@ state() {
              ({}, True, None), ({'PATH': ''}, True, local_binary),
              ({'PATH': str(helperbin)}, False, decoy)]
     for target_env, local_exists, selected_path in cases:
+        (case/'signals').unlink(missing_ok=True)
         local_binary.unlink(missing_ok=True)
         if local_exists:
             local_binary.write_bytes(decoy.read_bytes())

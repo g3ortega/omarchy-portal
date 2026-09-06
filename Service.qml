@@ -509,7 +509,7 @@ Item {
     var args = ["start", String(provider), String(n)]
     if (name) args.push(String(name))
     if (p.reach === "public") args.push("--target", String(target.pid), String(target.start))
-    return _runAction({ key: key }, args, "could not expose that port")
+    return _runAction({ key: key, shareStartPort: p.reach === "public" ? n : 0 }, args, "could not expose that port")
   }
 
   function unexpose(port, provider) {

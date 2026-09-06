@@ -35,14 +35,19 @@ port_busy() {
   sockets=$(ss -tlnH "sport = :$1" 2>/dev/null) || return 2
   [[ -n $sockets ]]
 }
-owns_port() {
-  local sockets proc_rest row_attributed found=0
+owns_port() {  # <pid-or-session> <port> [session]
+  local sockets proc_rest owner row_attributed found=0
   sockets=$(ss -tlnpH "sport = :$2" 2>/dev/null) || return 2
   while read -r _ _ _ _ _ proc_rest; do
     row_attributed=0
     while [[ $proc_rest =~ pid=([0-9]+) ]]; do
-      [[ ${BASH_REMATCH[1]} == "$1" ]] || return 1
+      owner=${BASH_REMATCH[1]}
       proc_rest=${proc_rest#*"${BASH_REMATCH[0]}"}
+      if [[ ${3:-} == session ]]; then
+        owner=$(ps -o sid= -p "$owner" 2>/dev/null) || return 1
+        owner=${owner//[[:space:]]/}
+      fi
+      [[ $owner == "$1" ]] || return 1
       row_attributed=1
     done
     (( row_attributed )) || return 1
@@ -177,19 +182,19 @@ case "${1:-}" in
 
     target "$pid" "$start" "$port"
     proc signal "$pid" "$start" TERM || die "could not stop pid $pid"
-    # Wait for the port to actually free before relaunching into EADDRINUSE.
+    # Closing the socket can precede shutdown cleanup. Both must finish.
     for ((i = 0; i < 25; i++)); do
       port_busy "$port"; busy_rc=$?
-      (( busy_rc != 0 )) && break
+      (( busy_rc == 2 )) && break
+      if (( busy_rc == 1 )) && ! proc check "$pid" "$start"; then break; fi
       sleep 0.2
     done
-    if (( busy_rc == 0 )); then port_busy "$port"; busy_rc=$?; fi
-    if (( busy_rc != 1 )); then
-      effect=none
-      proc check "$pid" "$start" || effect=stopped
-      (( busy_rc == 2 )) && die_effect "could not query port $port after signaling pid $pid" "$effect"
-      die_effect "port $port did not free up" "$effect"
-    fi
+    if (( busy_rc != 2 )); then port_busy "$port"; busy_rc=$?; fi
+    effect=none
+    proc check "$pid" "$start" || effect=stopped
+    (( busy_rc == 2 )) && die_effect "could not query port $port after signaling pid $pid" "$effect"
+    [[ $effect == stopped ]] || die_effect "pid $pid did not exit after being asked to stop" none
+    (( busy_rc == 1 )) || die_effect "port $port did not free up" stopped
 
     restart_pid=".restart-$port.pid"
     trap 'cancel_restart "$restart_pid" 143' TERM
@@ -235,13 +240,9 @@ case "${1:-}" in
     port_busy "$port"; busy_rc=$?
     (( busy_rc == 2 )) && fail_restart "$new_pid" "$new_start" "$restart_pid" "could not query port $port after restart"
     (( busy_rc == 0 )) || fail_restart "$new_pid" "$new_start" "$restart_pid" "restart did not bring a listener back on port $port"
-    # The listener must be the relaunched service: anything else that grabbed
-    # the port in the meantime is not a successful restart.
-    restart_ok=""
-    for lpid in $(ss -tlnpH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\),.*/\1/p' | sort -u); do
-      [[ $(ps -o sid= -p "$lpid" 2>/dev/null | tr -d ' ') == "$new_pid" ]] && { restart_ok=1; break; }
-    done
-    [[ -n $restart_ok ]] || fail_restart "$new_pid" "$new_start" "$restart_pid" "port $port is held by another process after restart"
+    owns_port "$new_pid" "$port" session; owner_rc=$?
+    (( owner_rc == 2 )) && fail_restart "$new_pid" "$new_start" "$restart_pid" "could not query attributed listening sockets after restart"
+    (( owner_rc == 0 )) || fail_restart "$new_pid" "$new_start" "$restart_pid" "port $port is held by another process after restart"
     state_remove "$PORTAL_RUNTIME_DIR" "$restart_pid"; remove_rc=$?
     case $remove_rc in 129|130|143) cancel_restart "$restart_pid" "$remove_rc" ;; esac
     (( remove_rc == 0 )) \

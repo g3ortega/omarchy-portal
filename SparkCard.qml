@@ -259,6 +259,7 @@ Item {
     }
   }
 
+  onFieldChanged: canvas.requestPaint()
   onLoadingChanged: canvas.requestPaint()
   onViewChanged: canvas.requestPaint()
   onLoChanged: canvas.requestPaint()

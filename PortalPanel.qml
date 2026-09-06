@@ -256,6 +256,12 @@ Panel {
   Connections {
     target: root.service
     function onProvidersChanged() { root.revalidateProviders() }
+    function onActiveActionChanged() {
+      if (root.pendingAction && !root.pendingStillValid(root.pendingAction)) root.pendingAction = null
+    }
+    function onTunnelsChanged() {
+      if (root.pendingAction && !root.pendingStillValid(root.pendingAction)) root.pendingAction = null
+    }
     function onActionFailed(message) { root.showMoment(message, true) }
     function onActionMoment(message) { root.showMoment(message) }
     function onActionHint(message) {
@@ -291,6 +297,8 @@ Panel {
     if (action.kind === "share") {
       var provider = service.actionProviderFor(action.provider)
       return provider !== null && provider.status === "ready" && provider.reach === "public"
+        && !service.publicTunnelFor(action.entry.port)
+        && (!service.activeAction || service.activeAction.shareStartPort !== action.entry.port)
     }
     return true
   }

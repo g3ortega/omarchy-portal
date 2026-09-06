@@ -447,11 +447,10 @@ Item {
               // route to what the remove link does.
               onAccepted: {
                 var n = text.trim()
-                if (nameEditor.editable && row.service && row.entry) {
-                  if (n.length > 0) row.service.expose(row.entry.port, "portless", n)
-                  else if (row.named) row.service.unexpose(row.entry.port, "portless")
-                }
-                row.editorDone()
+                if (!nameEditor.editable || !row.service || !row.entry) return
+                if (n.length > 0) {
+                  if (row.service.expose(row.entry.port, "portless", n)) row.editorDone()
+                } else if (!row.named || row.service.unexpose(row.entry.port, "portless")) row.editorDone()
               }
             }
 
@@ -474,8 +473,8 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
               text: "remove"
               onClicked: {
-                if (nameEditor.editable && row.service && row.entry) row.service.unexpose(row.entry.port, "portless")
-                row.editorDone()
+                if (nameEditor.editable && row.service && row.entry
+                    && row.service.unexpose(row.entry.port, "portless")) row.editorDone()
               }
             }
           }

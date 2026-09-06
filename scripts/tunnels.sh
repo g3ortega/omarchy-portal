@@ -968,14 +968,16 @@ reconcile_idle() {
       || die "could not clear the idle deadline for $provider on port $port"
     return 0
   fi
-  if [[ -z $idle ]]; then
+  if [[ -n $idle ]]; then
+    [[ $idle =~ ^[0-9]{1,16}$ ]] || die "$provider on port $port has an invalid idle deadline"
+    idle=$((10#$idle))
+  fi
+  if [[ -z $idle ]] || (( idle > now )); then
     if write_own "$(idlefile "$provider" "$state_port")" "$now"; then return 0; fi
     stop_reconciled_share "$provider" "$port" "$state_port" "could not record an idle deadline for $provider on port $port" \
       || die "$RECONCILE_STOP_ERROR"
     return 1
   fi
-  [[ $idle =~ ^[0-9]+$ ]] && (( idle <= now )) \
-    || die "$provider on port $port has an invalid idle deadline"
   if (( now - idle >= IDLE_CAP )); then
     stop_reconciled_share "$provider" "$port" "$state_port" "$provider on port $port reached its idle deadline" || return 0
     return 1

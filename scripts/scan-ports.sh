@@ -307,7 +307,7 @@ emit | jq -Rsc '
       argv: (.[15] | argv),
       latMs: (.[16] | num),
       httpCode: (.[17] | num),
-      argvTruncated: (.[18] == "1"),
+      argvTruncated: (.[18] == "1" or ((.[15] | @base64d | @base64) != .[15])),
       start: (.[19] | num),
       exclusiveOwner: (.[20] == "true"),
       tcpRttMs: (.[21] | num),

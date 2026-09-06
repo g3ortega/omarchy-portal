@@ -30,7 +30,9 @@ group.
 A row shows open, copy and charts on hover. Click it (or press Enter) and it
 unfolds a line of verbs: name, share, pause, restart, stop. Pause is SIGSTOP.
 Restart re-runs the process's own argv in its own directory and environment.
-Restart refuses duplicate environment names before stopping the process.
+Restart refuses duplicate environment names and arguments that cannot be decoded
+without changing their bytes. It waits for the original process to exit before
+relaunching and verifies that every listener belongs to the replacement session.
 A server started through mise, nvm, or a shell hook uses the same launcher.
 Signals only go to processes you own. Stop, pause, and restart ask first and
 name the process. Resume never asks. Naming and sharing actions appear only
@@ -81,7 +83,8 @@ shorter range never deletes samples.
 
 Name a port and it becomes `https://acme-web.localhost:1355` through Portless. The
 name is the row's title, and it is what opens and what copies. In the name
-editor, Enter on an empty field removes the name.
+editor, Enter on an empty field removes the name. If another action is busy,
+the editor stays open and keeps your input so you can retry.
 
 Set up local names in Settings. Portal starts an unprivileged proxy on port
 1355 and can trust its CA in your browser stores after confirmation. It does
