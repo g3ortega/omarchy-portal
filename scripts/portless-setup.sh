@@ -90,6 +90,7 @@ drop_trust_record() {  # <store>
   fi
 }
 trust_store() {  # <nss dir>
+  [[ $1 == /* && $1 != *[[:cntrl:]]* ]] || return 1
   local pem="$PORTAL_STATE_HOME/ca-import.pem" pemfd rc fp bound_fp rec="" cert_state
   fp=$(printf '%s' "$CA_PEM" | ca_fingerprint)
   [[ -n $fp ]] || return 1
@@ -207,7 +208,8 @@ report() {
     portless_probe && repair=$(portless_fix_cmd "" "$PROBE_PORT")
     remaining+=("restart the portless proxy so it serves .$(configured_tld) too${repair:+$'\x1f'$repair}")
   elif [[ $proxy == foreign ]]; then
-    remaining+=("restart the proxy with your routes"$'\x1f'"$(portless_fix_cmd evict)")
+    portless_probe && repair=$(portless_fix_cmd evict "$PROBE_PORT")
+    remaining+=("restart the proxy with your routes${repair:+$'\x1f'$repair}")
   elif [[ $proxy == off ]]; then
     remaining+=("Start local names in Portal settings")
   elif [[ $proxy == lan ]]; then

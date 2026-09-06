@@ -12,7 +12,7 @@ assert.ok(loaded)
 const requests = []
 const ctx = vm.createContext({
   entry: { port: 3307 }, rangeSeconds: 3600, queryKey: 'plugin:3307:3600',
-  service: { metricRequestSequence: 10, loadMetricRange: (...args) => requests.push(args) },
+  service: { metricRequestSequence: 10, cancelMetricRanges() {}, loadMetricRange: (...args) => requests.push(args) },
   savedView: null, hoverTime: 7, historyError: '', historyStatus: 'idle'
 })
 ctx.detail = ctx

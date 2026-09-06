@@ -563,18 +563,34 @@ Item {
 
   signal metricRangeLoaded(int port, int seconds, int requestId, var view, string error)
   property var _metricRead: null
-  property var _metricReadQueued: null
+  property var _metricReadQueue: []
 
-  function loadMetricRange(port, seconds, end, requestId) {
-    var request = { port: port, seconds: seconds, end: end, id: requestId }
-    if (diskReadProcess.running || metricsAppendProcess.running || (_metricBatches.length > 0 && !metricsRetry.running)) {
-      _metricReadQueued = request
+  function loadMetricRange(port, seconds, end, requestId, requester) {
+    var request = { port: port, seconds: seconds, end: end, id: requestId, requester: requester }
+    var index = _metricReadQueue.findIndex(function (pending) { return pending.requester === requester })
+    if (index !== -1) _metricReadQueue[index] = request
+    else if (_metricReadQueue.length < 32) _metricReadQueue.push(request)
+    else {
+      metricRangeLoaded(port, seconds, requestId, null, "History reader busy; try again")
       return
     }
-    _metricReadQueued = null
-    _metricRead = request
-    if (!runScript(diskReadProcess, "metrics.sh", ["query", String(port), String(seconds), String(end), "400"]))
-      metricRangeLoaded(port, seconds, requestId, null, "could not load saved history")
+    dispatchMetricRead()
+  }
+
+  function cancelMetricRanges(requester) {
+    _metricReadQueue = _metricReadQueue.filter(function (request) { return request.requester !== requester })
+  }
+
+  function dispatchMetricRead() {
+    while (_metricReadQueue.length > 0 && !diskReadProcess.running && !metricsAppendProcess.running
+           && (_metricBatches.length === 0 || metricsRetry.running)) {
+      var request = _metricReadQueue.shift()
+      _metricRead = request
+      if (runScript(diskReadProcess, "metrics.sh",
+                    ["query", String(request.port), String(request.seconds), String(request.end), "400"])) return
+      _metricRead = null
+      metricRangeLoaded(request.port, request.seconds, request.id, null, "could not load saved history")
+    }
   }
 
   function saveMetricBatch(batch) {
@@ -673,7 +689,7 @@ Item {
       if (ok && action && !root._lastTunnelsKey && parsed.reach === "public" && parsed.url)
         root._startedShareUrls[action.key] = String(parsed.url)
       var targetStopped = parsed && (parsed.effect === "stopped" || parsed.effect === "restarted")
-      if (action && action.expectsGone && !ok && !targetStopped) root._forgetGone(action.target)
+      if (action && action.expectsGone && !targetStopped) root._forgetGone(action.target)
       if (ok && action && action.shareStopKey && root.tunnels[action.shareStopKey])
         root._stoppingShare = action.shareStopKey
       if (!ok) {
@@ -711,13 +727,12 @@ Item {
     onExited: function (exitCode) {
       if (!root.alive) return
       var request = root._metricRead
-      var queued = root._metricReadQueued
-      root._metricReadQueued = null
+      root._metricRead = null
       var parsed = root.parseJson(diskOut.text)
       var success = exitCode === 0 && parsed && parsed.ok === true && parsed.view && Array.isArray(parsed.view.buckets)
       var error = success ? "" : (parsed && parsed.error ? String(parsed.error) : "could not load saved history")
       root.flushMetricBatch()
-      if (queued) root.loadMetricRange(queued.port, queued.seconds, queued.end, queued.id)
+      root.dispatchMetricRead()
       root.metricRangeLoaded(request.port, request.seconds, request.id, success ? parsed.view : null,
                              error)
     }
@@ -740,9 +755,7 @@ Item {
         root.metricsError = (parsed && parsed.error ? String(parsed.error) : "History not saved") + "; retrying"
         metricsRetry.restart()
       }
-      var queued = root._metricReadQueued
-      if (queued && (root._metricBatches.length === 0 || metricsRetry.running))
-        root.loadMetricRange(queued.port, queued.seconds, queued.end, queued.id)
+      root.dispatchMetricRead()
     }
   }
 

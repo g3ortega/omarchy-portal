@@ -2,13 +2,13 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import vm from "node:vm"
 const source = readFileSync(new URL("../Service.qml", import.meta.url), "utf8")
-const names = ["saveMetricBatch", "flushMetricBatch"]
+const names = ["saveMetricBatch", "flushMetricBatch", "dispatchMetricRead"]
 const functions = names.map(name => source.match(new RegExp(`^  function ${name}\\([^)]*\\) \\{[\\s\\S]*?^  \\}`, "m"))[0]).join("\n")
 const handler = source.slice(source.indexOf("    id: metricsAppendProcess")).match(/onExited: function \(([^)]*)\) \{([\s\S]*?)\n    \}/)
 const calls = []
 const ctx = vm.createContext({ alive: true, _metricBatches: [], _metricQueuedBytes: 0, _metricDropped: 0,
   _metricSession: "session", _metricBatchSequence: 0, metricsError: "", metricsRevision: 0,
-  _metricReadQueued: null, diskReadProcess: { running: false },
+  _metricReadQueue: [], diskReadProcess: { running: false },
   metricsAppendProcess: { running: false }, metricsAppendOut: { text: "" },
   metricsRetry: { running: false, restart() { this.running = true } }, parseJson: JSON.parse,
   runScript: (process, script, args) => { calls.push(args); process.running = true; return true }
@@ -70,7 +70,7 @@ console.log("ok metric writes retain every queued batch, retry idempotently, and
 {
   const sequence = [], queueContext = vm.createContext({ alive: true, _metricBatches: [], _metricQueuedBytes: 0,
     _metricDropped: 0, _metricSession: "drain", _metricBatchSequence: 0, metricsError: "", metricsRevision: 0,
-    _metricRead: null, _metricReadQueued: null,
+    _metricRead: null, _metricReadQueue: [],
     metricsAppendProcess: { running: false }, metricsAppendOut: { text: '{"ok":true}' },
     diskReadProcess: { running: false }, diskOut: { text: '{"ok":true,"view":{"buckets":[]}}' },
     metricsRetry: { running: false, restart() { this.running = true } },

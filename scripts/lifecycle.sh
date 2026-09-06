@@ -128,7 +128,8 @@ case "${1:-}" in
     case $1 in pause) sig=STOP ;; resume) sig=CONT ;; stop) sig=TERM ;; esac
     target "${2:-}" "${3:-}" "${4:-}"
     proc signal "$2" "$3" "$sig" || die "could not $1 pid $2"
-    [[ $1 == stop ]] && effect=stopped || effect=none
+    effect=none
+    if [[ $1 == stop ]] && ! proc check "$2" "$3"; then effect=stopped; fi
     jq -nc --arg effect "$effect" '{ok:true,effect:$effect}'
     ;;
   restart)
@@ -155,9 +156,13 @@ case "${1:-}" in
     # cwd (./bin/dev is common). It is resolved from that cwd, so a same-named
     # file in this helper's directory can never take its place, and a relative
     # PATH entry means what it meant to the process. Checked before touching it.
-    proc_path="" exec_path=""
-    for kv in "${envs[@]}"; do [[ $kv == PATH=* ]] && proc_path=${kv#PATH=}; done
-    cand=$(cd "$cwd" 2>/dev/null && PATH="${proc_path:-$PATH}" command -v -- "${argv[0]}" 2>/dev/null) || true
+    proc_path="" proc_path_set=0 exec_path="" cand=""
+    for kv in "${envs[@]}"; do
+      if [[ $kv == PATH=* ]]; then proc_path=${kv#PATH=}; proc_path_set=1; fi
+    done
+    if [[ ${argv[0]} == */* || $proc_path_set == 1 ]]; then
+      cand=$(cd "$cwd" 2>/dev/null && PATH="$proc_path" command -v -- "${argv[0]}" 2>/dev/null) || true
+    fi
     [[ -z $cand || $cand == /* ]] || cand="$cwd/$cand"
     [[ -n $cand ]] && cand=$(readlink -f -- "$cand" 2>/dev/null)
     [[ -n $cand && -f $cand && -x $cand ]] && exec_path=$cand

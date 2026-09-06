@@ -27,6 +27,7 @@ Item {
   readonly property string effectiveUrl: service && entry ? service.urlFor(entry.port, entry.url) : ""
 
   property bool active: true
+  onActiveChanged: if (!active && service) service.cancelMetricRanges(detail)
   property int rangeSeconds: 3600
   signal rangeRequested(int seconds)
   property real hoverTime: -1
@@ -51,9 +52,12 @@ Item {
       historyError = ""
       historyStatus = queryKey ? "loading" : "idle"
     }
-    if (!queryKey || !service || !entry) return
+    if (!queryKey || !service || !entry) {
+      if (service) service.cancelMetricRanges(detail)
+      return
+    }
     requestId = ++service.metricRequestSequence
-    service.loadMetricRange(entry.port, rangeSeconds, Math.floor(Date.now() / 1000), requestId)
+    service.loadMetricRange(entry.port, rangeSeconds, Math.floor(Date.now() / 1000), requestId, detail)
   }
 
   Connections {
@@ -69,6 +73,7 @@ Item {
   }
   onQueryKeyChanged: Qt.callLater(requestRange, true)
   Component.onCompleted: Qt.callLater(requestRange, true)
+  Component.onDestruction: if (service) service.cancelMetricRanges(detail)
 
   Timer {
     interval: 30000

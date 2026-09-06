@@ -340,7 +340,7 @@ portless_fix_cmd() {  # [evict] [port]
   local stop="portless proxy stop" port skip_trust=""
   port=$(canonical_port "${2:-443}") || return 1
   (( port >= 1024 )) && skip_trust=" --skip-trust"
-  [[ ${1:-} == evict ]] && stop="sudo fuser -k 443/tcp; sleep 1"
+  [[ ${1:-} == evict ]] && stop="sudo fuser -k $port/tcp; sleep 1"
   printf '%s; PORTLESS_LAN=0 PORTLESS_LAN_IP= PORTLESS_STATE_DIR="$HOME/.portless" portless proxy start -p %s%s --tld %s' \
     "$stop" "$port" "$skip_trust" "$(portless_tld_arg)"
 }

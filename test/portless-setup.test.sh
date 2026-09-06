@@ -129,3 +129,31 @@ jq -e '.ok and .tunnels[0].dns == ""' <<<"$result" >/dev/null
 [[ $(cat "$FIXTURE/removed") == "$STATE_DIR cloudflared-3000.dns" ]]
 [[ ! -e $FIXTURE/forbidden ]]
 echo 'PASS DNS becomes ready on a later poll without privileged cache flushes'
+
+for repair_port in 80 1355 443; do
+  result=$(PROXY_MODE=foreign TEST_PROXY_PORT=$repair_port bash "$FIXTURE/app/portless-setup.sh" status)
+  repair=$(jq -r '.remaining[] | select(contains("restart the proxy")) | split("\u001f")[1]' <<<"$result")
+  [[ $repair == *"sudo fuser -k $repair_port/tcp;"* && $repair == *"proxy start -p $repair_port "* ]]
+done
+echo 'PASS foreign proxy repair targets the detected port in both commands'
+
+(
+  source <(sed -n '/^valid_trust_ledger()/,/^ca_is_portless()/p' "$REAL_SCRIPTS/portless-setup.sh" | sed '$d')
+  TRUSTED="$PORTAL_METRICS_DIR/trusted-stores"
+  PORTAL_STATE_HOME=$PORTAL_METRICS_DIR
+  TRUSTED_CAP=65536 MAX_TRUSTED_STORES=512 CA_PEM=fixture
+  mkdir -p "$PORTAL_STATE_HOME"
+  ca_fingerprint() { cat >/dev/null; printf '%064d' 0; }
+  store_cert_state() { echo lookup >> "$FIXTURE/trust-effects"; echo absent; }
+  store_ca_trusted() { return 0; }
+  certutil() { echo certutil >> "$FIXTURE/trust-effects"; }
+  state_remove() { /usr/bin/python3 -I -S "$REAL_SCRIPTS/lib/statedir.py" remove "$@"; }
+  for path in relative "$HOME/"$'profile\tbad' "$HOME/"$'profile\nbad' "$HOME/"$'profile\rbad'; do
+    if trust_store "$path"; then echo 'FAIL malformed trust-store path accepted' >&2; exit 1; fi
+    [[ ! -e $TRUSTED && ! -e $FIXTURE/trust-effects && ! -e $PORTAL_STATE_HOME/ca-import.pem ]]
+  done
+  trust_store "$HOME/profile with spaces"
+  valid_trust_ledger "$(cat "$TRUSTED")"
+  [[ $(grep -c certutil "$FIXTURE/trust-effects") == 1 ]]
+)
+echo 'PASS malformed new trust paths fail before lookup, ledger writes, or certificate effects'

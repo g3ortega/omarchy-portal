@@ -30,7 +30,7 @@ if (mode === "icons") {
   console.log(JSON.stringify(out))
 } else if (mode === "decorate") {
   const { decorate } = loadQmlJs(detectPath)
-  const scan = JSON.parse(execFileSync(process.argv[3]).toString())
+  const scan = JSON.parse(execFileSync(process.argv[3], { maxBuffer: 64 * 1024 * 1024 }).toString())
   if (scan.error) {
     console.error(`portal: ${String(scan.error)}`)
     process.exitCode = 1
