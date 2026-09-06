@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+from contextlib import contextmanager
 import importlib.util
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -123,6 +125,66 @@ class GroupOwnership(unittest.TestCase):
                 self.assertEqual(events[-1], "reap")
                 if not exited_before_term:
                     self.assertIn(signal.SIGKILL, events)
+
+
+class ProcVisibility(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("portal_proc", PROC)
+        self.proc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.proc)
+
+    def test_unreadable_entry_requires_group_evidence(self):
+        entry = SimpleNamespace(name="999999", path="/unreadable-proc/999999")
+        cases = [(424244, False), (424242, True), (ProcessLookupError(), False),
+                 (PermissionError(), True), (OSError(), True)]
+        for result, expected in cases:
+            with self.subTest(result=result):
+                @contextmanager
+                def scan(_path):
+                    yield [entry]
+
+                with patch.object(self.proc.os, "scandir", scan), \
+                        patch("builtins.open", side_effect=PermissionError), \
+                        patch.object(self.proc.os, "getpgid", side_effect=result if isinstance(result, Exception) else None,
+                                     return_value=result) as group, \
+                        patch.object(self.proc.os, "killpg") as signals:
+                    self.assertEqual(self.proc.group_alive(424242, True), expected)
+                    group.assert_called_once_with(999999)
+                    signals.assert_called_once_with(424242, 0)
+
+    def test_zombie_cleanup_ignores_confirmed_foreign_entry(self):
+        real_scan, real_open, real_getpgid = os.scandir, open, os.getpgid
+        entry = SimpleNamespace(name="999999", path="/unreadable-proc/999999")
+
+        @contextmanager
+        def scan(path):
+            with real_scan(path) as entries:
+                yield [entry, *entries]
+
+        def read(path, *args, **kwargs):
+            if path == entry.path + "/stat":
+                raise PermissionError
+            return real_open(path, *args, **kwargs)
+
+        pid = os.fork()
+        if pid == 0:
+            os.setsid()
+            os._exit(0)
+        self.assertGreater(pid, 1)
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        try:
+            with patch.object(self.proc.os, "scandir", scan), patch("builtins.open", read), \
+                    patch.object(self.proc.os, "getpgid", side_effect=lambda target: pid + 1 if target == 999999 else real_getpgid(target)):
+                began = time.monotonic()
+                self.proc.end_group(pid, grace=0.6)
+                self.assertLess(time.monotonic() - began, 0.5, "foreign proc visibility consumed the cleanup grace")
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
+        finally:
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
 
 
 if __name__ == "__main__":

@@ -125,6 +125,13 @@ def group_alive(pid, ignore_zombies=False):
                         fields = stat.read(4096).rsplit(b")", 1)[1].split()
                 except FileNotFoundError:
                     continue
+                except PermissionError:
+                    try:
+                        if os.getpgid(int(entry.name)) != pid:
+                            continue
+                    except ProcessLookupError:
+                        continue
+                    return True
                 if fields[2] == group and fields[0] not in (b"Z", b"X"):
                     return True
     except (OSError, IndexError):
