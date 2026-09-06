@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Process handling for Portal's shell helpers.
 
-  run <stdout-cap> <deadline> -- <argv...>
+  run <stdout-cap> <deadline> [--cleanup-grace <seconds>] -- <argv...>
       Run argv in a session of its own. Its stdout is held up to the cap and
       its stderr up to 4096 bytes; past the cap, or past the deadline
-      (seconds), the whole process group is ended (TERM, then KILL ten
-      seconds later) and nothing is passed on: exit 125 for overflow, 124 for
-      the deadline, so a reader never parses a document that was cut short.
+      (seconds), the whole process group is ended (TERM, then KILL after the
+      cleanup grace, ten seconds by default) and nothing is passed on.
+      Exit 125 for overflow, 124 for the deadline, so a reader never parses
+      a document that was cut short.
       TERM, INT, or HUP sent to this wrapper ends and reaps the group before
       returning 128 plus that signal. Otherwise the child's output and its
       own exit status are returned.
+      Nested rollback commands may shorten cleanup to 0..10 seconds so they
+      finish before their caller's cleanup deadline.
   signal <pid> <starttime> <SIG>
       Signal the process that is <pid> and started at <starttime> (kernel
       ticks, field 22 of /proc/<pid>/stat) through a pidfd, so a pid reused
@@ -181,6 +184,15 @@ def end_group(pid, grace=GRACE):
 
 
 def cmd_run(a):
+    cleanup_grace = RUN_GRACE
+    if len(a) > 2 and a[2] == "--cleanup-grace":
+        try:
+            cleanup_grace = float(a[3])
+        except (IndexError, ValueError):
+            return 2
+        if not 0 <= cleanup_grace <= RUN_GRACE:
+            return 2
+        a = a[:2] + a[4:]
     if len(a) < 3 or a[2] != "--" or not a[0].isdigit():
         sys.stderr.write(__doc__)
         return 2
@@ -275,7 +287,7 @@ def cmd_run(a):
             if status is not None:
                 break
         if status is not None:
-            end_group(pid, RUN_GRACE)
+            end_group(pid, cleanup_grace)
             close_reads()
             reaped = True
             sys.stderr.buffer.write(err[:STDERR_CAP])
@@ -293,7 +305,7 @@ def cmd_run(a):
                 reaped = True
                 break
             if time.monotonic() > limit:
-                end_group(pid, RUN_GRACE)
+                end_group(pid, cleanup_grace)
                 close_reads()
                 reaped = True
                 code = 124 << 8
@@ -307,13 +319,13 @@ def cmd_run(a):
         return os.WEXITSTATUS(code)
     except ForwardedSignal:
         if not reaped:
-            end_group(pid, RUN_GRACE)
+            end_group(pid, cleanup_grace)
             reaped = True
         close_reads()
         return 128 + forwarded[0]
     except BaseException:
         if not reaped:
-            end_group(pid, RUN_GRACE)
+            end_group(pid, cleanup_grace)
         close_reads()
         raise
     finally:

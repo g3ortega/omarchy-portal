@@ -72,7 +72,7 @@ Panel {
   readonly property bool noticeError: feedback ? feedback.error === true : true
 
   function dismissNotice() {
-    dismissedServiceError = service ? service.lastError : ""
+    if (service && (!feedback || feedback.text === service.lastError)) dismissedServiceError = service.lastError
     feedback = null
   }
 

@@ -266,3 +266,31 @@ console.log("Settings setup, revalidation, routing, and selection checks passed"
   assert.equal(canCopy({ dnsPending: true }), false)
   assert.equal(canCopy({ dnsPending: false }), true)
 }
+
+{
+  const serviceSource = readFileSync(new URL("../Service.qml", import.meta.url), "utf8")
+  const queueFunctions = ["setupProvider", "_runAction", "_queueAction"].map(name =>
+    serviceSource.match(new RegExp("^  function " + name + "\\([^)]*\\) \\{[\\s\\S]*?^  \\}", "m"))[0]
+  ).join("\n")
+  for (const running of [false, true]) {
+    const { ctx, provider } = session()
+    const backend = vm.createContext({
+      activeAction: null, queuedAction: null, busyAction: "",
+      actionProcess: { running },
+      actionLaunchTimer: { restart() {} },
+      actionMoment() {}
+    })
+    vm.runInContext(queueFunctions, backend)
+    ctx.service.setupProvider = id => backend.setupProvider(id)
+    ctx.activateProviderSetup(provider)
+    ctx.activateProviderSetup(provider)
+    assert.equal(ctx.pendingSetup === null, !running, "setup modal closes only when the real queue accepts")
+    if (!running) {
+      assert.equal(backend.activeAction.key, "portless:setup")
+      assert.deepEqual(Array.from(backend.queuedAction.args), ["setup", "portless"])
+    } else {
+      assert.equal(backend.activeAction, null)
+      assert.equal(backend.queuedAction, null)
+    }
+  }
+}
