@@ -33,6 +33,8 @@ Restart re-runs the process's own argv in its own directory and environment.
 Restart refuses duplicate environment names and arguments that cannot be decoded
 without changing their bytes. It waits for the original process to exit before
 relaunching and verifies that every listener belongs to the replacement session.
+Startup uses the remaining restart deadline, with time reserved for cleanup if
+the replacement fails to listen.
 A server started through mise, nvm, or a shell hook uses the same launcher.
 Signals only go to processes you own. Stop, pause, and restart ask first and
 name the process. Resume never asks. Naming and sharing actions appear only
@@ -44,7 +46,8 @@ Stopping a share still works when its server is no longer listening.
 
 When `ss` attributes a prefork listener to multiple PIDs, Portal still lists
 the port. It hides pause, restart, stop, and starting a new public share because
-it cannot bind those actions to one process.
+it cannot bind those actions to one process. CPU and memory are unavailable
+until the listener has one owner. Connection and latency charts remain available.
 
 ## Docker services
 

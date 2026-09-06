@@ -471,8 +471,8 @@ def atomic_write(dirfd, name, data, mode=0o600, replace=True):
             data(temp.fd)
         else:
             write_all(temp.fd, data)
-        os.fsync(temp.fd)
         os.fchmod(temp.fd, mode)
+        os.fsync(temp.fd)
         close_atomic_fd(temp)
         previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
         try:

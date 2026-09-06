@@ -266,7 +266,11 @@ emit() {
     fi
     [[ -n $cwd && -d $cwd ]] && root=$(find_project_root "$cwd")
     project_info "$root"
-    [[ -n $pid && -z ${PORT_AMBIGUOUS[$port]} ]] && exclusive_owner=true
+    if [[ -n $pid && -z ${PORT_AMBIGUOUS[$port]} ]]; then
+      exclusive_owner=true
+    else
+      cpu_ticks=""; rss_kb=""
+    fi
 
     local f joined=""
     for f in "$port" "${PORT_ADDRS[$port]}" "$pid" "$comm" "$cmdline" "$cwd" \

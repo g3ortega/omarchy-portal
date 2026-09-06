@@ -590,7 +590,7 @@ cancel_public_start() {  # <provider> <port> <exit status>
 
 cancel_portless_start() {  # <port> <new name> <old name> <old marker: 0|1> <bin> <exit status>
   local marker
-  trap - TERM INT HUP
+  trap '' TERM INT HUP
   marker=$(cat_own "$(namefile portless "$1")" 256) || exit "$6"
   [[ $marker == "$2" ]] && rollback_portless "$1" "$2" "$3" "$4" "$5" >/dev/null 2>&1
   exit "$6"

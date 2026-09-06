@@ -123,14 +123,23 @@ def end_group(pid, grace=GRACE):
         except OSError:
             return True
 
+    reap()
     try:
         os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        # A just-forked child may not have reached setsid yet. An unreaped
+        # direct child still owns its PID, so this cannot hit a successor.
+        if not reaped:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
     except OSError:
         pass
     limit = time.monotonic() + grace
     while time.monotonic() < limit:
         reap()
-        if group_gone():
+        if group_gone() and reaped:
             break
         time.sleep(0.05)
     else:
@@ -138,6 +147,11 @@ def end_group(pid, grace=GRACE):
             os.killpg(pid, signal.SIGKILL)
         except OSError:
             pass
+        if not reaped:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     if not reaped:
         try:
             os.waitpid(pid, 0)
