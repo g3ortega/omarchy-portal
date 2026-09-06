@@ -4076,6 +4076,7 @@ def wait_for_fd(pid, identity, timeout=5):
 
 python = "/usr/bin/python3"
 processes = []
+retired_lock_fd = None
 try:
     owner = subprocess.Popen([python, "-I", "-S", str(locker_script), module_path, "lock-clean", str(root),
                               str(owner_entered), str(owner_release),
@@ -4084,7 +4085,9 @@ try:
     wait_for(owner_entered)
     old_root = root.stat()
     old_root_identity = (old_root.st_dev, old_root.st_ino)
-    old = root.joinpath(".lock").stat()
+    # Keep the unlinked inode allocated after both contenders close it.
+    retired_lock_fd = os.open(root / ".lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    old = os.fstat(retired_lock_fd)
     old_identity = (old.st_dev, old.st_ino)
 
     waiter = subprocess.Popen([python, "-I", "-S", str(locker_script), module_path, "lock", str(root),
@@ -4192,6 +4195,8 @@ try:
     if elapsed < 0.08 or elapsed > 2 or contended_root.exists():
         raise RuntimeError(f"cleanup did not survive brief namespace contention: {elapsed:.3f}s")
 finally:
+    if retired_lock_fd is not None:
+        os.close(retired_lock_fd)
     owner_release.touch()
     cleanup_release.touch()
     replacement_release.touch()
