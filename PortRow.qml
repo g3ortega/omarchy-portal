@@ -270,7 +270,7 @@ Item {
           }
 
           PanelActionButton {
-            visible: row.entry && row.entry.pid !== null
+            visible: row.entry && row.entry.kind !== "orphan"
             iconText: Icons.g("metrics")
             tooltipText: "Charts"
             foreground: row.foreground

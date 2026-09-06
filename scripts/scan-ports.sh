@@ -317,4 +317,5 @@ emit | jq -Rsc '
     | .scope = (if (.addresses | any(. == "0.0.0.0" or . == "*" or . == "::")) then "all"
                 elif (.addresses | all(. == "127.0.0.1" or . == "::1" or startswith("127."))) then "local"
                 else "lan" end))
-  | {version: 1, ports: sort_by(.port)}'
+  | {version: 1, ports: sort_by(.port)}' \
+  | /usr/bin/python3 -I -S "$(dirname -- "${BASH_SOURCE[0]}")/lib/docker.py"

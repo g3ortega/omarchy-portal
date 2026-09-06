@@ -2,6 +2,28 @@
 
 Detection uses evidence the scanner emits. Rules now own HTTP eligibility through http, httpPorts and httpDeps metadata. HTTP_ADAPTERS collects Nest and React Router adapter names, and NON_HTTP_COMMS keeps database/native-protocol exclusions above framework inference. No runtime or conventional port alone enables an active HTTP request.
 
+## Runtime and container evidence
+
+Interpreter rules carry a runtime family. A known process runtime must match
+before project dependencies or markers can select that framework. This keeps a
+Rails process with React dependencies labeled Rails and a Vite process in the
+same project labeled Vite. Browser processes do not inherit either framework.
+Compiled project markers require executable evidence rather than the working
+directory alone.
+
+Local Docker metadata adds container names and image labels only to matching
+published host TCP listeners. Requests to the standard local Unix sockets share
+a 500 ms deadline and a 1 MiB response limit. Remote contexts are ignored.
+The exact LiteLLM image basenames enable HTTP timing. Other images remain generic
+Docker services. Container metadata never grants process ownership or reports
+proxy CPU and memory as application metrics. Metadata changes are part of the
+service's scan cache key.
+
+The local ten-scan median rose from 228 ms to 259 ms with Docker enrichment.
+The helper is short-lived. Peak RSS during the measured scan was about 19 MiB, compared with
+about 10 MiB for the scan without it. The metadata format follows the
+[Docker Engine container-list API](https://docs.docker.com/reference/api/engine/version/v1.46/).
+
 ## Added signals
 
 | IDs | Observable evidence | HTTP policy |

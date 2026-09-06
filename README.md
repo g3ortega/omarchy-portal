@@ -37,6 +37,8 @@ release from GitHub. Cloudflared and ngrok connect to their own services.
 - Finds every listening TCP port with a couple of `ss` calls and names the
   stack behind it, with over 80 detection rules for frameworks, runtimes,
   and services such as Next.js, Vite, Rails, Django, Phoenix, Go, Postgres, and Redis.
+- Identifies published Docker services through local Docker sockets, including
+  LiteLLM. Container-only ports stay out of the host list.
 - Gives a port a local name like `https://acme-web.localhost:1355` through
   [Portless](https://github.com/vercel-labs/portless). New proxies serve this machine
   only. Existing LAN routes are labeled "LAN name".

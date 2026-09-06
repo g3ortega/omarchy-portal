@@ -261,7 +261,7 @@ Item {
       seenPorts[e.port] = true
       identity.push([e.port, e.addresses, e.pid, e.start, e.comm, e.cmdline, e.argv,
                      e.argvTruncated, e.cwd, e.projectRoot, e.projectName, e.markers, e.deps,
-                     e.exclusiveOwner])
+                     e.exclusiveOwner, e.container])
     }
     _cpuPrev = nextCpu
     stats = nextStats

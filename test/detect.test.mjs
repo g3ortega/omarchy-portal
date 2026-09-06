@@ -74,6 +74,73 @@ check("Laravel with a package.json is still Laravel", e({
   port: 8000, comm: "php", markers: ["artisan", "package.json"]
 }), { kind: "laravel" })
 
+const mixedProject = ["package.json", "Gemfile", "config.ru", "bin/rails"]
+check("live Puma Rails listener with React assets is Rails", e({
+  port: 3000, comm: "ruby", cmdline: "puma 7.2.1 (tcp://127.0.0.1:3000) [platform]",
+  markers: mixedProject, deps: ["react"]
+}), { kind: "rails", httpProbe: true })
+check("Vite listener in the same Rails project stays Vite", e({
+  port: 5173, comm: "node", cmdline: "node node_modules/vite/bin/vite.js",
+  markers: mixedProject, deps: ["vite", "react"]
+}), { kind: "vite", httpProbe: true })
+for (const [name, fields, kind] of [
+  ["Rack", { comm: "ruby", markers: ["Gemfile", "config.ru"] }, "rack"],
+  ["Laravel", { comm: "php", markers: ["artisan"] }, "laravel"],
+  ["Django", { comm: "python3.12", markers: ["manage.py"] }, "django"],
+  ["Uvicorn", { comm: "python3", cmdline: "uvicorn app:app" }, "uvicorn"],
+  ["Redis", { comm: "redis-server" }, "redis"],
+  ["Java", { comm: "java", markers: ["pom.xml"] }, "javadev"],
+  ["Go", { comm: "main", markers: ["go.mod"], argv: ["/p/app/main"], projectRoot: "/p/app" }, "go"],
+  ["Rust", { comm: "app", markers: ["Cargo.toml"], argv: ["./target/debug/app"], cwd: "/p/app", projectRoot: "/p/app" }, "rust"]
+]) {
+  check(`${name} listener ignores frontend dependencies and markers`, e({
+    port: 41000, ...fields, deps: ["next", "vite", "react"],
+    markers: [...(fields.markers || []), "package.json", "angular.json"]
+  }), { kind })
+}
+for (const runtime of ["node", "node-MainThread", "bun", "deno"]) {
+  check(`${runtime} retains framework evidence in mixed project`, e({
+    port: 41000, comm: runtime, markers: mixedProject, deps: ["react"]
+  }), { kind: "react" })
+}
+check("rewritten Next.js title retains framework classification", e({
+  port: 3000, comm: "next-server (v1", cmdline: "next-server (v15.0.0)", deps: ["next"]
+}), { kind: "next" })
+check("Nuxt process title retains framework classification", e({
+  port: 3000, comm: "nuxt dev", cmdline: "nuxt dev", deps: ["nuxt", "vite"]
+}), { kind: "nuxt" })
+check("missing process information retains project dependency fallback", e({
+  port: 3000, markers: ["package.json"], deps: ["react"]
+}), { kind: "react" })
+
+for (const comm of ["chrome", "agent-browser-l"]) {
+  for (const markers of [mixedProject, ["manage.py"], ["artisan"], ["mix.exs"], ["go.mod"], ["Cargo.toml"]]) {
+    check(`${comm} does not inherit project stack ${markers.join(",")}`, e({
+      port: 35713, comm, markers, deps: ["react"],
+      argv: ["/home/x/.cache/tools/" + comm], projectRoot: "/p/app", cwd: "/p/app"
+    }), { kind: "unknown", httpProbe: false })
+  }
+}
+for (const argv of [["./target/debug/server"], ["../app/target/debug/server"], ["/p/app/target/debug/server"]]) {
+  check(`Rust project executable ${argv[0]} keeps marker evidence`, e({
+    port: 41000, comm: "server", argv, markers: ["Cargo.toml"], projectRoot: "/p/app", cwd: "/p/app"
+  }), { kind: "rust" })
+}
+check("relative executable outside project does not inherit Rust", e({
+  port: 41000, comm: "server", argv: ["../other/server"], markers: ["Cargo.toml"],
+  projectRoot: "/p/app", cwd: "/p/app"
+}), { kind: "unknown" })
+check("Go temporary build traversal does not imply a Go executable", e({
+  port: 41000, comm: "server", argv: ["/tmp/go-build12345/b001/exe/../../../tool"],
+  markers: ["go.mod"], projectRoot: "/p/app"
+}), { kind: "unknown" })
+check("missing executable is not proof of a compiled project", e({
+  port: 41000, comm: "server", markers: ["Cargo.toml"], projectRoot: "/p/app"
+}), { kind: "unknown" })
+check("Go temporary build executable keeps marker evidence", e({
+  port: 41000, comm: "main", argv: ["/tmp/go-build12345/b001/exe/main"], markers: ["go.mod"], projectRoot: "/p/app"
+}), { kind: "go" })
+
 check("Sidekiq is a service, not a dev server", e({
   port: 7433, comm: "ruby", cmdline: "sidekiq 7.2.0 acme [0 of 5 busy]"
 }), { kind: "sidekiq", category: "service" })
@@ -97,8 +164,8 @@ check("RabbitMQ is not Phoenix", e({ port: 5672, comm: "beam.smp", cmdline: "bea
 check("Storybook beats vite in the same project", e({ port: 6006, comm: "node", deps: ["storybook", "vite"] }), { kind: "storybook" })
 check("Elixir gets its brand color", e({ port: 4000, comm: "beam.smp", markers: ["mix.exs"] }), { color: "#4b275f" })
 check("Laravel via artisan", e({ port: 8000, comm: "php", markers: ["artisan", "composer.json"] }), { kind: "laravel" })
-check("Go via go.mod", e({ port: 8080, comm: "main", markers: ["go.mod"] }), { kind: "go", label: "Go" })
-check("Rust via Cargo.toml", e({ port: 8080, comm: "server", markers: ["Cargo.toml"] }), { kind: "rust" })
+check("Go via go.mod", e({ port: 8080, comm: "main", markers: ["go.mod"], argv: ["/p/app/main"], projectRoot: "/p/app" }), { kind: "go", label: "Go" })
+check("Rust via Cargo.toml", e({ port: 8080, comm: "server", markers: ["Cargo.toml"], argv: ["./target/debug/server"], cwd: "/p/app", projectRoot: "/p/app" }), { kind: "rust" })
 
 // --- Backing services identified by well-known port with no process info
 check("PostgreSQL by port", e({ port: 5432 }), { kind: "postgres", category: "service", web: false })
@@ -112,6 +179,21 @@ check("DynamoDB Local via cmdline", e({
 // --- System ports are grouped away from your work
 check("DNS is system", e({ port: 53 }), { kind: "dns", category: "system" })
 check("CUPS is system", e({ port: 631 }), { kind: "cups", category: "system" })
+
+for (const image of ["ghcr.io/berriai/litellm:main-stable", "ghcr.io/berriai/litellm-database@sha256:abcd"]) {
+  check(`LiteLLM container ${image} exposes its HTTP interface`, e({
+    port: 43127, container: { name: "llm-proxy", image }, exclusiveOwner: false,
+    markers: ["package.json", "bin/rails"], deps: ["react"]
+  }), { kind: "litellm", label: "LiteLLM", name: "llm-proxy", comm: "Docker",
+    category: "service", icon: "docker", httpProbe: true, url: "http://localhost:43127", process: null })
+}
+for (const image of ["acme/my-litellm-helper:latest", "registry.local:5000/team/other:litellm", "acme/litellm-tools:latest"]) {
+  check(`generic Docker image ${image} does not imply HTTP`, e({
+    port: 43127, container: { name: "worker", image }, exclusiveOwner: false,
+    markers: ["package.json", "bin/rails"], deps: ["next"]
+  }), { kind: "docker", label: "Docker", name: "worker", comm: "Docker",
+    category: "service", httpProbe: false, url: "", process: null })
+}
 
 // --- Fallbacks
 check("unknown process on a web port still offers a URL", e({

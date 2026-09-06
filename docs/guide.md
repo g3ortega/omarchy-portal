@@ -46,6 +46,21 @@ When `ss` attributes a prefork listener to multiple PIDs, Portal still lists
 the port. It hides pause, restart, stop, and starting a new public share because
 it cannot bind those actions to one process.
 
+## Docker services
+
+Portal reads published TCP port metadata from the standard local Docker sockets,
+including rootless Docker. A matching host listener shows the container name and
+service label. LiteLLM images are recognized as HTTP services. Other images show
+as Docker without assuming an HTTP protocol.
+
+Container-only ports are not host listeners and do not appear. Remote Docker
+contexts are ignored. If the local socket is unavailable or inaccessible, Portal
+continues with host socket discovery. It never requests sudo or changes containers.
+
+Container rows show host connection counts and available transport timing.
+Process controls and process CPU/memory are unavailable because the host proxy
+is not the container's application process.
+
 ## Charts
 
 <img src="images/charts.png" width="480" alt="Latency, connections, CPU and memory">

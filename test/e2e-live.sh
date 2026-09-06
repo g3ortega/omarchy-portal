@@ -162,14 +162,14 @@ impersonate() {  # <binname> <port> <fixture> <marker...>
   local name="$1" port="$2" fix="$3"; shift 3
   local d; d=$(fixture "$fix")
   local m; for m in "$@"; do touch "$d/$m"; done
-  cp "$PY" "$BIN/$name"
-  start "$port" "$d" "$BIN/$name" "$TMP/srv.py" "$port" "$fix"
+  cp "$PY" "$d/$name"
+  start "$port" "$d" "$d/$name" "$TMP/srv.py" "$port" "$fix"
 }
 impersonate goapp    45910 go-svc      go.mod;        EXPECT[45910]=go
 impersonate rustapp  45911 rust-svc    Cargo.toml;    EXPECT[45911]=rust
 impersonate beam.smp 45912 phoenix-app mix.exs;       EXPECT[45912]=elixir
 impersonate java     45913 spring-app  pom.xml;       EXPECT[45913]=javadev
-impersonate artisand 45914 laravel-app artisan;       EXPECT[45914]=laravel
+impersonate php      45914 laravel-app artisan;       EXPECT[45914]=laravel
 # --- scanner edge cases: a node with no evidence, control bytes and an oversized
 # argument on the command line, an IPv6-only bind ---
 d=$(fixture plain-node); start 45920 "$d" node "$TMP/srv.js" 45920 plain;                      EXPECT[45920]=node
