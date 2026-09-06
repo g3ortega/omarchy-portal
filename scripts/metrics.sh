@@ -1,83 +1,68 @@
 #!/bin/bash
-# Metric retention for watched ports, and the watched-set itself.
-#
-# Storage: $XDG_STATE_HOME/portal/metrics/<port>.jsonl — one JSON object per
-# sample, appended once per scan for each watched port. Raw 5s samples are
-# kept for roughly 24h (17280 lines) and trimmed in place past that; history
-# beyond a day is not this plugin's job. State lives in XDG_STATE, never in
-# the plugin directory (writes there would trigger Omarchy's hot reload).
-#
-#   watched                     -> {"ok":true,"ports":[...]}
-#   watch <port> / unwatch <port>
-#   append-batch <json-map>     {"3000":{...},"5173":{...}}, one call per scan
-#   read <port>                 -> {"ok":true,"samples":[...]}
+# Watched ports and retained metrics live outside the plugin directory.
 set -o pipefail
 umask 077   # samples and the watched set are the user's alone
+METRICS_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/metrics.sh"
 # shellcheck source=lib/files.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib/files.sh"
 
-STATE_DIR="${PORTAL_METRICS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/portal}"
+STATE_DIR="$PORTAL_STATE_HOME"
 METRICS_DIR="$STATE_DIR/metrics"
 WATCHED="$STATE_DIR/watched.json"
-MAX_LINES=17280
-MAX_BYTES=4194304   # a sample file is read through this cap, whatever is on disk
 
 die() { jq -nc --arg e "$1" '{ok:false,error:$e}'; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo '{"ok":false,"error":"jq not found"}'; exit 0; }
-own_dir "$STATE_DIR" && own_dir "$METRICS_DIR" || die "state directory is not a private directory of yours: $STATE_DIR"
 
-valid_port() { [[ ${1:-} =~ ^[0-9]+$ ]] && (( $1 > 0 && $1 < 65536 )); }
+case "${1:-}" in
+  append-batch)
+    printf '%s' "${2:-}" | state metrics "$METRICS_DIR" append "${3:-}" 2>/dev/null || die "could not append metrics"
+    exit
+    ;;
+  query|stats)
+    action=$1
+    shift
+    state metrics "$METRICS_DIR" "$action" "$@" 2>/dev/null || die "could not query metrics"
+    exit
+    ;;
+esac
+
+case "${1:-}" in
+  watch|unwatch)
+    if [[ ${PORTAL_METRICS_LOCKED:-} != "$STATE_DIR" ]]; then
+      own_dir "$STATE_DIR" || die "state directory is not a private directory of yours: $STATE_DIR"
+      PORTAL_METRICS_LOCKED="$STATE_DIR" state lock "$STATE_DIR" nowait .metrics.lock -- \
+        /usr/bin/bash "$METRICS_SCRIPT" "$@"
+      lock_rc=$?
+      (( lock_rc == 75 )) && die "another watched-port update is in progress"
+      exit "$lock_rc"
+    fi
+    ;;
+esac
+
+own_dir "$STATE_DIR" "$METRICS_DIR" || die "state directory is not a private directory of yours: $STATE_DIR"
 
 read_watched() {
-  own_file "$WATCHED" || { echo '[]'; return; }
-  cat_own "$WATCHED" 65536 | jq -cs '.[0] | if type == "array" then . else [] end' 2>/dev/null || echo '[]'
-}
-
-# Trim opportunistically most of the time, but always once the overshoot
-# passes a hard bound — RANDOM must not be load-bearing for disk growth.
-trim() {
-  local f="$1" lines
-  lines=$(wc -l < "$f")
-  if (( lines > MAX_LINES + 2000 )) || { (( RANDOM % 100 == 0 )) && (( lines > MAX_LINES )); }; then
-    tail -n "$MAX_LINES" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-  fi
+  local raw
+  if [[ ! -e $WATCHED && ! -L $WATCHED ]]; then echo '[]'; return 0; fi
+  raw=$(cat_own "$WATCHED" 65536) || return 1
+  jq -cs '.[0] | if type == "array" then . else [] end' <<<"$raw" 2>/dev/null || echo '[]'
 }
 
 case "${1:-}" in
   watched)
-    printf '{"ok":true,"ports":%s}\n' "$(read_watched)"
+    current=$(read_watched) || die "could not read the watched-port set safely"
+    printf '{"ok":true,"ports":%s}\n' "$current"
     ;;
   watch|unwatch)
     valid_port "${2:-}" || die "invalid port"
-    rm -f -- "$WATCHED.tmp"
+    current=$(read_watched) || die "could not read the watched-port set safely"
     if [[ $1 == watch ]]; then
-      read_watched | jq -c --argjson p "$2" '(. + [$p]) | unique' > "$WATCHED.tmp"
+      jq -c --argjson p "$2" '(. + [$p]) | unique' <<<"$current" | state write "$WATCHED" || die "could not save"
     else
-      read_watched | jq -c --argjson p "$2" 'map(select(. != $p))' > "$WATCHED.tmp"
-      rm -f -- "$METRICS_DIR/$2.jsonl"
+      jq -c --argjson p "$2" 'map(select(. != $p))' <<<"$current" | state write "$WATCHED" || die "could not save"
     fi
-    mv -f -- "$WATCHED.tmp" "$WATCHED"
-    printf '{"ok":true,"ports":%s}\n' "$(read_watched)"
+    current=$(read_watched) || die "could not verify the watched-port set"
+    printf '{"ok":true,"ports":%s}\n' "$current"
     ;;
-  append-batch)
-    # Only re-serialized canonical JSON ever reaches disk, whatever was in the
-    # argument list.
-    lines=$(jq -r 'to_entries[] | "\(.key)\t\(.value | tojson)"' <<<"${2:-}" 2>/dev/null) || die "not a JSON object"
-    while IFS=$'\t' read -r port line; do
-      valid_port "$port" || continue
-      f="$METRICS_DIR/$port.jsonl"
-      [[ -e $f && ! -f $f || -L $f ]] && rm -f -- "$f"   # never append through a link
-      printf '%s\n' "$line" >> "$f"
-      trim "$f"
-    done <<<"$lines"
-    echo '{"ok":true}'
-    ;;
-  read)
-    valid_port "${2:-}" || die "invalid port"
-    f="$METRICS_DIR/$2.jsonl"
-    own_file "$f" || { echo '{"ok":true,"samples":[]}'; exit 0; }
-    # A line torn by a crash mid-append must not cost the rest of the file.
-    cat_own "$f" "$MAX_BYTES" | jq -R 'fromjson?' | jq -sc '{ok:true, samples: .}' || echo '{"ok":true,"samples":[]}'
-    ;;
-  *) echo '{"ok":false,"error":"usage: metrics.sh watched|watch <port>|unwatch <port>|append-batch <json-map>|read <port>"}' ;;
+  *) echo '{"ok":false,"error":"usage: metrics.sh watched|watch <port>|unwatch <port>|append-batch <json-map>|query <port> <seconds> <end> [buckets]|stats"}' ;;
 esac

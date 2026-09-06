@@ -6,8 +6,131 @@
 PORTLESS_DIR="${PORTLESS_STATE_DIR:-$HOME/.portless}"
 # shellcheck source=files.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/files.sh"
-# portless's own state is read with the same owner-only rules as ours.
-routes_json() { cat_own "$PORTLESS_DIR/routes.json" 1048576; }
+
+# The browser trust for portless's CA, shared by setup and removal.
+CA="$PORTLESS_DIR/ca.pem"
+NSSDB="$HOME/.pki/nssdb"
+NICK="portless Local CA"
+firefox_profiles() {
+  local d
+  for d in "$HOME"/.mozilla/firefox/*/; do
+    [[ -f "$d/cert9.db" || -f "$d/prefs.js" ]] && printf '%s\n' "${d%/}"
+  done
+}
+
+# portless's own state files, read in one descriptor-relative pass per
+# command (owner-only rules, same as ours). Commands call portless_state_load
+# once in the parent shell; a caller inside $(...) that finds nothing loaded
+# loads for itself. Reload after anything that changes routes.
+PORTLESS_STATE=""
+PORTLESS_STATE_ERROR=""
+portless_routes_valid() {
+  /usr/bin/python3 -I -S -c '
+import json
+import re
+import sys
+from decimal import Decimal, InvalidOperation
+
+CAP = 1048576
+LABEL = re.compile(rb"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?").fullmatch
+ONE = Decimal("1")
+MAX_PORT = Decimal("65535")
+
+def reject_constant(_value):
+    raise ValueError
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError
+        result[key] = value
+    return result
+
+def strict_loads(value):
+    return json.loads(
+        value,
+        parse_int=Decimal,
+        parse_float=Decimal,
+        parse_constant=reject_constant,
+        object_pairs_hook=unique_object,
+        strict=True,
+    )
+
+def mathematical_integer(value):
+    return type(value) is Decimal and value.is_finite() and value == value.to_integral_value()
+
+def canonical_hostname(value):
+    if type(value) is not str:
+        return False
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return 1 <= len(encoded) <= 253 and all(
+        1 <= len(label) <= 63 and LABEL(label) is not None
+        for label in encoded.split(b".")
+    )
+
+def valid_routes(routes):
+    if type(routes) is not list:
+        return False
+    hostnames = set()
+    for route in routes:
+        if type(route) is not dict:
+            return False
+        hostname = route.get("hostname")
+        port = route.get("port")
+        pid = route.get("pid")
+        if not canonical_hostname(hostname) or hostname in hostnames:
+            return False
+        if not mathematical_integer(port) or not ONE <= port <= MAX_PORT:
+            return False
+        if not mathematical_integer(pid) or pid.is_signed() and not pid.is_zero():
+            return False
+        hostnames.add(hostname)
+    return True
+
+try:
+    snapshot = strict_loads(sys.stdin.buffer.read().decode("utf-8"))
+    if type(snapshot) is not dict or type(snapshot.get("files")) is not dict:
+        raise ValueError
+    if "routes.json" not in snapshot["files"]:
+        raise SystemExit(0)
+    document = snapshot["files"]["routes.json"]
+    if type(document) is not str or len(document.encode("utf-8")) > CAP:
+        raise ValueError
+    routes = strict_loads(document)
+except (InvalidOperation, UnicodeDecodeError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if valid_routes(routes) else 1)
+'
+}
+# Returns nonzero when the read was refused (for example the directory is over
+# its entry cap), so a caller can tell "refused" from "empty" instead of acting
+# as if every route vanished.
+portless_state_load() {
+  local snapshot
+  PORTLESS_STATE=""
+  PORTLESS_STATE_ERROR=""
+  if [[ ! -e $PORTLESS_DIR && ! -L $PORTLESS_DIR ]]; then
+    PORTLESS_STATE='{"files":{},"refused":[]}'
+    return 0
+  fi
+  snapshot=$(state dump "$PORTLESS_DIR" 1048576 512 routes.json proxy.port proxy.tlds proxy.tld 2>/dev/null) \
+    || { PORTLESS_STATE_ERROR="state directory refused"; return 1; }
+  jq -e '(.files | type == "object") and ((.refused // []) | length == 0)' <<<"$snapshot" >/dev/null 2>&1 \
+    || { PORTLESS_STATE_ERROR="requested state leaf refused"; return 1; }
+  portless_routes_valid < <(printf '%s' "$snapshot") >/dev/null 2>&1 \
+    || { PORTLESS_STATE_ERROR="routes.json is malformed"; return 1; }
+  PORTLESS_STATE=$snapshot
+  return 0
+}
+portless_file() {  # <name>: contents, or empty
+  [[ -n $PORTLESS_STATE ]] || portless_state_load || return 1
+  jq -r --arg n "$1" '.files[$n] // empty' <<<"$PORTLESS_STATE"
+}
+routes_json() { portless_file routes.json; }
 
 # Probe for a live proxy instead of trusting state files: pidfiles go stale,
 # kill -0 answers EPERM (not "running") for a root-owned proxy, and the
@@ -16,19 +139,69 @@ routes_json() { cat_own "$PORTLESS_DIR/routes.json" 1048576; }
 PROBE_PORT=""
 PROBE_SCHEME=""
 portless_probe_reset() { PROBE_PORT=""; PROBE_SCHEME=""; }
+portless_listener_scope() {  # <proxy port> [socket snapshot]: local|lan|unknown
+  local port sockets
+  port=$(canonical_port "$1") || { echo unknown; return; }
+  if (( $# > 1 )); then sockets=$2
+  else sockets=$(ss -tlnH "sport = :$port" 2>/dev/null) || { echo unknown; return; }
+  fi
+  printf '%s' "$sockets" | /usr/bin/python3 -I -S -c '
+import ipaddress, sys
+found = lan = malformed = False
+for row in sys.stdin:
+    fields = row.split()
+    if len(fields) < 5:
+        malformed = True
+        continue
+    host, separator, port = fields[3].rpartition(":")
+    if not separator or not port.isdecimal():
+        malformed = True
+        continue
+    if int(port) != int(sys.argv[1]):
+        continue
+    found = True
+    if host == "*":
+        lan = True
+        continue
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+        address = getattr(address, "ipv4_mapped", None) or address
+        lan |= not address.is_loopback
+    except ValueError:
+        malformed = True
+print("lan" if lan else "local" if found and not malformed else "unknown")
+' "$port" || echo unknown
+}
+portless_proxy_scope() {  # [socket snapshot]: local|lan|unknown, including an unresponsive proxy
+  local sockets recorded candidates=" 443 80 1355 " endpoint port
+  if (( $# )); then sockets=$1
+  else sockets=$(ss -tlnH 2>/dev/null) || { echo unknown; return; }
+  fi
+  if portless_probe; then
+    portless_listener_scope "$PROBE_PORT" "$sockets"
+    return
+  fi
+  recorded=$(canonical_port "$(portless_file proxy.port | head -n 1)") && candidates+="$recorded "
+  while read -r _ _ _ endpoint _; do
+    [[ -n $endpoint ]] || { [[ -z $sockets ]] && break; echo unknown; return; }
+    port=${endpoint##*:}
+    [[ $port =~ ^[0-9]+$ ]] || { echo unknown; return; }
+    [[ $candidates != *" $port "* ]] || { echo unknown; return; }
+  done <<<"$sockets"
+  echo local
+}
 portless_probe() {
   [[ -n $PROBE_PORT ]] && return 0
-  local cand p seen=" " saved=""
-  saved=$(read_own "$PORTLESS_DIR/proxy.port" 64)
-  cand="$saved 443 80"
+  local cand p seen=" "
+  cand="$(portless_file proxy.port | head -n 1) 443 80"
   for p in $cand; do
     [[ $p =~ ^[0-9]+$ ]] || continue
     [[ $seen == *" $p "* ]] && continue
     seen+="$p "
     local scheme
     for scheme in https http; do
-      if curl -sk --max-time 0.4 -o /dev/null -D - "$scheme://127.0.0.1:$p/" 2>/dev/null \
-           | grep -qi '^x-portless:'; then
+      if curl -q -sk --max-time 0.4 --max-redirs 0 -o /dev/null -D - "$scheme://127.0.0.1:$p/" 2>/dev/null \
+           | head -c 16384 | grep -qi '^x-portless:'; then
         PROBE_PORT="$p"; PROBE_SCHEME="$scheme"
         return 0
       fi
@@ -47,11 +220,11 @@ portless_serving_routes() {
   [[ -n $first ]] || return 0   # nothing registered: nothing to disprove
   valid_tld "$first" || return 0
   local code
-  code=$(curl -sk --max-time 0.6 -o /dev/null -w '%{http_code}' \
+  code=$(curl -q -sk --max-time 0.6 --max-redirs 0 -o /dev/null -w '%{http_code}' \
     --resolve "$first:$PROBE_PORT:127.0.0.1" \
     "$PROBE_SCHEME://$first:$PROBE_PORT/" 2>/dev/null)
   [[ $code == 404 ]] || return 0
-  curl -sk --max-time 0.6 \
+  curl -q -sk --max-time 0.6 --max-redirs 0 --max-filesize 4096 \
     --resolve "$first:$PROBE_PORT:127.0.0.1" \
     "$PROBE_SCHEME://$first:$PROBE_PORT/" 2>/dev/null | head -c 4096 \
     | grep -qi portless && return 1
@@ -75,9 +248,36 @@ configured_tld() {
 
 # The bare name portless holds for a port, if any.
 portless_route_name() {  # <port>
-  local n
-  n=$(routes_json | jq -r --argjson p "$1" 'first(.[] | select(.port == $p) | .hostname) // empty' 2>/dev/null)
-  printf '%s' "${n%%.*}"
+  local n port tld suffix=""
+  port=$(canonical_port "${1:-}") || return 1
+  n=$(routes_json | jq -r --argjson p "$port" 'first(.[] | select(.port == $p) | .hostname) // empty' 2>/dev/null) || return 1
+  [[ -n $n ]] || return 0
+  while read -r tld || [[ -n $tld ]]; do
+    [[ $n == *".$tld" && ${#tld} -gt ${#suffix} ]] && suffix=$tld
+  done < <(portless_tld_arg | tr ',' '\n')
+  [[ -n $suffix ]] || return 1
+  printf '%s' "${n%.$suffix}"
+}
+
+portless_alias_routes() {  # <name>: every matching hostname under the configured suffixes
+  local name=${1,,} tlds
+  valid_tld "$name" || return 1
+  tlds=$(portless_tld_arg) || return 1
+  routes_json | jq -c --arg n "$name" --arg tlds "$tlds" \
+    '[.[] | select(.hostname as $h | any($tlds | split(",")[]; $h == ($n + "." + .)))]'
+}
+
+portless_alias_safe() {  # <name> <port>: unclaimed or static aliases for this port only
+  local routes port
+  port=$(canonical_port "$2") || return 1
+  routes=$(portless_alias_routes "$1") || return 1
+  jq -e --argjson p "$port" 'all(.[]; .pid == 0 and .port == $p)' <<<"$routes" >/dev/null
+}
+
+portless_managed_port() {  # <port>
+  local port
+  port=$(canonical_port "$1") || return 1
+  routes_json | jq -e --argjson p "$port" 'any(.[]; .port == $p and .pid != 0)' >/dev/null
 }
 
 # The URL portless serves for an already-assembled hostname. Scheme and port
@@ -116,13 +316,12 @@ portless_tld_arg() {
 # The TLD set the LIVE proxy serves: proxy.tlds (JSON array or comma/line
 # list), the legacy proxy.tld, else the built-in localhost default.
 portless_running_tlds() {
-  local f="$PORTLESS_DIR/proxy.tlds" t
+  local raw t
   {
-    if own_file "$f" && [[ -s $f ]]; then
-      if [[ $(head -c1 -- "$f") == "[" ]]; then cat_own "$f" 4096 | jq -r '.[]' 2>/dev/null
-      else cat_own "$f" 4096 | tr ',' '\n'; fi
-    elif own_file "$PORTLESS_DIR/proxy.tld" && [[ -s "$PORTLESS_DIR/proxy.tld" ]]; then
-      cat_own "$PORTLESS_DIR/proxy.tld" 4096
+    if raw=$(portless_file proxy.tlds) && [[ -n $raw ]]; then
+      if [[ $raw == \[* ]]; then jq -r '.[]' <<<"$raw" 2>/dev/null; else tr ',' '\n' <<<"$raw"; fi
+    elif raw=$(portless_file proxy.tld) && [[ -n $raw ]]; then
+      printf '%s\n' "$raw"
     else
       echo localhost
     fi
@@ -131,17 +330,19 @@ portless_running_tlds() {
   done
 }
 
-# The command that reaches the end state: portless on 443, serving THIS user's
-# routes. portless hard-checks uid before binding a port under 1024 and
+# Explicit proxy repair preserves the current port when provided. Portless
+# hard-checks uid before binding a port under 1024 and
 # self-elevates through `sudo env`, forwarding every PORTLESS_* variable;
 # PORTLESS_STATE_DIR overrides state resolution outright. `sudo portless` is
 # never used: version-managed installs are not on root's PATH; eviction goes
 # through fuser by port number.
-portless_fix_cmd() {  # $1 = "evict" when another proxy owns the port
-  local stop="portless proxy stop"
-  [[ ${1:-} == evict ]] && stop="sudo fuser -k 443/tcp; sleep 1"
-  printf '%s; PORTLESS_STATE_DIR="$HOME/.portless" portless proxy start -p 443 --tld %s' \
-    "$stop" "$(portless_tld_arg)"
+portless_fix_cmd() {  # [evict] [port]
+  local stop="portless proxy stop" port skip_trust=""
+  port=$(canonical_port "${2:-443}") || return 1
+  (( port >= 1024 )) && skip_trust=" --skip-trust"
+  [[ ${1:-} == evict ]] && stop="sudo fuser -k $port/tcp; sleep 1"
+  printf '%s; PORTLESS_LAN=0 PORTLESS_LAN_IP= PORTLESS_STATE_DIR="$HOME/.portless" portless proxy start -p %s%s --tld %s' \
+    "$stop" "$port" "$skip_trust" "$(portless_tld_arg)"
 }
 
 # Wildcard resolution for the configured TLD. .localhost needs nothing —

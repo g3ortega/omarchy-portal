@@ -1,19 +1,14 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Controls as Controls
 import qs.Ui
 import qs.Commons
 import "lib/Icons.js" as Icons
 import "lib/Colors.js" as Colors
 import "lib/Format.js" as Format
+import "lib/History.js" as History
 
-// Charts for one port: identity, live vitals, and four sparklines.
-// Reached from the row's metrics icon or the l key.
-//
-// Data shape: one pass per scan over the merged series computes exact
-// lo/hi/last for every metric, and a strided view (≤ ~400 points) feeds the
-// canvases — paint cost is capped no matter how much disk history a watched
-// port carries.
 Item {
   id: detail
 
@@ -30,43 +25,82 @@ Item {
   readonly property var stats: service && entry ? (service.stats[entry.port] || null) : null
   readonly property string effectiveUrl: service && entry ? service.urlFor(entry.port, entry.url) : ""
 
-  // Disk history extends the ring backwards. The cutoff is decided once, at
-  // load — the prefix never changes afterwards, so it is never re-filtered.
-  property var diskPrefix: []
+  property bool active: true
+  onActiveChanged: if (!active && service) service.cancelMetricRanges(detail)
+  property int rangeSeconds: 3600
+  signal rangeRequested(int seconds)
+  property real hoverTime: -1
+  property int requestId: 0
+  property string historyStatus: "loading"
+  property string historyError: ""
+  property var savedView: null
+  readonly property string queryKey: active && service && service.pluginDir && entry
+    ? service.pluginDir + ":" + entry.port + ":" + rangeSeconds : ""
+  readonly property var liveView: {
+    void (service ? service.historyRevision : 0)
+    return History.aggregate(service && entry ? (service.history[entry.port] || []) : [],
+                             rangeSeconds, Math.floor(Date.now() / 1000))
+  }
+  readonly property var view: savedView && savedView.count > 0 ? savedView : liveView
+  readonly property bool retained: savedView !== null && savedView.count > 0
 
-  // The hovered instant, shared by every card on the page.
-  property int hoverIndex: -1
+  function requestRange(initial) {
+    if (initial) {
+      savedView = null
+      hoverTime = -1
+      historyError = ""
+      historyStatus = queryKey ? "loading" : "idle"
+    }
+    if (!queryKey || !service || !entry) {
+      if (service) service.cancelMetricRanges(detail)
+      return
+    }
+    requestId = ++service.metricRequestSequence
+    service.loadMetricRange(entry.port, rangeSeconds, Math.floor(Date.now() / 1000), requestId, detail)
+  }
 
   Connections {
     target: detail.service
-    function onDiskHistoryLoaded(port, samples) {
-      if (!detail.entry || port !== detail.entry.port) return
-      var ring = detail.service.history[port] || []
-      var cutoff = ring.length > 0 ? ring[0].t : Number.MAX_SAFE_INTEGER
-      var prefix = []
-      for (var i = 0; i < samples.length; i++) {
-        if (samples[i].t < cutoff) prefix.push(samples[i])
-      }
-      detail.diskPrefix = prefix
+    function onMetricRangeLoaded(port, seconds, id, result, error) {
+      if (!detail.queryKey || !detail.entry || id !== detail.requestId || port !== detail.entry.port
+          || seconds !== detail.rangeSeconds) return
+      detail.historyError = error
+      if (!error) detail.savedView = result
+      detail.historyStatus = error ? "error" : "ready"
     }
+    function onMetricsRevisionChanged() { detail.requestRange(false) }
+  }
+  onQueryKeyChanged: Qt.callLater(requestRange, true)
+  Component.onCompleted: Qt.callLater(requestRange, true)
+  Component.onDestruction: if (service) service.cancelMetricRanges(detail)
+
+  Timer {
+    interval: 30000
+    running: detail.active && detail.queryKey !== ""
+    repeat: true
+    onTriggered: detail.requestRange(false)
   }
 
-  // j/k walks this page across ports without reloading the component, so the
-  // disk prefix follows the entry rather than the component lifetime. The
-  // initial binding on `entry` fires this too.
-  onEntryChanged: {
-    diskPrefix = []
-    if (service && entry && service.isWatched(entry.port)) service.loadDiskHistory(entry.port)
+  property string latencyChoice: ""
+  readonly property int latencyPort: entry ? entry.port : 0
+  readonly property string latencyField: entry && entry.httpProbe === true ? (latencyChoice || "latMs") : "tcpRttMs"
+  onLatencyPortChanged: latencyChoice = ""
+
+  function toggleLatency() {
+    if (entry && entry.httpProbe === true)
+      latencyChoice = latencyField === "latMs" ? "tcpRttMs" : "latMs"
   }
 
-  // zeroAnchored says whether zero is a reading this metric can actually
-  // take. It decides both the axis floor and whether the area is drawn — see
-  // the rule at the top of SparkCard.qml. Resident memory is the one metric
-  // here that never approaches zero while the process is alive, so it gets a
-  // truncated axis, no fill, and a range label that declares the band.
+  function formatLatency(value) {
+    if (value === null || value === undefined) return "—"
+    if (value > 0 && value < 0.001) return "<0.001ms"
+    var decimals = value < 1 ? 3 : value < 10 ? 2 : value < 100 ? 1 : 0
+    return Number(value.toFixed(decimals)) + "ms"
+  }
+
   readonly property var metricDefs: [
-    { title: "LATENCY",     field: "latMs",  fmt: function (v) { return Math.round(v) + "ms" },
-      zeroAnchored: true,  zeroLabel: "instant" },
+    { title: latencyField === "latMs" ? "HTTP LATENCY" : "TCP RTT", field: latencyField, fmt: formatLatency,
+      zeroAnchored: true, zeroLabel: "below timing resolution" },
     { title: "CONNECTIONS", field: "conns",  fmt: function (v) { return String(Math.round(v)) },
       zeroAnchored: true,  zeroLabel: "no connections" },
     { title: "CPU",         field: "cpuPct", fmt: function (v) { return Math.round(v) + "%" },
@@ -75,52 +109,14 @@ Item {
       zeroAnchored: false, zeroLabel: "" }
   ]
 
-  // Latency is the one series that can stay empty forever rather than merely
-  // being young: it comes from an HTTP probe, and a port with no URL is never
-  // probed. Say which it is.
   function emptyReasonFor(field) {
-    if (field !== "latMs") return "waiting for the first sample"
-    if (!effectiveUrl) return "no URL to probe"
-    return watched ? "waiting for the first probe" : "probed while this page is open"
+    if (field === "latMs") return "HTTP response unavailable"
+    if (field === "tcpRttMs") return stats && stats.conns === 0 ? "No active connections" : "No RTT samples in this range"
+    return "No samples in this range"
   }
 
-  // The single per-scan pass: exact stats for each metric over the full
-  // series, plus the strided paint view.
-  readonly property var view: {
-    // Read for the dependency only: the ring is mutated in place, and
-    // historyRevision is what changes.
-    void (service ? service.historyRevision : 0)
-    var ring = service && entry ? (service.history[entry.port] || []) : []
-    var full = diskPrefix.length > 0 ? diskPrefix.concat(ring) : ring
-
-    var agg = ({})
-    for (var m = 0; m < metricDefs.length; m++) {
-      agg[metricDefs[m].field] = { lo: null, hi: null, last: null }
-    }
-    for (var i = 0; i < full.length; i++) {
-      for (var f = 0; f < metricDefs.length; f++) {
-        var key = metricDefs[f].field
-        var v = full[i][key]
-        if (v === undefined || v === null) continue
-        var st = agg[key]
-        if (st.lo === null || v < st.lo) st.lo = v
-        if (st.hi === null || v > st.hi) st.hi = v
-        st.last = v
-      }
-    }
-
-    var maxPoints = 400
-    var strided = full
-    if (full.length > maxPoints) {
-      var step = Math.ceil(full.length / maxPoints)
-      strided = []
-      for (var j = 0; j < full.length; j += step) strided.push(full[j])
-      if (strided[strided.length - 1] !== full[full.length - 1]) strided.push(full[full.length - 1])
-    }
-
-    var minutes = full.length >= 2
-      ? Math.round((full[full.length - 1].t - full[0].t) / 60) : 0
-    return { samples: strided, stats: agg, count: full.length, minutes: minutes }
+  function timeLabel(time) {
+    return Qt.formatDateTime(new Date(time * 1000), rangeSeconds >= 86400 ? "ddd HH:mm" : "HH:mm")
   }
 
   implicitHeight: layout.implicitHeight
@@ -205,12 +201,10 @@ Item {
         spacing: Style.spacing.xxs
 
         PanelActionButton {
-          // Watching = active monitoring: samples persist to disk (~24h) and
-          // the port joins the latency probe set.
           iconText: Icons.g(detail.watched ? "watch" : "unwatch")
           tooltipText: detail.watched
-            ? "Watching — samples persist for ~24h. Click to stop."
-            : "Watch — persist samples and probe latency"
+            ? "Watching · retain 48 hours. Click to pause recording."
+            : "Watch · retain samples for 48 hours"
           foreground: detail.watched ? Color.accent : detail.foreground
           onClicked: if (detail.service && detail.entry) detail.service.toggleWatched(detail.entry.port)
         }
@@ -233,6 +227,18 @@ Item {
       }
     }
 
+    ButtonGroup {
+      anchors.horizontalCenter: parent.horizontalCenter
+      spacing: Style.spacing.xs
+      focusable: false
+      options: History.ranges.map(function (r) { return { value: String(r.seconds), label: r.label } })
+      value: String(detail.rangeSeconds)
+      foreground: detail.foreground
+      fontFamily: detail.fontFamily
+      fontSize: Style.font.caption
+      onChanged: function (value) { detail.rangeRequested(Number(value)) }
+    }
+
     // ---- charts: small multiples, one metric each ---------------------------
     Grid {
       id: chartGrid
@@ -250,14 +256,20 @@ Item {
           required property var modelData
           width: chartGrid.cardWidth
           title: modelData.title
+          modeOptions: (modelData.field === "latMs" || modelData.field === "tcpRttMs")
+            && detail.entry && detail.entry.httpProbe === true
+            ? [{ value: "latMs", label: "HTTP" }, { value: "tcpRttMs", label: "TCP" }] : []
+          modeValue: detail.latencyField
+          onModeRequested: function (value) { detail.latencyChoice = value }
           field: modelData.field
           format: modelData.fmt
-          samples: detail.view.samples
+          view: detail.view
           lo: detail.view.stats[modelData.field].lo
           hi: detail.view.stats[modelData.field].hi
-          last: detail.view.stats[modelData.field].last
-          hoverIndex: detail.hoverIndex
-          onHoverIndexRequested: function (i) { detail.hoverIndex = i }
+          last: detail.stats && detail.stats[modelData.field] != null ? detail.stats[modelData.field] : null
+          loading: detail.historyStatus === "loading"
+          hoverTime: detail.hoverTime
+          onHoverTimeRequested: function (time) { detail.hoverTime = time }
           zeroAnchored: modelData.zeroAnchored
           zeroLabel: modelData.zeroLabel
           emptyLabel: detail.emptyReasonFor(modelData.field)
@@ -269,25 +281,86 @@ Item {
 
     Text {
       width: parent.width
-      textFormat: Text.PlainText
-      // While hovering, this line answers "when" once for all four cards —
-      // so no card has to repeat the timestamp beside its value.
-      text: {
-        var h = detail.hoverIndex
-        var samples = detail.view.samples
-        if (h >= 0 && samples[h]) {
-          var d = new Date(samples[h].t * 1000)
-          var ago = Math.max(0, Math.round(Date.now() / 1000) - samples[h].t)
-          return Qt.formatDateTime(d, "HH:mm:ss") + "  ·  " + Format.span(ago) + " ago"
+      visible: detail.latencyField === "tcpRttMs"
+      text: "Kernel RTT · may stay unchanged while idle"
+      HoverHandler { id: tcpHelpHover }
+      Controls.ToolTip {
+        id: tcpTooltip
+        visible: tcpHelpHover.hovered
+        delay: 500
+        text: "Kernel round-trip estimate averaged across existing port connections"
+          + (detail.stats && detail.stats.tcpRttCount > 0 ? " (" + detail.stats.tcpRttCount + " contributing sockets)" : "")
+          + ". Measures TCP transport, not application response or health."
+        contentItem: Text {
+          text: tcpTooltip.text
+          textFormat: Text.PlainText
+          width: Style.space(280)
+          wrapMode: Text.WordWrap
+          color: Color.tooltip.text
+          font.family: detail.fontFamily
+          font.pixelSize: Style.font.caption
         }
-        var n = detail.view.count
-        if (n === 0) return "Collecting samples — one every scan."
-        var m = detail.view.minutes
-        var note = (m <= 0 ? "" : "last " + Format.span(m * 60) + " · ") + n + " samples"
-        note += detail.watched ? " · persisted ~24h" : " · in memory (~1h) — Watch to persist"
+        background: Rectangle { color: Color.tooltip.background; radius: Style.cornerRadius }
+      }
+      textFormat: Text.PlainText
+      wrapMode: Text.WordWrap
+      color: Util.alpha(detail.foreground, 0.45)
+      font.family: detail.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Text {
+      width: parent.width
+      visible: detail.historyStatus !== "loading"
+      horizontalAlignment: Text.AlignHCenter
+      text: Qt.formatDateTime(new Date(detail.view.start * 1000), "ddd HH:mm") + " – "
+        + Qt.formatDateTime(new Date(detail.view.end * 1000), "ddd HH:mm")
+      textFormat: Text.PlainText
+      color: Util.alpha(detail.foreground, 0.45)
+      font.family: detail.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Text {
+      id: historyFooter
+      width: parent.width
+      height: footerFont.height * 2
+      FontMetrics { id: footerFont; font: historyFooter.font }
+      maximumLineCount: 2
+      elide: Text.ElideRight
+      textFormat: Text.PlainText
+      wrapMode: Text.WordWrap
+      text: {
+        if (detail.historyStatus === "loading") return "Loading saved history"
+        if (detail.hoverTime >= 0) {
+          var index = History.bucketAt(detail.view, detail.hoverTime)
+          if (index < 0) return detail.timeLabel(detail.hoverTime) + " · no samples"
+          var bucket = detail.view.buckets[index]
+          return Qt.formatDateTime(new Date(bucket.t * 1000), "ddd HH:mm:ss") + " – "
+            + Qt.formatDateTime(new Date(bucket.end * 1000), "HH:mm:ss")
+            + " · " + bucket.count + " samples · averages with min–max"
+        }
+        var note = detail.view.count + " samples in range"
+        if (detail.view.first !== null)
+          note += " · coverage " + Format.span(Math.max(0, detail.view.last - detail.view.first))
+        note += detail.retained ? (detail.watched ? " · retaining 48 hours" : " · recording paused")
+          : " · live memory only" + (detail.watched ? "" : " · Watch to record")
         return note
       }
-      color: Util.alpha(detail.foreground, detail.hoverIndex >= 0 ? 0.7 : 0.4)
+      color: Util.alpha(detail.foreground, detail.hoverTime >= 0 ? 0.7 : 0.4)
+      font.family: detail.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Text {
+      width: parent.width
+      visible: text.length > 0
+      textFormat: Text.PlainText
+      wrapMode: Text.WordWrap
+      text: [detail.historyError ? "Saved history unavailable: " + detail.historyError : "",
+             detail.service ? detail.service.metricsError : ""]
+        .filter(function (text) { return text !== "" }).join(" · ")
+      color: Color.urgent
       font.family: detail.fontFamily
       font.pixelSize: Style.font.caption
     }

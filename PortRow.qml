@@ -7,19 +7,8 @@ import "lib/Icons.js" as Icons
 import "lib/Colors.js" as Colors
 import "lib/Format.js" as Format
 
-// One listening port.
-//
-// A row's title is its best name: the local route when one exists
-// (anycable.test), else the project or stack. What the process is DOING —
-// connections, cpu, memory, uptime — lives in service.stats and shows while
-// the row has attention, so identity stays put while numbers move.
-//
-// Layout: every element on the main line is a sibling positioned by anchors.
-// Actions float over the right edge on a scrim instead of reserving width, so
-// a resting row gives its full width to the name.
-//
-// Security: every string here except our own literals is untrusted — process
-// names, command lines, tunnel URLs — so every Text sets Text.PlainText.
+// Hover actions overlay the title so resting rows retain the full name width.
+// Process metadata and URLs must render as plain text.
 Item {
   id: row
 
@@ -45,6 +34,8 @@ Item {
   readonly property var route: service && entry ? service.routeFor(entry.port) : null
   readonly property var publicTunnel: service && entry ? service.publicTunnelFor(entry.port) : null
   readonly property bool dnsPending: publicTunnel !== null && publicTunnel.dns === "pending"
+  readonly property bool targetOffline: publicTunnel !== null && publicTunnel.targetHealthy === false
+  readonly property string publicTunnelText: publicTunnel ? publicTunnel.url + (targetOffline ? " · target offline" : "") : ""
   // Index of the provider chip the panel's keyboard cursor is on while the
   // share picker is open on this row; -1 when the cursor is elsewhere.
   property int shareCursor: -1
@@ -66,7 +57,6 @@ Item {
   // exactly where the main line's title does: one alignment axis, read off
   // the title column itself so nothing can drift from it.
   readonly property real titleAxis: titleColumn.x
-  // The centre of the icon slot: where the thread rule hangs from.
   readonly property real iconAxis: iconGlyph.x + iconGlyph.width / 2
   readonly property var stats: service && entry ? (service.stats[entry.port] || null) : null
   readonly property bool paused: stats ? stats.paused === true : false
@@ -82,6 +72,7 @@ Item {
   readonly property string stackLine: {
     if (!entry) return ""
     var bits = []
+    if (route && route.reach === "lan") bits.push("LAN name")
     if (named && entry.name && entry.name !== routeHost) bits.push(entry.name)
     if (entry.label && entry.label !== entry.name) bits.push(entry.label)
     if (entry.scope === "all") bits.push("all interfaces")
@@ -94,12 +85,56 @@ Item {
   readonly property string statsLine: {
     if (!stats) return ""
     var bits = []
+    if (route && route.reach === "lan") bits.push("LAN name")
     if (paused) bits.push("paused")
     bits.push(stats.conns === 1 ? "1 conn" : stats.conns + " conns")
     if (stats.cpuPct != null) bits.push(stats.cpuPct + "% cpu")
     if (stats.rssKb != null) bits.push(Format.bytesKb(stats.rssKb))
     if (stats.upSec != null) bits.push(Format.uptimeLine(stats.upSec))
     return bits.join(" · ")
+  }
+
+  component PublicAction: Item {
+    id: action
+
+    required property string icon
+    required property string text
+    property color color: Util.alpha(Color.popups.text, 0.6)
+    signal clicked()
+
+    implicitWidth: actionGlyph.width + Style.spacing.xs + actionLabel.implicitWidth
+    implicitHeight: Style.space(24)
+
+    OpticalGlyph {
+      id: actionGlyph
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(16)
+      height: Style.space(16)
+      text: action.icon
+      fontSize: Style.font.caption
+      color: action.color
+    }
+
+    Text {
+      id: actionLabel
+      anchors.left: actionGlyph.right
+      anchors.leftMargin: Style.spacing.xs
+      anchors.verticalCenter: parent.verticalCenter
+      textFormat: Text.PlainText
+      text: action.text
+      color: action.color
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      font.underline: action.enabled && actionHover.hovered
+    }
+
+    HoverHandler { id: actionHover }
+    MouseArea {
+      anchors.fill: parent
+      cursorShape: action.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+      onClicked: action.clicked()
+    }
   }
 
   Column {
@@ -169,25 +204,23 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         spacing: 0
 
-        Text {
+        TickerText {
           width: parent.width
-          textFormat: Text.PlainText
           text: row.named ? row.routeHost : (row.entry ? row.entry.name : "")
           color: row.named ? Color.accent : row.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
+          fontFamily: Style.font.family
+          fontSize: Style.font.body
+          hovered: hover.hovered
         }
 
-        Text {
+        TickerText {
           width: parent.width
           visible: text.length > 0
-          textFormat: Text.PlainText
           text: row.revealed && row.statsLine ? row.statsLine : row.stackLine
           color: row.paused ? Color.urgent : Util.alpha(row.foreground, 0.55)
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          fontFamily: Style.font.family
+          fontSize: Style.font.caption
+          hovered: hover.hovered
         }
       }
 
@@ -237,7 +270,7 @@ Item {
           }
 
           PanelActionButton {
-            visible: row.entry && row.entry.pid !== null
+            visible: row.entry && row.entry.kind !== "orphan"
             iconText: Icons.g("metrics")
             tooltipText: "Charts"
             foreground: row.foreground
@@ -247,71 +280,13 @@ Item {
       }
     }
 
-    // ---- public exposure, stated loudly -------------------------------------
-    Item {
-      width: parent.width
-      visible: row.publicTunnel !== null
-      height: visible ? Style.space(20) : 0
-
-      OpticalGlyph {
-        id: shareGlyph
-        anchors.left: parent.left
-        anchors.leftMargin: row.titleAxis - width - Style.spacing.sm
-        anchors.verticalCenter: parent.verticalCenter
-        width: Style.font.caption + Style.spacing.sm
-        height: Style.font.caption
-        text: Icons.g("broadcast")
-        fontSize: Style.font.caption
-        color: Color.urgent
-      }
-
-      // While DNS for a fresh hostname is still propagating the line says so
-      // and is not a link: a URL that opens to NXDOMAIN teaches the wrong thing.
-      LinkText {
-        id: copyLink
-        anchors.right: parent.right
-        anchors.rightMargin: Style.spacing.xs
-        anchors.verticalCenter: parent.verticalCenter
-        enabled: !row.dnsPending
-        text: row.dnsPending ? "waiting for dns…" : "copy"
-        color: Util.alpha(row.foreground, 0.6)
-        onClicked: if (row.service && row.publicTunnel) row.service.copyText(row.publicTunnel.url)
-      }
-
-      Text {
-        anchors.left: parent.left
-        anchors.leftMargin: row.titleAxis
-        anchors.right: copyLink.left
-        anchors.rightMargin: Style.spacing.md
-        anchors.verticalCenter: parent.verticalCenter
-        textFormat: Text.PlainText
-        text: row.publicTunnel ? row.publicTunnel.url : ""
-        color: Util.alpha(Color.urgent, row.dnsPending ? 0.5 : 1.0)
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        elide: Text.ElideMiddle
-
-        MouseArea {
-          anchors.fill: parent
-          enabled: !row.dnsPending
-          cursorShape: Qt.PointingHandCursor
-          onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)
-        }
-      }
-    }
-
     // ---- expansion ----------------------------------------------------------
-    // Everything a row can unfold — the verb line, the name editor, the
-    // exposure choices — is one block in one register: quiet text at one
-    // indent, tied to its row by a thread rule where the icon column runs.
     Loader {
       width: parent.width
       active: row.expanded
       visible: active
 
       sourceComponent: Item {
-        // The same breath above the content as below it: the block sits
-        // centred between its row and the next, not glued to one of them.
         implicitHeight: expansion.implicitHeight + Style.spacing.md * 2
 
         Rectangle {
@@ -405,7 +380,8 @@ Item {
           }
 
           // -- the verbs ------------------------------------------------------
-          Row {
+          Flow {
+            width: parent.width
             visible: !row.confirming
             spacing: Style.spacing.sm
 
@@ -446,6 +422,11 @@ Item {
 
           // -- the name editor ------------------------------------------------
           Item {
+            id: nameEditor
+            readonly property var provider: row.service ? row.service.actionProviderFor("portless") : null
+            readonly property bool editable: provider !== null && provider.status === "ready"
+              && (!row.route || (row.route.reach === "local" && row.route.managed === false && !!row.route.aliasName))
+            onEditableChanged: if (!editable && row.naming) row.editorCanceled()
             width: parent.width
             visible: row.naming && !row.confirming
             implicitHeight: Style.spacing.controlHeight
@@ -458,18 +439,18 @@ Item {
               anchors.rightMargin: Style.spacing.xs
               anchors.verticalCenter: parent.verticalCenter
               foreground: row.foreground
-              text: row.named ? row.routeHost.split(".")[0]
+              enabled: nameEditor.editable
+              text: row.named ? String(row.route.aliasName || "")
                 : (row.service && row.entry ? row.service.suggestedName(row.entry) : "")
               Keys.onEscapePressed: row.editorCanceled()
               // Enter on an empty field removes an existing name: the keyboard
               // route to what the remove link does.
               onAccepted: {
                 var n = text.trim()
-                if (row.service && row.entry) {
-                  if (n.length > 0) row.service.expose(row.entry.port, "portless", n)
-                  else if (row.named) row.service.unexpose(row.entry.port, "portless")
-                }
-                row.editorDone()
+                if (!nameEditor.editable || !row.service || !row.entry) return
+                if (n.length > 0) {
+                  if (row.service.expose(row.entry.port, "portless", n)) row.editorDone()
+                } else if (!row.named || row.service.unexpose(row.entry.port, "portless")) row.editorDone()
               }
             }
 
@@ -487,13 +468,13 @@ Item {
 
             LinkText {
               id: removeLink
-              visible: row.named
+              visible: row.named && nameEditor.editable
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               text: "remove"
               onClicked: {
-                if (row.service && row.entry) row.service.unexpose(row.entry.port, "portless")
-                row.editorDone()
+                if (nameEditor.editable && row.service && row.entry
+                    && row.service.unexpose(row.entry.port, "portless")) row.editorDone()
               }
             }
           }
@@ -523,7 +504,6 @@ Item {
                 required property var modelData
                 required property int index
                 readonly property bool ready: choice.modelData.status === "ready"
-                readonly property bool actionable: ready || choice.modelData.status === "setup"
                 readonly property bool starting: row.service && row.entry
                   && row.service.busyAction === choice.modelData.id + ":" + row.entry.port
                 readonly property bool installing: row.service
@@ -546,18 +526,89 @@ Item {
                   text: {
                     if (choice.starting) return choice.modelData.label + " — starting…"
                     if (choice.installing) return choice.modelData.label + " — installing…"
-                    if (choice.modelData.status === "setup") return choice.modelData.label + " — fix"
+                    if (!choice.ready) return choice.modelData.label + " · set up"
                     return choice.modelData.label
                   }
-                  color: choice.ready ? Util.alpha(Color.urgent, 0.9)
-                    : choice.actionable ? Util.alpha(row.foreground, 0.7)
-                    : Util.alpha(row.foreground, 0.35)
+                  color: choice.ready ? Util.alpha(Color.urgent, 0.9) : Util.alpha(row.foreground, 0.7)
                   font.pixelSize: Style.font.bodySmall
-                  onClicked: if (choice.actionable) row.providerChosen(choice.modelData)
+                  onClicked: row.providerChosen(choice.modelData)
                 }
               }
             }
           }
+        }
+      }
+    }
+    Item {
+      width: parent.width
+      visible: row.publicTunnel !== null
+      height: visible ? Style.space(44) : 0
+
+      OpticalGlyph {
+        id: shareGlyph
+        anchors.left: parent.left
+        anchors.leftMargin: row.titleAxis - width - Style.spacing.sm
+        anchors.verticalCenter: publicUrl.verticalCenter
+        width: Style.font.caption + Style.spacing.sm
+        height: Style.font.caption
+        text: Icons.g("broadcast")
+        fontSize: Style.font.caption
+        color: Color.urgent
+      }
+
+      Text {
+        id: publicUrl
+        anchors.left: parent.left
+        anchors.leftMargin: row.titleAxis
+        anchors.right: parent.right
+        anchors.rightMargin: Style.spacing.md
+        anchors.top: parent.top
+        height: Style.space(20)
+        verticalAlignment: Text.AlignVCenter
+        textFormat: Text.PlainText
+        text: row.publicTunnelText
+        color: Util.alpha(Color.urgent, row.dnsPending ? 0.5 : 1.0)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideMiddle
+
+        MouseArea {
+          anchors.fill: parent
+          enabled: !row.dnsPending
+          cursorShape: Qt.PointingHandCursor
+          onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)
+        }
+      }
+
+      Row {
+        anchors.left: parent.left
+        anchors.leftMargin: row.titleAxis
+        anchors.bottom: parent.bottom
+        spacing: Style.spacing.lg
+
+        PublicAction {
+          icon: Icons.g("open")
+          text: row.dnsPending ? "Waiting for DNS…" : "Open"
+          enabled: !row.dnsPending
+          opacity: enabled ? 1 : 0.5
+          onClicked: if (row.service && row.publicTunnel) row.service.openUrl(row.publicTunnel.url)
+        }
+        PublicAction {
+          icon: Icons.g("copy")
+          text: "Copy"
+          enabled: !row.dnsPending
+          opacity: enabled ? 1 : 0.5
+          onClicked: if (row.service && row.publicTunnel) row.service.copyText(row.publicTunnel.url)
+        }
+        PublicAction {
+          readonly property bool stopping: !!(row.service && row.service.activeAction && row.publicTunnel
+            && row.service.activeAction.shareStopKey === row.publicTunnel.provider + ":" + row.entry.port)
+          icon: Icons.g("stop")
+          text: stopping ? "Stopping…" : "Stop sharing"
+          color: Color.urgent
+          enabled: !!row.service && !row.service.activeAction
+          opacity: enabled || stopping ? 1 : 0.5
+          onClicked: if (row.service && row.publicTunnel) row.service.unexpose(row.entry.port, row.publicTunnel.provider)
         }
       }
     }

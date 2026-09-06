@@ -1,23 +1,72 @@
 #!/bin/bash
-# Owner-only state files. Every state path Portal reads or writes is
-# predictable (a port number under a fixed directory), so a file is trusted
-# only when it is a plain file the current user owns and not a symlink, reads
-# are byte-capped, and writes remove whatever was at the path first so a
-# planted link can never redirect them.
-own_dir() {   # <dir>: create it 700, then insist it is our own real directory
-  install -d -m 700 -- "$1" 2>/dev/null
-  [[ -d $1 && ! -L $1 && -O $1 ]]
+# Owner-only state files, through scripts/lib/statedir.py: every read and
+# JSON-file write is descriptor-relative to a directory walked from / without following
+# links, leaves are bound after open (regular, ours, one link, capped), writes
+# are exclusive temporaries renamed into place. Third-party state (Portless's
+# directory) is read the same way. SQLite owns database and journal I/O from
+# a validated private working directory with its no-follow open flag.
+STATEDIR_PY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/statedir.py"
+PROC_PY="${STATEDIR_PY%/*}/proc.py"
+state() { /usr/bin/python3 -I -S "$STATEDIR_PY" "$@"; }   # -I: no env or cwd can redirect the interpreter
+proc()  { /usr/bin/python3 -I -S "$PROC_PY" "$@"; }       # signal <pid> <start> <SIG> | check <pid> <start>
+own_dir()   { state ensure "$@" 2>/dev/null; }                   # create 0700 and verify
+cat_own()   { state read "$1" "${2:-1048576}" 2>/dev/null; }      # whole file, capped
+read_own()  { cat_own "$1" "${2:-4096}" | head -n 1; }           # first line
+write_own() { printf '%s' "$2" | state write "$1" 2>/dev/null; }  # atomic replace
+state_dump()     { state dump "$1" "${2:-65536}" 2>/dev/null || echo '{"files":{}}'; }
+state_remove()   { state remove "$@" 2>/dev/null; }              # <dir> <name>...
+state_truncate() { state truncate "$1" "$2" 2>/dev/null; }       # <path> <cap>
+
+# Where Portal keeps state: tunnel pidfiles, logs and URLs under the runtime
+# dir (gone at logout), metrics and install markers under the state home.
+PORTAL_RUNTIME_DIR="${PORTAL_STATE_DIR:-${XDG_RUNTIME_DIR:-$HOME/.cache}/portal}"
+PORTAL_STATE_HOME="${PORTAL_METRICS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/portal}"
+
+# The outer script exits with the locked child. Nested Portal calls continue
+# their own dispatch without trying to acquire the same lock again.
+lifecycle_mutation() {  # <nowait|wait> <absolute-command> [args...]
+  local lock_mode=$1
+  shift
+  [[ ${PORTAL_LIFECYCLE_LOCKED:-} == "$PORTAL_RUNTIME_DIR" ]] && return 0
+  PORTAL_LIFECYCLE_LOCKED="$PORTAL_RUNTIME_DIR" state lock "$PORTAL_RUNTIME_DIR" "$lock_mode" .lifecycle.lock -- "$@"
+  exit $?
 }
-own_file() { [[ -f $1 && ! -L $1 && -O $1 ]]; }
-read_own() {  # <file> [maxbytes]: the first line of a plain owned file
-  own_file "$1" || return 1
-  head -c "${2:-4096}" -- "$1" | head -n 1
+
+canonical_port() {
+  local LC_ALL=C
+  local port=${1:-}
+  [[ $port =~ ^[0-9]+$ ]] || return 1
+  port=${port#"${port%%[!0]*}"}
+  [[ -n $port && ${#port} -le 5 ]] || return 1
+  (( 10#$port < 65536 )) || return 1
+  printf '%s' "$port"
 }
-cat_own() {   # <file> [maxbytes]: the whole file, capped
-  own_file "$1" || return 1
-  head -c "${2:-1048576}" -- "$1"
+valid_port() { canonical_port "${1:-}" >/dev/null; }
+
+# The executable a provider action runs: resolved to an absolute path that is
+# a regular file owned by root or the user and not writable by anyone else,
+# with every directory from / down owned by root or the user and such that
+# nobody else can swap an entry in it (not group/other writable, or sticky).
+# Never a bare name through PATH. The launcher walks the same chain again by
+# descriptor and executes the file it validated, so nothing can be swapped in
+# between.
+resolve_bin() {  # <name>
+  local p d
+  p=$(command -v -- "$1" 2>/dev/null) || return 1
+  p=$(readlink -f -- "$p" 2>/dev/null) || return 1
+  [[ -f $p && -x $p ]] || return 1
+  _trusted_owner "$p" || return 1
+  d=${p%/*}
+  while :; do _trusted_dir "${d:-/}" || return 1; [[ -n $d ]] || break; d=${d%/*}; done
+  printf '%s' "$p"
 }
-write_own() { # <file> <content>: replace, never follow
-  rm -f -- "$1"
-  printf '%s' "$2" > "$1"
+_trusted_owner() {  # <path>: owned by root or us, not group/other writable
+  local o m
+  read -r o m < <(stat -c '%u %a' -- "$1" 2>/dev/null) || return 1
+  [[ $o == 0 || $o == "$UID" ]] && (( (8#$m & 8#022) == 0 ))
+}
+_trusted_dir() {  # <dir>: owned by root or us; entries swappable by nobody else
+  local o m
+  read -r o m < <(stat -c '%u %a' -- "$1" 2>/dev/null) || return 1
+  [[ $o == 0 || $o == "$UID" ]] && { (( (8#$m & 8#022) == 0 )) || (( (8#$m & 8#1000) != 0 )); }
 }

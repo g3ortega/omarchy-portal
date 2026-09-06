@@ -4,6 +4,7 @@ import QtQuick
 import qs.Ui
 import qs.Commons
 import "lib/Icons.js" as Icons
+import "lib/History.js" as History
 
 // Portal's panel. Service.qml owns the g3ortega.portal IPC target; a second
 // handler on the same target warns at runtime, so this one manages none.
@@ -33,23 +34,52 @@ Panel {
   // Anything that disrupts a running process — stop, pause, restart — goes
   // through one confirmation. Resume does not: it is the recovery action, and
   // friction on the way back out is friction in the wrong place.
-  // { kind, entry, label?, clause?, provider? }. kind is the verb the answer
-  // wears: stop | pause | restart | install.
+  // { kind, entry, provider?, label?, clause? }. Accepting resolves the row
+  // again and dispatches from this data, so no callback retains a stale process.
   property var pendingAction: null
   property bool helpOpen: false
   property bool settingsOpen: false
   property int settingsIndex: 0
+  onSettingsIndexChanged: pendingSetup = null
+  property var pendingSetup: null
+  onSettingsOpenChanged: {
+    if (settingsOpen) return
+    pendingSetup = null
+    if (feedback && feedback.kind !== "moment") feedback = null
+  }
+  readonly property var setupProviders: service
+    ? service.providers.filter(function (p) { return p.reach === "local" })
+        .concat(service.providers.filter(function (p) { return p.reach !== "local" }))
+    : []
+  readonly property int settingsCount: setupProviders.length + settingDefs.length
+  readonly property var providerHelp: ({
+    portless: { text: "New proxies use port 1355 without sudo. Browser trust is separate from system trust.",
+                url: "https://github.com/vercel-labs/portless#readme" },
+    cloudflared: { text: "Temporary public links for HTTP apps. No account needed. Quick Tunnels do not support SSE streaming.",
+                   url: "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/" },
+    ngrok: { text: "HTTP sharing needs an ngrok account and authtoken. Free links may show visitors a browser warning.",
+             url: "https://ngrok.com/docs/getting-started/" }
+  })
   // Cursors: into publicProviders while a share picker is open, and along
   // the verbs while a row's actions are open.
   property int shareIndex: 0
   property int verbIndex: 0
-  property string toast: ""
-  property bool toastIsHint: false
+  // null | { kind: "moment" | "guidance" | "copy", text, error, command? }
+  property var feedback: null
 
-  function showToast(message, hint) { toast = message; toastIsHint = hint === true; toastTimer.restart() }
+  function showMoment(message, error) {
+    feedback = { kind: "moment", text: String(message), error: error === true }
+    feedbackTimer.restart()
+  }
 
-  // A toast is a moment, not a status line.
-  Timer { id: toastTimer; interval: 5000; onTriggered: root.toast = "" }
+  function showGuidance(message, command) {
+    feedback = command
+      ? { kind: "copy", text: String(message), error: false, command: String(command) }
+      : { kind: "guidance", text: String(message), error: false }
+    feedbackTimer.stop()
+  }
+
+  Timer { id: feedbackTimer; interval: 5000; onTriggered: root.feedback = null }
 
   function expand(port, kind) {
     // Moving anywhere abandons an unanswered question — Enter must never act
@@ -88,7 +118,7 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property var portlessProvider: service ? service.providerFor("portless") : null
-  readonly property bool portlessReady: portlessProvider !== null && portlessProvider.status === "ready"
+  readonly property bool portlessReady: portlessProvider !== null && portlessProvider.available === true && portlessProvider.status === "ready"
 
   readonly property var publicProviders: service ? service.publicProviders : []
   readonly property bool broadcasting: service ? service.hasPublicTunnel : false
@@ -136,9 +166,9 @@ Panel {
   function settingValue(def) { return String(setting(def.key, def.def)) }
 
   function applySetting(def, value) {
-    if (value === settingValue(def)) return              // nothing to write
+    if (value === settingValue(def) && !hostWidget.settingsSaveError) return
     if (!hostWidget.saveSetting(def.key, def.type === "integer" ? Number(value) : value))
-      showToast("Could not save " + def.label + " — check ~/.config/omarchy/shell.json")
+      showMoment("Could not save " + def.label + " — check ~/.config/omarchy/shell.json", true)
   }
 
   function cycleSetting(def, dir) {
@@ -147,16 +177,63 @@ Panel {
     applySetting(def, def.opts[at < 0 ? 0 : wrapIndex(at, dir, def.opts.length)])
   }
 
-  function toggleSettings() {
+  function openSettings(providerId) {
     helpOpen = false
     pendingAction = null
+    pendingSetup = null
     detailEntry = null
-    // A name editor left open under a hidden page keeps the key catcher
-    // blocked, so the settings page would open keyboard-dead.
     collapse()
-    settingsOpen = !settingsOpen
+    settingsOpen = true
     settingsIndex = 0
+    for (var i = 0; i < setupProviders.length; i++) {
+      if (setupProviders[i].id === providerId) { settingsIndex = i; break }
+    }
     keyCatcher.forceActiveFocus()
+  }
+
+  function toggleSettings() {
+    if (settingsOpen) settingsOpen = false
+    else openSettings("")
+    keyCatcher.forceActiveFocus()
+  }
+
+  function setupStillValid(snapshot) {
+    if (!snapshot || !service) return false
+    var current = service.providerFor(snapshot.id)
+    return !!(current && current.status === snapshot.status && current.reach === snapshot.reach
+      && current.fix === snapshot.fix && current.setupClause === snapshot.setupClause)
+  }
+
+  function activateProviderSetup(provider) {
+    if (!provider || !service) return
+    if (service.busyAction) {
+      showMoment("Still working. Try again in a moment.")
+      return
+    }
+    if (pendingSetup && pendingSetup.id === provider.id) {
+      var valid = setupStillValid(pendingSetup)
+      pendingSetup = null
+      if (!valid) { showMoment("Setup changed. Review the current instructions."); return }
+      service.setupProvider(provider.id)
+      return
+    }
+    pendingSetup = null
+    var current = service.providerFor(provider.id)
+    if (!current) return
+    if (current.fix) {
+      service.copyText(current.fix, true)
+      showGuidance("Command copied. Run it in your terminal.")
+    } else if (current.setupClause && (current.status === "setup"
+               || (current.status === "ready" && current.reach === "local"))) {
+      pendingSetup = { id: current.id, status: current.status, reach: current.reach,
+                       fix: current.fix, setupClause: current.setupClause }
+    }
+  }
+
+  function activateSetting() {
+    if (settingsIndex < setupProviders.length)
+      activateProviderSetup(setupProviders[settingsIndex])
+    else cycleSetting(settingDefs[settingsIndex - setupProviders.length], 1)
   }
 
   readonly property bool brandColors: String(setting("iconColors", "Brand")) !== "Theme"
@@ -169,7 +246,7 @@ Panel {
     if (!opened) return
     query = ""
     selectedPort = -1
-    toast = ""
+    feedback = null
     pendingAction = null
     helpOpen = false
     settingsOpen = false
@@ -178,8 +255,23 @@ Panel {
 
   Connections {
     target: root.service
-    function onActionFailed(message) { root.showToast(message) }
-    function onActionHint(message) { root.showToast(message, true) }
+    function onProvidersChanged() { root.revalidateProviders() }
+    function onActiveActionChanged() {
+      if (root.pendingAction && !root.pendingStillValid(root.pendingAction)) root.pendingAction = null
+    }
+    function onTunnelsChanged() {
+      if (root.pendingAction && !root.pendingStillValid(root.pendingAction)) root.pendingAction = null
+    }
+    function onActionFailed(message) { root.showMoment(message, true) }
+    function onActionMoment(message) { root.showMoment(message) }
+    function onActionHint(message) {
+      if (root.settingsOpen) root.showGuidance(message)
+      else root.showMoment(message)
+    }
+    function onActionCopy(message, command) {
+      if (!root.settingsOpen) root.openSettings("")
+      root.showGuidance(message, command)
+    }
   }
 
   // ---- model ---------------------------------------------------------------
@@ -188,8 +280,38 @@ Panel {
   readonly property var viewData: buildViewData()
   readonly property var rows: viewData.rows
   readonly property var visibleEntries: viewData.entries
-  // A row that vanishes under its own expansion takes the expansion with it.
-  onVisibleEntriesChanged: if (expandedKind !== "" && indexOfPort(selectedPort) < 0) collapse()
+  // A row that vanishes takes its expansion and any unanswered question with
+  // it: an answer must never land on a port that stopped listening.
+  onVisibleEntriesChanged: {
+    if (expandedKind !== "" && indexOfPort(selectedPort) < 0) collapse()
+    if (pendingAction !== null && !pendingStillValid(pendingAction)) pendingAction = null
+  }
+
+  function stillListed(entry) {
+    var now = entryForPort(entry.port)
+    return !!(now && service && service.sameProcess(now.process, entry.process))
+  }
+
+  function pendingStillValid(action) {
+    if (!action || !service || !stillListed(action.entry)) return false
+    if (action.kind === "share") {
+      var provider = service.actionProviderFor(action.provider)
+      return provider !== null && provider.status === "ready" && provider.reach === "public"
+        && !service.publicTunnelFor(action.entry.port)
+        && (!service.activeAction || service.activeAction.shareStartPort !== action.entry.port)
+    }
+    return true
+  }
+
+  function revalidateProviders() {
+    if ((expandedKind === "naming" && !portlessReady)
+        || (expandedKind === "sharing" && publicProviders.length === 0)) {
+      collapse()
+      keyCatcher.forceActiveFocus()
+    }
+    shareIndex = Util.clamp(shareIndex, 0, Math.max(0, publicProviders.length - 1))
+    if (pendingAction && !pendingStillValid(pendingAction)) pendingAction = null
+  }
 
   readonly property var groupOrder: [
     { key: "dev", label: "YOUR APPS" },
@@ -240,10 +362,7 @@ Panel {
     return -1
   }
 
-  function selectedEntry() {
-    var i = indexOfPort(selectedPort)
-    return i < 0 ? null : visibleEntries[i]
-  }
+  function selectedEntry() { return entryForPort(selectedPort) }
 
   function selectedOrFirst() {
     if (indexOfPort(selectedPort) < 0 && visibleEntries.length > 0)
@@ -266,16 +385,6 @@ Panel {
 
   function openDetail() { showDetail(selectedOrFirst()) }
 
-  // The entry a key acts on: the detail page's when open, else the cursor's.
-  function currentEntry() {
-    return detailEntry !== null ? detailEntry : selectedEntry()
-  }
-
-  function currentUrl() {
-    var e = currentEntry()
-    return e && service ? service.urlFor(e.port, e.url) : ""
-  }
-
   function requestAction(kind, entry, extra) {
     pendingAction = Object.assign({ kind: kind, entry: entry }, extra || {})
     // The question renders on the row itself, so the row must be on screen
@@ -292,18 +401,24 @@ Panel {
   function verbsFor(entry) {
     if (!entry || !service) return []
     var out = []
-    var named = service.routeFor(entry.port) !== null
+    var route = service.routeFor(entry.port)
+    var named = route !== null
     var tunnel = service.publicTunnelFor(entry.port)
     var st = service.stats[entry.port]
     var paused = st ? st.paused === true : false
-    var stoppable = entry.pid && entry.category !== "system"
+    var stoppable = service.validProcessIdentity(entry.process) && entry.category !== "system"
     var expandedHere = selectedPort === entry.port
-    if ((portlessReady || named) && entry.category !== "system" && entry.kind !== "orphan")
-      out.push({ id: "name", label: named ? "rename" : "name",
+    if (service.actionProviderFor("portless") && entry.category !== "system" && entry.kind !== "orphan"
+        && (!route || (route.managed === false && !!route.aliasName)))
+      out.push({ id: "name", label: named ? (portlessReady && route.reach === "local" ? "rename" : "name setup") : "name",
                  on: expandedHere && expandedKind === "naming", urgent: false })
-    if (service.urlFor(entry.port, entry.url) !== "" && entry.category !== "system")
-      out.push({ id: "share", label: tunnel ? "stop sharing" : "share",
-                 on: expandedHere && expandedKind === "sharing", urgent: tunnel !== null })
+    if (service.actionProviderFor("portless") && route && (!portlessReady || route.reach !== "local")
+        && route.managed === false && !!route.aliasName)
+      out.push({ id: "unname", label: "remove name", on: false, urgent: false })
+    if (service.publicProviders.length > 0 && service.urlFor(entry.port, entry.url) !== "" && entry.category !== "system"
+        && tunnel === null && service.validProcessIdentity(entry.process))
+      out.push({ id: "share", label: "share",
+                 on: expandedHere && expandedKind === "sharing", urgent: false })
     if (stoppable)
       out.push({ id: "pause", label: paused ? "resume" : "pause", on: false, urgent: paused })
     if (entry.category === "dev" && service.canRestart(entry))
@@ -314,11 +429,26 @@ Panel {
   }
 
   function activateVerb(entry, verb) {
+    if (!entry || !service) return
+    if (!(verb.id === "share" && service.publicTunnelFor(entry.port))
+        && !verbsFor(entry).some(function (current) { return current.id === verb.id })) return
     switch (verb.id) {
-    case "name": expand(entry.port, "naming"); break
+    case "name":
+      var route = service.routeFor(entry.port)
+      if (route && (route.managed !== false || !route.aliasName)) break
+      if (portlessReady && (!route || route.reach === "local")) expand(entry.port, "naming")
+      else openSettings("portless")
+      break
+    case "unname":
+      var removable = service.routeFor(entry.port)
+      if (removable && removable.managed === false && !!removable.aliasName)
+        service.unexpose(entry.port, "portless")
+      break
     case "share":
       var tunnel = service.publicTunnelFor(entry.port)
       if (tunnel) service.unexpose(entry.port, tunnel.provider)
+      else if (!publicProviders.some(function (p) { return p.status === "ready" }))
+        openSettings(publicProviders.length ? publicProviders[0].id : "")
       else expand(entry.port, "sharing")
       break
     case "pause":
@@ -331,8 +461,11 @@ Panel {
     }
   }
 
-  // A direct key is the verb by name, subject to the same availability rules.
   function activateVerbById(entry, id) {
+    if (id === "share" && entry && service && service.publicTunnelFor(entry.port)) {
+      activateVerb(entry, { id: id })
+      return
+    }
     var vs = verbsFor(entry)
     for (var i = 0; i < vs.length; i++) if (vs[i].id === id) { activateVerb(entry, vs[i]); return }
   }
@@ -341,6 +474,13 @@ Panel {
     var e = selectedEntry()
     var vs = verbsFor(e)
     if (vs.length > 0) activateVerb(e, vs[Math.min(verbIndex, vs.length - 1)])
+  }
+
+  property int rangeSeconds: 3600
+
+  function stepRange(delta) {
+    var index = History.ranges.findIndex(function (range) { return range.seconds === root.rangeSeconds })
+    root.rangeSeconds = History.ranges[Util.clamp(index + delta, 0, History.ranges.length - 1)].seconds
   }
 
   function showDetail(entry) {
@@ -353,10 +493,15 @@ Panel {
 
   function confirmAccept() {
     var a = pendingAction
+    if (!pendingStillValid(a)) { pendingAction = null; return }
+    var entry = entryForPort(a.entry.port)
     pendingAction = null
-    if (a.kind === "install") service.setupProvider(a.provider)
-    else if (a.kind === "restart") service.restartProcess(a.entry)
-    else service.signalProcess(a.entry, a.kind)
+    switch (a.kind) {
+    case "restart": service.restartProcess(entry); break
+    case "pause":
+    case "stop": service.signalProcess(entry, a.kind); break
+    case "share": service.expose(entry.port, a.provider, "", entry.process); break
+    }
   }
 
   // j/k on the detail page walk sibling ports without leaving the charts.
@@ -367,17 +512,24 @@ Panel {
     selectedPort = detailEntry.port
   }
 
-  // One activation body for the keyboard and the row's own chips.
-  // A provider's one-click fix may put a binary on the machine; that is asked
-  // first, in the row, like any other consequential action.
   function chooseProvider(port, provider) {
     if (!service || !provider) return
-    if (provider.status === "ready") { service.expose(port, provider.id, ""); return }
-    if (provider.status !== "setup") return
-    if (provider.id === "cloudflared")
-      requestAction("install", selectedEntry(), { provider: provider.id, label: "cloudflared",
-        clause: "a checksum-pinned release, into ~/.local/bin" })
-    else service.setupProvider(provider.id)
+    provider = service.actionProviderFor(provider.id)
+    if (!provider || provider.reach !== "public") return
+    var entry = entryForPort(port)
+    if (!entry) return
+    if (provider.status === "ready") {
+      if (!service.validProcessIdentity(entry.process)) return
+      requestAction("share", entry, { provider: provider.id, label: entry.name,
+                                      clause: "publicly, via " + provider.label })
+    } else {
+      openSettings(provider.id)
+    }
+  }
+
+  function entryForPort(port) {
+    var i = indexOfPort(port)
+    return i < 0 ? null : visibleEntries[i]
   }
 
   function activateShareChip() {
@@ -402,8 +554,17 @@ Panel {
       // inline name editor both need plain letters, including j/k/x/space.
       // A confirmation is not blocked: y/n/enter are routed below.
       blocked: search.activeFocus || root.mode === "naming"
-      // Esc steps back one level, in mode precedence order.
+      // Esc steps back one level, in mode precedence order. Persistent
+      // guidance is the topmost level: it goes first, the rest is untouched.
       onCloseRequested: {
+        if (root.mode === "settings" && root.pendingSetup) {
+          root.pendingSetup = null
+          return
+        }
+        if (root.feedback !== null && root.feedback.kind !== "moment") {
+          root.feedback = null
+          return
+        }
         switch (root.mode) {
         case "help":     root.helpOpen = false; return
         case "confirm":  root.pendingAction = null; return
@@ -419,9 +580,9 @@ Panel {
         if (root.mode === "help" || root.mode === "confirm") return
         if (root.mode === "settings") {
           if (dy !== 0) {
-            root.settingsIndex = Util.clamp(root.settingsIndex + dy, 0, root.settingDefs.length - 1)
+            root.settingsIndex = Util.clamp(root.settingsIndex + dy, 0, Math.max(0, root.settingsCount - 1))
           } else if (dx !== 0) {
-            root.cycleSetting(root.settingDefs[root.settingsIndex], dx)
+            root.cycleSetting(root.settingDefs[root.settingsIndex - root.setupProviders.length], dx)
           }
           return
         }
@@ -452,7 +613,7 @@ Panel {
         switch (root.mode) {
         case "help":     root.helpOpen = false; return
         case "confirm":  root.confirmAccept(); return
-        case "settings": root.cycleSetting(root.settingDefs[root.settingsIndex], 1); return
+        case "settings": root.activateSetting(); return
         case "share":    root.activateShareChip(); return
         case "actions":  root.activateVerbAtCursor(); return
         case "detail":   return
@@ -478,6 +639,14 @@ Panel {
         if (t === "?") { root.helpOpen = true; return }
         if (t === ",") { root.toggleSettings(); return }
         if (root.mode === "settings") return
+        if (root.mode === "detail" && t === "t") {
+          if (detailLoader.item) detailLoader.item.toggleLatency()
+          return
+        }
+        if (root.mode === "detail" && (t === "[" || t === "]")) {
+          root.stepRange(t === "[" ? -1 : 1)
+          return
+        }
         if (t === "/") {
           root.detailEntry = null
           search.forceActiveFocus()
@@ -490,7 +659,7 @@ Panel {
         // cursor's (falling back to the first row).
         var e = root.mode === "detail" ? root.detailEntry : root.selectedOrFirst()
         if (!e) return
-        var u = root.currentUrl()
+        var u = root.service.urlFor(e.port, e.url)
         if (t === "o") { root.service.openUrl(u); return }
         if (t === "c") { root.service.copyText(u); return }
         if (t === "w") { root.service.toggleWatched(e.port); return }
@@ -638,6 +807,7 @@ Panel {
 
         // ---- detail page ----------------------------------------------------
         Loader {
+          id: detailLoader
           width: parent.width
           active: root.detailEntry !== null
           visible: root.mode === "detail"
@@ -649,6 +819,9 @@ Panel {
             brandColors: root.brandColors
             foreground: root.panelText
             fontFamily: root.fontFamily
+            active: root.opened && root.mode === "detail"
+            rangeSeconds: root.rangeSeconds
+            onRangeRequested: function (seconds) { root.rangeSeconds = seconds }
             onClosed: root.detailEntry = null
           }
         }
@@ -678,110 +851,6 @@ Panel {
             // Keys handlers accept the event; onAccepted would let it reach the catcher.
             Keys.onReturnPressed: root.activateSelected()
             Keys.onEnterPressed: root.activateSelected()
-          }
-
-          // ---- portless infra strip -------------------------------------------
-          // Local names are panel-level infrastructure, not a per-row action.
-          // When the proxy is down this is the one place that says so, with the
-          // fix attached; when it is running (or not installed) it is silent.
-          Rectangle {
-            width: parent.width
-            visible: root.portlessProvider !== null && root.portlessProvider.status === "setup"
-            implicitHeight: stripRow.implicitHeight + Style.spacing.lg
-            radius: Style.cornerRadius
-            color: Util.alpha(Color.accent, 0.08)
-            border.width: 1
-            border.color: Util.alpha(Color.accent, 0.35)
-
-            Row {
-              id: stripRow
-              anchors.left: parent.left
-              anchors.leftMargin: Style.spacing.lg
-              anchors.right: stripLink.left
-              anchors.rightMargin: Style.spacing.md
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.spacing.sm
-
-              OpticalGlyph {
-                id: stripGlyph
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.font.caption + Style.spacing.xs
-                height: Style.font.caption
-                text: Icons.g("localRoute")
-                fontSize: Style.font.caption
-                color: Color.accent
-              }
-
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: stripLink.armed
-                  ? "installs portless with npm, trusts its CA in Chrome and Firefox, starts the proxy"
-                  : (root.portlessProvider ? root.portlessProvider.detail : "")
-                color: root.panelText
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                width: Math.min(implicitWidth, stripRow.width - stripGlyph.width - stripRow.spacing)
-                elide: Text.ElideRight
-              }
-            }
-
-            // Two shapes of "needs setup": something this plugin may do itself
-            // (after saying exactly what: an npm install and a CA trusted in
-            // the browsers), and something only the user's terminal should do
-            // (anything with elevation) — that one is copy, never execute.
-            Row {
-              id: stripLink
-              anchors.right: parent.right
-              anchors.rightMargin: Style.spacing.lg
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.spacing.sm
-              readonly property bool needsSudo: !!(root.portlessProvider && root.portlessProvider.fix)
-              readonly property bool busy: root.service && root.service.busyAction === "portless:setup"
-              property bool armed: false
-              onVisibleChanged: armed = false
-
-              LinkText {
-                anchors.verticalCenter: parent.verticalCenter
-                text: {
-                  if (stripLink.busy) return "setting up…"
-                  if (stripLink.needsSudo) return "Copy fix"
-                  return stripLink.armed ? "set up" : "Set up"
-                }
-                color: Color.accent
-                font.pixelSize: Style.font.bodySmall
-                onClicked: {
-                  if (!root.service || stripLink.busy) return
-                  if (stripLink.needsSudo) {
-                    root.service.copyText(root.portlessProvider.fix)
-                  } else if (stripLink.armed) {
-                    stripLink.armed = false
-                    root.service.setupProvider("portless")
-                  } else {
-                    stripLink.armed = true
-                  }
-                }
-              }
-
-              Text {
-                visible: stripLink.armed
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: "·"
-                color: Util.alpha(root.panelText, 0.3)
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              LinkText {
-                visible: stripLink.armed
-                anchors.verticalCenter: parent.verticalCenter
-                text: "cancel"
-                color: Util.alpha(root.panelText, 0.7)
-                font.pixelSize: Style.font.bodySmall
-                onClicked: stripLink.armed = false
-              }
-            }
           }
 
           // ---- list -----------------------------------------------------------
@@ -930,21 +999,150 @@ Panel {
 
         }
 
-        // ---- settings -------------------------------------------------------
-        // Six rows of chips is ~70 items nobody is looking at until the gear
-        // is pressed, so it loads on demand like the detail page.
         Loader {
           width: parent.width
           active: root.mode === "settings"
           visible: active
 
-          sourceComponent: Component {
+          sourceComponent: Flickable {
+            id: settingsView
+            width: parent.width
+            implicitHeight: Math.min(settingsContent.implicitHeight, Style.space(420))
+            contentWidth: width
+            contentHeight: settingsContent.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+
+            function reveal(item, includeHeader) {
+              if (includeHeader) { contentY = 0; return }
+              var top = item.y
+              var bottom = top + item.height
+              if (top < contentY) contentY = top
+              else if (bottom > contentY + height) contentY = Math.max(0, bottom - height)
+            }
+
             Column {
-              width: parent.width
-              spacing: Style.spacing.xs
+              id: settingsContent
+              width: settingsView.width
+              spacing: Style.spacing.sm
 
               PanelSectionHeader {
-                text: "SETTINGS"
+                text: "LOCAL NAMES & SHARING"
+                foreground: Util.alpha(root.panelText, 0.5)
+                fontFamily: root.fontFamily
+              }
+
+              Repeater {
+                model: root.setupProviders
+
+                delegate: CursorSurface {
+                  id: providerCard
+                  required property var modelData
+                  required property int index
+                  readonly property var help: root.providerHelp[modelData.id] || null
+                  readonly property bool armed: root.pendingSetup !== null
+                    && root.pendingSetup.id === modelData.id
+                  readonly property bool busy: root.service
+                    && root.service.busyAction === modelData.id + ":setup"
+                  width: settingsContent.width
+                  implicitHeight: providerContent.implicitHeight + Style.spacing.md * 2
+                  hasCursor: root.settingsIndex === index
+                  foreground: root.panelText
+                  onHasCursorChanged: if (hasCursor) settingsView.reveal(providerCard, providerCard.index === 0)
+                  Component.onCompleted: Qt.callLater(function () {
+                    if (providerCard.hasCursor) settingsView.reveal(providerCard, providerCard.index === 0)
+                  })
+
+                  Column {
+                    id: providerContent
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.spacing.md
+                    spacing: Style.spacing.xs
+
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: (providerCard.modelData.reach === "local" ? "Local names" : providerCard.modelData.label)
+                        + (providerCard.busy ? " · setting up…"
+                           : providerCard.modelData.status === "ready" ? " · available" : "")
+                      color: root.panelText
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                    }
+
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: providerCard.armed ? root.pendingSetup.setupClause : providerCard.modelData.detail
+                      color: Util.alpha(root.panelText, 0.65)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                    }
+
+                    Text {
+                      width: parent.width
+                      visible: providerCard.help !== null
+                      textFormat: Text.PlainText
+                      text: providerCard.help ? providerCard.help.text : ""
+                      color: Util.alpha(root.panelText, 0.5)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                    }
+
+                    Text {
+                      width: parent.width
+                      visible: text.length > 0
+                      textFormat: Text.PlainText
+                      text: String(providerCard.modelData.fix || "")
+                      color: root.panelText
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                    }
+
+                    Row {
+                      spacing: Style.spacing.md
+
+                      LinkText {
+                        visible: providerCard.help !== null
+                        text: "Documentation"
+                        onClicked: if (root.service && providerCard.help) root.service.openUrl(providerCard.help.url)
+                      }
+
+                      LinkText {
+                        visible: !!providerCard.modelData.fix
+                          || (!!providerCard.modelData.setupClause && (providerCard.modelData.status === "setup"
+                              || (providerCard.modelData.status === "ready" && providerCard.modelData.reach === "local")))
+                        text: providerCard.busy ? "Setting up…"
+                          : providerCard.armed ? "Confirm setup"
+                          : providerCard.modelData.fix ? "Copy command"
+                          : providerCard.modelData.status === "ready" ? "Browser trust" : "Set up"
+                        color: Color.accent
+                        onClicked: {
+                          root.settingsIndex = providerCard.index
+                          root.activateProviderSetup(providerCard.modelData)
+                          keyCatcher.forceActiveFocus()
+                        }
+                      }
+
+                      LinkText {
+                        visible: providerCard.armed
+                        text: "Cancel"
+                        onClicked: root.pendingSetup = null
+                      }
+                    }
+                  }
+                }
+              }
+
+              PanelSectionHeader {
+                text: "PREFERENCES"
                 foreground: Util.alpha(root.panelText, 0.5)
                 fontFamily: root.fontFamily
               }
@@ -959,14 +1157,13 @@ Panel {
                   readonly property string chosen: root.settingValue(settingRow.modelData)
                   width: parent.width
                   implicitHeight: Math.max(Style.spacing.controlHeight, optsFlow.implicitHeight + Style.spacing.md)
-                  hasCursor: root.settingsIndex === settingRow.index
+                  hasCursor: root.settingsIndex === root.setupProviders.length + settingRow.index
                   foreground: root.panelText
+                  onHasCursorChanged: if (hasCursor) settingsView.reveal(settingRow)
 
-                  MouseArea {
-                    anchors.fill: parent
-                    z: -1
-                    hoverEnabled: true
-                    onEntered: root.settingsIndex = settingRow.index
+                  HoverHandler {
+                    id: settingHover
+                    onHoveredChanged: if (hovered) root.settingsIndex = root.setupProviders.length + settingRow.index
                   }
 
                   Text {
@@ -999,15 +1196,16 @@ Panel {
                     fontFamily: root.fontFamily
                     fontSize: Style.font.caption
                     onChanged: function (v) { root.applySetting(settingRow.modelData, v) }
-                    onHovered: function (i, isHovered) { if (isHovered) root.settingsIndex = settingRow.index }
+                    onHovered: function (i, isHovered) { if (isHovered) root.settingsIndex = root.setupProviders.length + settingRow.index }
                   }
                 }
               }
 
+
               Text {
                 width: parent.width
                 textFormat: Text.PlainText
-                text: ".localhost works everywhere with zero setup. Other domains need a one-time resolver rule and a proxy restart — the strip on the main page carries the exact fix, and existing .localhost names keep working."
+                text: ".localhost needs no resolver setup. Other domains need a resolver rule and proxy restart. Local names shows any required steps above."
                 color: Util.alpha(root.panelText, 0.5)
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -1047,7 +1245,7 @@ Panel {
                     { k: "l  ·  h / esc", d: "charts · back" },
                     { k: "type  or  /", d: "filter the list" },
                     { k: "o  ·  c", d: "open in browser · copy URL" },
-                    { k: "n  ·  s", d: "name it locally · share to internet" },
+                    { k: "n  ·  s", d: "local name · share / stop sharing" },
                     { k: "w", d: "watch — persist metrics to disk" },
                     { k: "p  ·  r", d: "pause / resume · restart (dev)" },
                     { k: "x  ·  R", d: "stop process · rescan now" },
@@ -1108,14 +1306,95 @@ Panel {
           }
         }
 
-        // ---- error / toast --------------------------------------------------
+        Text {
+          width: parent.width
+          visible: root.mode === "settings" && text.length > 0
+          text: root.hostWidget ? root.hostWidget.settingsSaveError : ""
+          textFormat: Text.PlainText
+          color: Color.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+        }
+
+        // Setup commands stay in Settings until dismissed or replaced.
+        Column {
+          id: stepBlock
+          visible: root.mode === "settings" && root.feedback !== null && root.feedback.kind === "copy"
+          width: parent.width
+          spacing: Style.spacing.sm
+          clip: true
+          property bool copied: false
+          onVisibleChanged: if (!visible) copied = false
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.feedback ? root.feedback.text : ""
+            color: Util.alpha(root.panelText, 0.75)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+          }
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(docsLink.implicitHeight, copyHit.height)
+
+            Text {
+              id: docsLink
+              textFormat: Text.PlainText
+              font.family: root.fontFamily
+              anchors.left: parent.left
+              anchors.right: copyHit.left
+              anchors.rightMargin: Style.spacing.lg
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Copy the command and run it in your terminal"
+              color: Util.alpha(root.panelText, 0.75)
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+
+            MouseArea {
+              id: copyHit
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.font.bodySmall + Style.spacing.xs
+              height: Style.font.bodySmall + Style.spacing.xs
+              HoverHandler { id: copyHover; cursorShape: Qt.PointingHandCursor }
+              onClicked: {
+                if (root.service && root.feedback) root.service.copyText(root.feedback.command, true)
+                stepBlock.copied = true
+                copiedTimer.restart()
+              }
+
+              Timer {
+                id: copiedTimer
+                interval: 1200
+                onTriggered: stepBlock.copied = false
+              }
+
+              OpticalGlyph {
+                anchors.centerIn: parent
+                width: Style.font.caption + Style.spacing.xs
+                height: Style.font.caption
+                text: Icons.g("copy")
+                fontSize: Style.font.bodySmall
+                scale: stepBlock.copied ? 1.3 : 1
+                Behavior on scale { NumberAnimation { duration: 150 } }
+                color: stepBlock.copied || copyHover.hovered ? Color.accent : Util.alpha(Color.accent, 0.7)
+              }
+            }
+          }
+        }
+
         Text {
           width: parent.width
           visible: text.length > 0
           textFormat: Text.PlainText
-          text: root.toast || (root.service ? root.service.lastError : "")
-          // A hint is guidance, not an alarm.
-          color: root.toast && root.toastIsHint ? Color.accent : Color.urgent
+          text: root.feedback !== null && root.feedback.kind !== "copy"
+            ? root.feedback.text : (root.feedback === null && root.service ? root.service.lastError : "")
+          color: root.feedback !== null && root.feedback.error !== true ? Color.accent : Color.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -1128,8 +1407,9 @@ Panel {
             actions:  "h/l choose · enter act · esc close",
             share:    "h/l choose · enter expose · esc back",
             naming:   "enter save · esc back",
-            settings: "j/k move · h/l change · esc back",
-            detail:   "j/k next port · o open · c copy · w watch · esc back",
+            settings: "j/k move · h/l change · enter setup · esc back",
+            detail:   "[ / ] range · " + (root.detailEntry && root.detailEntry.httpProbe ? "t HTTP/TCP · " : "")
+              + "j/k port · w watch · esc back",
             list:     "j/k move · enter actions · l charts · ? shortcuts"
           })
           width: parent.width

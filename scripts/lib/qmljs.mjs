@@ -1,9 +1,4 @@
-// Load a QML `.pragma library` JS file under plain node.
-//
-// The single home for the strip-pragma + Function-eval dance: node cannot
-// parse the `.pragma library` directive, so it is removed before evaluation
-// and the file's node-only `module.exports` shim provides the exports.
-// Used by the tests and by scripts/portal (via the CLI modes below).
+// Node cannot parse QML pragmas. Strip them and use each library's exports shim.
 
 import { execFileSync } from "node:child_process"
 import { readFileSync } from "node:fs"
@@ -35,6 +30,11 @@ if (mode === "icons") {
   console.log(JSON.stringify(out))
 } else if (mode === "decorate") {
   const { decorate } = loadQmlJs(detectPath)
-  const scan = JSON.parse(execFileSync(process.argv[3]).toString())
-  console.log(JSON.stringify(scan.ports.map(decorate)))
+  const scan = JSON.parse(execFileSync(process.argv[3], { maxBuffer: 64 * 1024 * 1024 }).toString())
+  if (scan.error) {
+    console.error(`portal: ${String(scan.error)}`)
+    process.exitCode = 1
+  } else {
+    console.log(JSON.stringify(scan.ports.map(decorate)))
+  }
 }

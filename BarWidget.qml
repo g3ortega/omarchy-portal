@@ -61,47 +61,62 @@ BarWidget {
     return null
   }
 
-  // updateEntryInline REPLACES the whole entry, so a save carries every
-  // current value plus the one change. Returns whether anything persisted.
+  function mergedSettings(changes) {
+    var merged = Object.assign({ id: moduleName }, liveEntry() || settings || ({}))
+    for (var key in changes) merged[key] = changes[key]
+    return merged
+  }
+
   function saveSetting(key, value) {
     if (!bar || !bar.shell || typeof bar.shell.updateEntryInline !== "function") return false
-    var current = liveEntry() || settings || ({})
-    var merged = { id: moduleName }
-    for (var k in current) if (k !== "id") merged[k] = current[k]
-    merged[key] = value
-    // Apply locally first so the chip reflects the click immediately rather
-    // than waiting for the shell's write-back (same as the built-in clock).
-    // Every read of `settings` is now correct, which is what lets the disk
-    // write be coalesced below.
-    root.settings = merged
-    root._pending = merged
+    var changes = Object.assign({}, _pending || ({}))
+    changes[key] = value
+    root._pending = changes
+    root.settings = mergedSettings(changes)
     persistTimer.restart()
     return true
   }
 
-  // A held h/l repeats at ~25/s, and each persist is two deep clones of the
-  // whole shell config plus an atomic write whose watcher fires a reload. One
-  // write per burst is indistinguishable to the user and cheap to the shell.
   property var _pending: null
+  property string settingsSaveError: ""
 
   Timer {
     id: persistTimer
     interval: 200
     onTriggered: {
       if (!root._pending) return
-      var entry = root._pending
+      var entry = root.mergedSettings(root._pending)
+      var current = root.liveEntry()
+      // The host also returns false when the entry already matches.
+      var unchanged = current && Object.keys(current).length === Object.keys(entry).length
+        && Object.keys(entry).every(function (key) { return current[key] === entry[key] })
+      if (!unchanged && root.bar.shell.updateEntryInline(root.moduleName, entry) === false) {
+        root.settingsSaveError = "Settings were not saved. Select a setting to retry. Check the Portal entry in ~/.config/omarchy/shell.json."
+        return
+      }
       root._pending = null
-      if (root.bar.shell.updateEntryInline(root.moduleName, entry) === false)
-        console.warn("g3ortega.portal: shell.json did not accept the settings write")
+      root.settings = entry
+      root.settingsSaveError = ""
     }
   }
 
   readonly property bool showCount: String(setting("barLabel", "Count")) !== "Icon only"
 
-  // A public tunnel is a security-relevant state, so it gets its own glyph and
-  // the theme's urgent color rather than being folded into the count.
-  readonly property bool broadcasting: service ? service.hasPublicTunnel : false
-  readonly property int devCount: service ? service.devCount : 0
+  function summarizeCounts(counts, devCount) {
+    var lines = []
+    if (counts.pub > 0) lines.push(counts.pub + (counts.pub === 1 ? " public share" : " public shares"))
+    if (counts.named > 0) lines.push(counts.named + (counts.named === 1 ? " named route" : " named routes"))
+    if (devCount > 0 || lines.length === 0)
+      lines.push(devCount + (devCount === 1 ? " dev server" : " dev servers"))
+    return {
+      broadcasting: counts.pub > 0,
+      count: counts.pub > 0 ? counts.pub : counts.named > 0 ? counts.named : devCount,
+      tooltip: lines.join(" · ")
+    }
+  }
+
+  readonly property var indicator: summarizeCounts(service ? service.tunnelCounts : ({ pub: 0, named: 0 }),
+                                                  service ? service.devCount : 0)
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -135,8 +150,6 @@ BarWidget {
     id: panelLoader
     active: false
     visible: false
-    // Ordinary declarative bindings: the host-injected properties (bar,
-    // settings) and the service flow into the panel whenever they change.
     sourceComponent: PortalPanel {
       bar: root.bar
       settings: root.settings
@@ -151,18 +164,23 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     active: root.opened
-    readonly property string glyph: Icons.g(root.broadcasting ? "broadcast" : "portal")
+    readonly property string glyph: Icons.g("portal")
+    labelVisible: false
     // Vertical bars have no room for a label.
-    text: root.vertical || !root.showCount ? glyph : glyph + " " + root.devCount
-    foreground: root.broadcasting
+    text: root.vertical || !root.showCount || root.indicator.count <= 0 ? glyph : glyph + " " + root.indicator.count
+    foreground: root.indicator.broadcasting
       ? (root.bar ? root.bar.urgent : Color.urgent)
       : (root.bar ? root.bar.barForeground : Color.foreground)
-    tooltipText: {
-      if (!root.service) return "Portal"
-      var lines = root.devCount + (root.devCount === 1 ? " dev server" : " dev servers")
-      if (root.broadcasting) lines += " · exposed publicly"
-      else if (root.service.tunnelCount > 0) lines += " · shared locally"
-      return lines
+    tooltipText: root.service ? root.indicator.tooltip : "Portal"
+
+    OpticalGlyph {
+      id: label
+      anchors.fill: parent
+      transform: Translate { x: label.width / 2 - label.paintedCenterX }
+      text: button.text
+      fontFamily: button.fontFamily
+      fontSize: button.fontSize
+      color: button.active ? button.activeColor : button.foreground
     }
     onPressed: function (buttonCode) {
       if (buttonCode === Qt.LeftButton) root.toggle()

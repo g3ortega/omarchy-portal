@@ -25,7 +25,7 @@ function check(name, entry, expect) {
   }
 }
 
-const base = { addresses: ["127.0.0.1"], scope: "local", markers: [], deps: [], cmdline: "", comm: "", cwd: "", projectRoot: "", projectName: "" }
+const base = { addresses: ["127.0.0.1"], scope: "local", markers: [], deps: [], cmdline: "", comm: "", cwd: "", projectRoot: "", projectName: "", exclusiveOwner: true }
 const e = (o) => ({ ...base, ...o })
 
 console.log("Detect.js")
@@ -58,21 +58,88 @@ check("plain Node with a package.json", e({
 }), { kind: "node", label: "Node", category: "dev" })
 
 // --- Ruby
-check("Rails via puma", e({
+check("Puma is a Rack server, not proof of Rails", e({
   port: 3000, comm: "ruby", cmdline: "puma 6.4.2 (tcp://0.0.0.0:3000) [acme]",
   markers: ["Gemfile", "config.ru"], projectName: "acme"
-}), { kind: "rails", label: "Rails", category: "dev", name: "acme" })
+}), { kind: "puma", label: "Puma", category: "dev", name: "acme" })
 
-check("Rails via Gemfile + config.ru", e({
+check("Generic Rack project", e({
   port: 3000, comm: "ruby", markers: ["Gemfile", "config.ru"]
-}), { kind: "rails" })
+}), { kind: "rack" })
 
-check("Rails with a package.json is still Rails", e({
+check("Rack with a package.json stays Rack", e({
   port: 3000, comm: "ruby", markers: ["Gemfile", "config.ru", "package.json"]
-}), { kind: "rails" })
+}), { kind: "rack" })
 check("Laravel with a package.json is still Laravel", e({
   port: 8000, comm: "php", markers: ["artisan", "package.json"]
 }), { kind: "laravel" })
+
+const mixedProject = ["package.json", "Gemfile", "config.ru", "bin/rails"]
+check("live Puma Rails listener with React assets is Rails", e({
+  port: 3000, comm: "ruby", cmdline: "puma 7.2.1 (tcp://127.0.0.1:3000) [platform]",
+  markers: mixedProject, deps: ["react"]
+}), { kind: "rails", httpProbe: true })
+check("Vite listener in the same Rails project stays Vite", e({
+  port: 5173, comm: "node", cmdline: "node node_modules/vite/bin/vite.js",
+  markers: mixedProject, deps: ["vite", "react"]
+}), { kind: "vite", httpProbe: true })
+for (const [name, fields, kind] of [
+  ["Rack", { comm: "ruby", markers: ["Gemfile", "config.ru"] }, "rack"],
+  ["Laravel", { comm: "php", markers: ["artisan"] }, "laravel"],
+  ["Django", { comm: "python3.12", markers: ["manage.py"] }, "django"],
+  ["Uvicorn", { comm: "python3", cmdline: "uvicorn app:app" }, "uvicorn"],
+  ["Redis", { comm: "redis-server" }, "redis"],
+  ["Java", { comm: "java", markers: ["pom.xml"] }, "javadev"],
+  ["Go", { comm: "main", markers: ["go.mod"], argv: ["/p/app/main"], projectRoot: "/p/app" }, "go"],
+  ["Rust", { comm: "app", markers: ["Cargo.toml"], argv: ["./target/debug/app"], cwd: "/p/app", projectRoot: "/p/app" }, "rust"]
+]) {
+  check(`${name} listener ignores frontend dependencies and markers`, e({
+    port: 41000, ...fields, deps: ["next", "vite", "react"],
+    markers: [...(fields.markers || []), "package.json", "angular.json"]
+  }), { kind })
+}
+for (const runtime of ["node", "node-MainThread", "bun", "deno"]) {
+  check(`${runtime} retains framework evidence in mixed project`, e({
+    port: 41000, comm: runtime, markers: mixedProject, deps: ["react"]
+  }), { kind: "react" })
+}
+check("rewritten Next.js title retains framework classification", e({
+  port: 3000, comm: "next-server (v1", cmdline: "next-server (v15.0.0)", deps: ["next"]
+}), { kind: "next" })
+check("Nuxt process title retains framework classification", e({
+  port: 3000, comm: "nuxt dev", cmdline: "nuxt dev", deps: ["nuxt", "vite"]
+}), { kind: "nuxt" })
+check("missing process information retains project dependency fallback", e({
+  port: 3000, markers: ["package.json"], deps: ["react"]
+}), { kind: "react" })
+
+for (const comm of ["chrome", "agent-browser-l"]) {
+  for (const markers of [mixedProject, ["manage.py"], ["artisan"], ["mix.exs"], ["go.mod"], ["Cargo.toml"]]) {
+    check(`${comm} does not inherit project stack ${markers.join(",")}`, e({
+      port: 35713, comm, markers, deps: ["react"],
+      argv: ["/home/x/.cache/tools/" + comm], projectRoot: "/p/app", cwd: "/p/app"
+    }), { kind: "unknown", httpProbe: false })
+  }
+}
+for (const argv of [["./target/debug/server"], ["../app/target/debug/server"], ["/p/app/target/debug/server"]]) {
+  check(`Rust project executable ${argv[0]} keeps marker evidence`, e({
+    port: 41000, comm: "server", argv, markers: ["Cargo.toml"], projectRoot: "/p/app", cwd: "/p/app"
+  }), { kind: "rust" })
+}
+check("relative executable outside project does not inherit Rust", e({
+  port: 41000, comm: "server", argv: ["../other/server"], markers: ["Cargo.toml"],
+  projectRoot: "/p/app", cwd: "/p/app"
+}), { kind: "unknown" })
+check("Go temporary build traversal does not imply a Go executable", e({
+  port: 41000, comm: "server", argv: ["/tmp/go-build12345/b001/exe/../../../tool"],
+  markers: ["go.mod"], projectRoot: "/p/app"
+}), { kind: "unknown" })
+check("missing executable is not proof of a compiled project", e({
+  port: 41000, comm: "server", markers: ["Cargo.toml"], projectRoot: "/p/app"
+}), { kind: "unknown" })
+check("Go temporary build executable keeps marker evidence", e({
+  port: 41000, comm: "main", argv: ["/tmp/go-build12345/b001/exe/main"], markers: ["go.mod"], projectRoot: "/p/app"
+}), { kind: "go" })
 
 check("Sidekiq is a service, not a dev server", e({
   port: 7433, comm: "ruby", cmdline: "sidekiq 7.2.0 acme [0 of 5 busy]"
@@ -87,18 +154,28 @@ check("Django via manage.py", e({
   port: 8000, comm: "python3", markers: ["manage.py", "requirements.txt"]
 }), { kind: "django", label: "Django", category: "dev" })
 
-check("FastAPI via uvicorn", e({
+for (const role of ["master", "worker"]) {
+  const title = `gunicorn: ${role} [app:app]`
+  check(`Gunicorn ${role} process title retains HTTP classification`, e({
+    port: 41000, comm: title.slice(0, 15), cmdline: title
+  }), { kind: "gunicorn", httpProbe: true })
+}
+check("Gunicorn helper name is not a Python runtime", e({
+  port: 41000, comm: "gunicorn-helper", cmdline: "gunicorn-helper", markers: ["manage.py"]
+}), { kind: "unknown", httpProbe: false })
+
+check("Uvicorn is not proof of FastAPI", e({
   port: 8000, comm: "python3", cmdline: "uvicorn app.main:app --reload"
-}), { kind: "uvicorn", label: "FastAPI" })
+}), { kind: "uvicorn", label: "Uvicorn" })
 
 // --- Other stacks
-check("Phoenix via mix.exs", e({ port: 4000, comm: "beam.smp", markers: ["mix.exs"] }), { kind: "phoenix" })
+check("Elixir via mix.exs", e({ port: 4000, comm: "beam.smp", markers: ["mix.exs"] }), { kind: "elixir" })
 check("RabbitMQ is not Phoenix", e({ port: 5672, comm: "beam.smp", cmdline: "beam.smp -s rabbit boot" }), { kind: "rabbit" })
 check("Storybook beats vite in the same project", e({ port: 6006, comm: "node", deps: ["storybook", "vite"] }), { kind: "storybook" })
-check("Phoenix gets the elixir brand color", e({ port: 4000, comm: "beam.smp", markers: ["mix.exs"] }), { color: "#4b275f" })
+check("Elixir gets its brand color", e({ port: 4000, comm: "beam.smp", markers: ["mix.exs"] }), { color: "#4b275f" })
 check("Laravel via artisan", e({ port: 8000, comm: "php", markers: ["artisan", "composer.json"] }), { kind: "laravel" })
-check("Go via go.mod", e({ port: 8080, comm: "main", markers: ["go.mod"] }), { kind: "go", label: "Go" })
-check("Rust via Cargo.toml", e({ port: 8080, comm: "server", markers: ["Cargo.toml"] }), { kind: "rust" })
+check("Go via go.mod", e({ port: 8080, comm: "main", markers: ["go.mod"], argv: ["/p/app/main"], projectRoot: "/p/app" }), { kind: "go", label: "Go" })
+check("Rust via Cargo.toml", e({ port: 8080, comm: "server", markers: ["Cargo.toml"], argv: ["./target/debug/server"], cwd: "/p/app", projectRoot: "/p/app" }), { kind: "rust" })
 
 // --- Backing services identified by well-known port with no process info
 check("PostgreSQL by port", e({ port: 5432 }), { kind: "postgres", category: "service", web: false })
@@ -112,6 +189,21 @@ check("DynamoDB Local via cmdline", e({
 // --- System ports are grouped away from your work
 check("DNS is system", e({ port: 53 }), { kind: "dns", category: "system" })
 check("CUPS is system", e({ port: 631 }), { kind: "cups", category: "system" })
+
+for (const image of ["ghcr.io/berriai/litellm:main-stable", "ghcr.io/berriai/litellm-database@sha256:abcd"]) {
+  check(`LiteLLM container ${image} exposes its HTTP interface`, e({
+    port: 43127, container: { name: "llm-proxy", image }, exclusiveOwner: false,
+    markers: ["package.json", "bin/rails"], deps: ["react"]
+  }), { kind: "litellm", label: "LiteLLM", name: "llm-proxy", comm: "Docker",
+    category: "service", icon: "docker", httpProbe: true, url: "http://localhost:43127", process: null })
+}
+for (const image of ["acme/my-litellm-helper:latest", "registry.local:5000/team/other:litellm", "acme/litellm-tools:latest"]) {
+  check(`generic Docker image ${image} does not imply HTTP`, e({
+    port: 43127, container: { name: "worker", image }, exclusiveOwner: false,
+    markers: ["package.json", "bin/rails"], deps: ["next"]
+  }), { kind: "docker", label: "Docker", name: "worker", comm: "Docker",
+    category: "service", httpProbe: false, url: "", process: null })
+}
 
 // --- Fallbacks
 check("unknown process on a web port still offers a URL", e({
@@ -129,6 +221,10 @@ check("all-interfaces scope preserved", e({
   port: 8000, comm: "java", addresses: ["*"], scope: "all"
 }), { scope: "all" })
 
+check("a shared listener keeps identity without process authority", e({
+  port: 8000, pid: 10, start: 20, exclusiveOwner: false
+}), { pid: 10, start: 20, process: null })
+
 // --- displayName fallback chain lives in Detect.js, not the scanner
 check("directory basename names the row when package.json has no name", e({
   port: 3000, comm: "node", deps: ["next"], projectRoot: "/home/x/proj/acme-web"
@@ -140,7 +236,7 @@ check("package name beats directory basename", e({
 
 // --- Runtimes and Python tools
 check("Hono via dependency", e({ port: 3000, comm: "node", deps: ["hono"] }), { kind: "hono" })
-check("SolidStart via dependency", e({ port: 3000, comm: "node", deps: ["@solidjs/start"] }), { kind: "solid" })
+check("SolidStart via dependency", e({ port: 3000, comm: "node", deps: ["@solidjs/start"] }), { kind: "solidstart" })
 check("Deno by comm, labeled as itself", e({ port: 8000, comm: "deno" }), { kind: "deno", label: "Deno" })
 check("Bun by comm", e({ port: 3000, comm: "bun" }), { kind: "bun", label: "Bun" })
 check("Jupyter via cmdline", e({ port: 8888, comm: "python3", cmdline: "python3 -m jupyter lab" }), { kind: "jupyter" })
@@ -168,9 +264,9 @@ check("a project at ~/invite is not Vite", e({
 check("a Next app under ~/portless-demo is not the proxy", e({
   port: 3000, comm: "node", cmdline: "node /home/x/portless-demo/node_modules/.bin/next dev", deps: ["next"]
 }), { kind: "next", category: "dev" })
-check("a puma tag mentioning nuxt is still Rails", e({
+check("a puma tag mentioning nuxt stays Puma", e({
   port: 3000, comm: "ruby", cmdline: "puma 6.4.2 (tcp://0.0.0.0:3000) [nuxt-migration]"
-}), { kind: "rails" })
+}), { kind: "puma" })
 check("python3.12 is Python", e({ port: 5000, comm: "python3.12" }), { kind: "python" })
 check("a LAN-only bind gets its own address in the URL", e({
   port: 8080, comm: "node", deps: ["vite"], addresses: ["192.168.1.5"], scope: "lan"
@@ -242,6 +338,8 @@ check("a wildcard bind still opens localhost", e({
 {
   const panelSrc = readFileSync(join(here, "..", "PortalPanel.qml"), "utf8")
   const serviceSrc = readFileSync(join(here, "..", "Service.qml"), "utf8")
+  const rowSrc = readFileSync(join(here, "..", "PortRow.qml"), "utf8")
+  const scanSrc = readFileSync(join(here, "..", "scripts", "scan-ports.sh"), "utf8")
   const fn = (src, name, params) => {
     const m = src.match(new RegExp("\\n  function " + name + "\\([^)]*\\) \\{\\n([\\s\\S]*?)\\n  \\}\\n"))
     if (!m) throw new Error(`no function ${name}`)
@@ -263,31 +361,187 @@ check("a wildcard bind still opens localhost", e({
   const verbsFor = fn(panelSrc, "verbsFor", ["service", "portlessReady", "selectedPort", "expandedKind", "entry"])
   const svc = (o) => ({
     routeFor: () => o.route || null, publicTunnelFor: () => o.tunnel || null,
+    actionProviderFor: () => ({ available: true }), publicProviders: [{ id: "cloudflared", available: true }],
     stats: o.stats || {}, urlFor: () => o.url === undefined ? "http://localhost:1" : o.url,
-    canRestart: (e) => !!(e.pid && e.argv.length && !e.argvTruncated)
+    validProcessIdentity: (p) => !!(p && p.pid > 1 && Number(p.start) > 0),
+    canRestart: (e) => !!(e.process && e.argv.length && !e.argvTruncated)
   })
   const ids = (vs) => vs.map((v) => v.id)
-  const dev = { port: 3000, pid: 10, category: "dev", url: "http://localhost:3000", argv: ["node"], argvTruncated: false }
+  const dev = { port: 3000, pid: 10, start: 20, process: { pid: 10, start: "20" }, category: "dev", url: "http://localhost:3000", argv: ["node"], argvTruncated: false }
   eq("a dev server offers every verb", ids(verbsFor(svc({}), true, -1, "", dev)), ["name", "share", "pause", "restart", "stop"])
   eq("a service is not restartable", ids(verbsFor(svc({}), true, -1, "", { ...dev, category: "service" })), ["name", "share", "pause", "stop"])
   eq("a system port gets no verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, category: "system" })), [])
-  eq("no pid means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, pid: null })), ["name", "share"])
-  eq("no proxy and no name means no name verb", ids(verbsFor(svc({}), false, -1, "", dev)), ["share", "pause", "restart", "stop"])
-  eq("an existing name can be renamed without the proxy", verbsFor(svc({ route: {} }), false, -1, "", dev)[0].label, "rename")
+  eq("no pid means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, pid: null, process: null })), ["name"])
+  eq("no start means no process verbs", ids(verbsFor(svc({}), true, -1, "", { ...dev, start: null, process: null })), ["name"])
+  eq("name remains discoverable before setup", ids(verbsFor(svc({}), false, -1, "", dev)), ["name", "share", "pause", "restart", "stop"])
+  eq("an existing name offers setup without the proxy", verbsFor(svc({ route: { reach: "local", managed: false, aliasName: "app" } }), false, -1, "", dev)[0].label, "name setup")
   eq("a truncated command line cannot be restarted", ids(verbsFor(svc({}), true, -1, "", { ...dev, argvTruncated: true })), ["name", "share", "pause", "stop"])
   eq("a paused process offers resume, urgently", verbsFor(svc({ stats: { 3000: { paused: true } } }), true, -1, "", dev)[2], { id: "pause", label: "resume", on: false, urgent: true })
-  eq("a shared port offers to stop sharing, urgently", verbsFor(svc({ tunnel: { url: "x" } }), true, -1, "", dev)[1], { id: "share", label: "stop sharing", on: false, urgent: true })
+  eq("a shared port omits the duplicate sharing verb", verbsFor(svc({ tunnel: { url: "x" } }), true, -1, "", dev).some(v => v.id === "share"), false)
   eq("the open section's verb is marked on", verbsFor(svc({}), true, 3000, "naming", dev)[0].on, true)
   eq("no URL means no share verb", ids(verbsFor(svc({ url: "" }), true, -1, "", dev)), ["name", "pause", "restart", "stop"])
 
+  const stillListed = fn(panelSrc, "stillListed", ["service", "entryForPort", "entry"])
+  const current = { ...dev, name: "app", cwd: "/tmp/app" }
+  const processService = { sameProcess: (a, b) => !!(a && b && a.pid === b.pid && a.start === b.start) }
+  eq("an exact process keeps its confirmation", stillListed(processService, () => current, current), true)
+  eq("a replacement process cancels its confirmation", stillListed(processService, () => ({ ...current, pid: 11, start: 21, process: { pid: 11, start: "21" } }), current), false)
+  eq("two unattributed rows do not retain public consent", stillListed(processService, () => ({ ...current, pid: null, start: null, process: null }), { ...current, pid: null, start: null, process: null }), false)
+
+  const validProcessIdentity = fn(serviceSrc, "validProcessIdentity", ["process"])
+  eq("pid and start make a process identity", validProcessIdentity({ pid: 2, start: "1" }), true)
+  eq("pid 1 is not a process identity", validProcessIdentity({ pid: 1, start: "1" }), false)
+  eq("start zero is not a process identity", validProcessIdentity({ pid: 2, start: "0" }), false)
+  if (!serviceSrc.includes('property string scanError: ""') || !serviceSrc.includes('property string tunnelError: ""'))
+    bad.push("scan and tunnel errors do not have independent state")
+  const lifecycleBody = serviceSrc.match(/function _runLifecycle\([^)]*\) \{([\s\S]*?)\n  \}/)?.[1] ?? ""
+  if (!lifecycleBody.includes("_queueAction") || lifecycleBody.includes("_expectGone"))
+    bad.push("lifecycle disappearance is not delegated to the queued launch")
+  const launchCheck = serviceSrc.indexOf("if (!started)")
+  const expectGone = serviceSrc.indexOf("_expectGone(root.activeAction.target)")
+  if (launchCheck === -1 || expectGone < launchCheck)
+    bad.push("lifecycle disappearance is marked before the helper launches")
+  if (!serviceSrc.includes("_forgetGone(action.target)"))
+    bad.push("failed lifecycle actions do not clear disappearance state")
+
+  const scanKeyFields = serviceSrc.match(/identity\.push\(\[([\s\S]*?)\]\)/)?.[1] ?? ""
+  for (const field of ["e.start", "e.argv", "e.argvTruncated", "e.exclusiveOwner"])
+    if (!scanKeyFields.includes(field)) bad.push(`scan identity omits ${field}`)
+
+  const notifyVanishedDev = fn(serviceSrc, "_notifyVanishedDev",
+    ["devPorts", "_prevDevPorts", "processKey", "_expectedGoneAt", "expectedGoneMs", "publicTunnelFor", "notify"])
+  const runVanished = (markers, now, devPorts = [], previous = [
+    { port: 3000, process: { pid: 10, start: "20" }, label: "Node" }
+  ]) => {
+    const notices = [], state = { ...markers }, realNow = Date.now
+    Date.now = () => now
+    try {
+      notifyVanishedDev(devPorts, previous, (p) => p ? `${p.pid}:${p.start}` : "", state, 600000, () => null,
+        (...a) => notices.push(a))
+    } finally { Date.now = realNow }
+    return { notices, markers: state }
+  }
+  eq("a fresh expected-stop marker suppresses the crash notice",
+    runVanished({ "10:20": 700000 - 60000 }, 700000),
+    { notices: [], markers: {} })
+  eq("an expired expected-stop marker does not suppress a crash",
+    runVanished({ "10:20": 700000 - 600001 }, 700000),
+    { notices: [["Port 3000 went quiet", "Node is no longer listening"]], markers: {} })
+  eq("losing one of a process's ports still reports that port",
+    runVanished({}, 700000,
+      [{ port: 3001, process: { pid: 10, start: "20" }, label: "Node" }],
+      [
+        { port: 3000, process: { pid: 10, start: "20" }, label: "Node" },
+        { port: 3001, process: { pid: 10, start: "20" }, label: "Node" }
+      ]),
+    { notices: [["Port 3000 went quiet", "Node is no longer listening"]], markers: {} })
+  if (!serviceSrc.includes("targetHealthy: t.targetHealthy === true ? true"))
+    bad.push("tunnel status drops target health before the UI")
+  const targetOfflineExpr = rowSrc.match(/readonly property bool targetOffline: ([^\n]+)/)?.[1]
+  const publicTunnelTextExpr = rowSrc.match(/readonly property string publicTunnelText: ([^\n]+)/)?.[1]
+  if (!targetOfflineExpr || !publicTunnelTextExpr) {
+    bad.push("the public tunnel row does not model an offline target")
+  } else {
+    const targetOffline = new Function("publicTunnel", "return " + targetOfflineExpr)
+    const publicTunnelText = new Function("publicTunnel", "targetOffline", "return " + publicTunnelTextExpr)
+    const staleTunnel = { url: "https://stale.trycloudflare.com", targetHealthy: false }
+    eq("an unhealthy tracked tunnel is marked offline", targetOffline(staleTunnel), true)
+    eq("an adopted tunnel is not marked offline", targetOffline({ url: "https://adopted.example", targetHealthy: null }), false)
+    eq("the public line names an offline target",
+      publicTunnelText(staleTunnel, true), "https://stale.trycloudflare.com · target offline")
+  }
+  const maxPorts = Number(scanSrc.match(/^MAX_PORTS=([0-9]+)/m)?.[1] ?? 0)
+  const argvLogicalCap = Number(scanSrc.match(/^ARGV_LOGICAL_CAP=([0-9]+)$/m)?.[1] ?? 0)
+  if (argvLogicalCap !== 8192) bad.push(`scanner argv logical cap is ${argvLogicalCap}`)
+  const scanCap = Number(serviceSrc.match(/outputCaps:[^\n]*scan:\s*([0-9]+)/)?.[1] ?? 0)
+  const maxArgvValue = "\u0001".repeat(argvLogicalCap + 1)
+  const maximalArgvDocument = { version: 1, ports: Array.from({ length: maxPorts }, () => ({ argv: [maxArgvValue] })) }
+  eq(`scan cap holds ${maxPorts} maximally JSON-escaped sampled argv values`, Buffer.byteLength(JSON.stringify(maximalArgvDocument)) <= scanCap, true)
+  const tunnelCap = Number(serviceSrc.match(/outputCaps:[^\n]*poll:\s*([0-9]+)/)?.[1] ?? 0)
+  if (tunnelCap < 8 * 1024 * 1024) bad.push(`tunnel poll cap is only ${tunnelCap} bytes`)
+  const lifecycleDeadline = Number(serviceSrc.match(/deadlines:[^\n]*lifecycle:\s*([0-9]+)/)?.[1] ?? 0)
+  if (lifecycleDeadline !== 20) bad.push(`lifecycle deadline is ${lifecycleDeadline} seconds`)
+  if (!/queued\.script === "lifecycle\.sh"\s*\? "lifecycle"\s*:\s*"quick"/.test(serviceSrc))
+    bad.push("lifecycle actions still use the quick helper deadline")
+
+  const state = { feedback: null }, timer = { restarted: 0, stopped: 0,
+    restart() { this.restarted++ }, stop() { this.stopped++ } }
+  const feedbackFn = (name, params) => {
+    const body = panelSrc.match(new RegExp("\\n  function " + name + "\\([^)]*\\) \\{\\n([\\s\\S]*?)\\n  \\}\\n"))?.[1]
+    if (!body) throw new Error(`no function ${name}`)
+    return new Function("state", "feedbackTimer", ...params, body.replace(/\bfeedback\s*=/g, "state.feedback ="))
+  }
+  const showMoment = feedbackFn("showMoment", ["message", "error"])
+  const showGuidance = feedbackFn("showGuidance", ["message", "command"])
+  showGuidance(state, timer, "run this", "sudo true")
+  eq("copy guidance carries one command", state.feedback, { kind: "copy", text: "run this", error: false, command: "sudo true" })
+  eq("copy guidance remains until replacement or dismissal", timer.stopped, 1)
+  showMoment(state, timer, "copied", false)
+  eq("a moment replaces copy guidance", state.feedback, { kind: "moment", text: "copied", error: false })
+  showMoment(state, timer, "failed", true)
+  eq("an action failure stays urgent", state.feedback, { kind: "moment", text: "failed", error: true })
+
+  const extract = (src, re) => src.match(re)?.[0] ?? ""
+  if (panelSrc.includes("Text.RichText")) bad.push("PortalPanel.qml still renders rich text")
+  if (/\bfunction\s+richStep\s*\(/.test(panelSrc)) bad.push("PortalPanel.qml still declares richStep")
+  const stepBlockSrc = extract(panelSrc,
+    /^        Column \{\n          id: stepBlock\n[\s\S]*?^        \}$/m)
+  if (!stepBlockSrc) {
+    bad.push("copy guidance is not a Column named stepBlock")
+  } else {
+    const guidanceTextSrc = extract(stepBlockSrc,
+      /^          Text \{\n[\s\S]*?^          \}$/m)
+    if (!/^[ \t]*textFormat:[ \t]*Text\.PlainText[ \t]*$/m.test(guidanceTextSrc)
+        || !/^[ \t]*text:[ \t]*root\.feedback[ \t]*\?[ \t]*root\.feedback\.text[ \t]*:[ \t]*""[ \t]*$/m.test(guidanceTextSrc)
+        || !/^[ \t]*wrapMode:[ \t]*Text\.WrapAtWordBoundaryOrAnywhere[ \t]*$/m.test(guidanceTextSrc)
+        || /^[ \t]*elide[ \t]*:/m.test(guidanceTextSrc))
+      bad.push("copy guidance does not render feedback text literally with fallback wrapping")
+    if (!/^[ \t]*clip:[ \t]*true[ \t]*$/m.test(stepBlockSrc))
+      bad.push("copy guidance no longer clips to its block")
+    const actionRowSrc = extract(stepBlockSrc,
+      /^          Item \{\n[\s\S]*?^          \}$/m)
+    if (actionRowSrc.includes("Portless documentation") || /onLinkActivated/.test(actionRowSrc))
+      bad.push("generic setup guidance still assumes a Portless destination")
+    const copyHitSrc = extract(actionRowSrc,
+      /^            MouseArea \{\n              id: copyHit\n[\s\S]*?^            \}$/m)
+    if (!/^[ \t]*width:[ \t]*parent\.width[ \t]*$/m.test(actionRowSrc)
+        || !/^[ \t]*implicitHeight:[ \t]*Math\.max\(docsLink\.implicitHeight, copyHit\.height\)[ \t]*$/m.test(actionRowSrc)
+        || !/^[ \t]*anchors\.right:[ \t]*parent\.right[ \t]*$/m.test(copyHitSrc))
+      bad.push("copy guidance actions do not span the row with copy anchored right")
+    const copyClickSrc = extract(copyHitSrc,
+      /^              onClicked: \{\n[\s\S]*?^              \}$/m)
+    if (!/^[ \t]*if \(root\.service && root\.feedback\) root\.service\.copyText\(root\.feedback\.command, true\)[ \t]*$/m.test(copyClickSrc))
+      bad.push("copy guidance changed the quiet command copy")
+    if (!/^[ \t]*stepBlock\.copied[ \t]*=[ \t]*true[ \t]*$/m.test(copyClickSrc)
+        || !/^[ \t]*copiedTimer\.restart\(\)[ \t]*$/m.test(copyClickSrc))
+      bad.push("copy guidance click no longer starts copied state and its timer")
+    const copiedTimerSrc = extract(copyHitSrc,
+      /^              Timer \{\n                id: copiedTimer\n[\s\S]*?^              \}$/m)
+    if (!/^[ \t]*interval:[ \t]*1200[ \t]*$/m.test(copiedTimerSrc)
+        || !/^[ \t]*onTriggered:[ \t]*stepBlock\.copied[ \t]*=[ \t]*false[ \t]*$/m.test(copiedTimerSrc)
+        || !/^[ \t]*onVisibleChanged:[ \t]*if \(!visible\) copied[ \t]*=[ \t]*false[ \t]*$/m.test(stepBlockSrc))
+      bad.push("copy guidance changed its reset or copied animation lifetime")
+    if (/^[ \t]*linkColor[ \t]*:/m.test(stepBlockSrc)
+        || /^[ \t]*onLinkActivated[ \t]*:/m.test(stepBlockSrc))
+      bad.push("copy guidance still contains rich-text link handling")
+  }
+  const closeHandlerSrc = extract(panelSrc,
+    /^      onCloseRequested: \{\n[\s\S]*?^      \}$/m)
+  if (!/^        if \(root\.feedback !== null && root\.feedback\.kind !== "moment"\) \{\n          root\.feedback = null\n          return\n        \}$/m.test(closeHandlerSrc))
+    bad.push("Escape no longer clears persistent guidance first")
+  const openedHandlerSrc = extract(panelSrc,
+    /^  onOpenedChanged: \{\n[\s\S]*?^  \}$/m)
+  if (!/^    if \(!opened\) return\n[\s\S]*?^    feedback = null$/m.test(openedHandlerSrc))
+    bad.push("panel reopen no longer clears feedback")
+
   const probeList = fn(serviceSrc, "probeList", ["ports", "watchedPorts", "focusPort"])
-  const p = (n, cat, web) => ({ port: n, category: cat, web: web })
+  const p = (n, cat, httpProbe) => ({ port: n, category: cat, web: httpProbe, httpProbe: httpProbe })
   const many = [p(3000, "dev", true), p(3001, "dev", true), p(3002, "dev", true), p(3003, "dev", true), p(3004, "dev", true),
                 p(3005, "dev", true), p(3006, "dev", true), p(3007, "dev", true), p(5432, "service", false), p(9000, "dev", true)]
   eq("the charts' port is probed first", probeList(many, [3007], 3005), [3005, 3007, 3000, 3001, 3002, 3003, 3004, 3006])
   eq("the cap is eight", probeList(many, [], 0).length, 8)
   eq("a watched port that is not listening does not spend the cap", probeList(many, [7777, 3006], 0)[0], 3006)
-  eq("services are not probed unless watched", probeList(many, [5432], 0)[0], 5432)
+  eq("watching does not authorize HTTP to a non-HTTP service", probeList(many, [5432], 0).includes(5432), false)
   eq("nothing listening, nothing probed", probeList([], [3000], 3000), [])
 
   if (bad.length === 0) { pass++; console.log("  ok   panel mode, verb and probe rules") }
@@ -396,6 +650,9 @@ check("a wildcard bind still opens localhost", e({
   if (bad.length === 0) { pass++; console.log("  ok   chart phases and axis rules") }
   else { fail++; console.log("  FAIL chart rules"); for (const b of bad) console.log("         " + b) }
 }
+
+check("the kernel start time passes through with the pid", { port: 3000, pid: 10, start: 15273183, comm: "node", cmdline: "node srv.js", cwd: "/tmp/x", addresses: ["127.0.0.1"] }, { pid: 10, start: 15273183 })
+check("a scan without a start time yields null, never undefined", { port: 3001, pid: 11, comm: "node", cmdline: "node", cwd: "/tmp/x", addresses: ["127.0.0.1"] }, { start: null })
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

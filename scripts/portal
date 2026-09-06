@@ -31,11 +31,17 @@ get_ports() {
 }
 
 get_tunnels() {
-  local out
+  local out status_rc
   if shell_up && out=$(omarchy-shell "$PLUGIN_ID" tunnels 2>/dev/null) && [[ -n $out ]]; then
-    jq '[.[]]' <<<"$out"
+    jq -e 'if type == "object" then [.[]] elif type == "array" then . else error("not a tunnel collection") end' <<<"$out" \
+      || { echo "portal: the shell returned invalid tunnel status" >&2; return 1; }
   else
-    "$HERE/tunnels.sh" status | jq '.tunnels'
+    out=$("$HERE/tunnels.sh" status); status_rc=$?
+    if (( status_rc != 0 )) || ! jq -e '.ok == true and (.tunnels | type == "array")' <<<"$out" >/dev/null 2>&1; then
+      echo "portal: $(jq -r '.error // "could not read tunnel status"' <<<"$out" 2>/dev/null)" >&2
+      return 1
+    fi
+    jq -c '.tunnels' <<<"$out"
   fi
 }
 
@@ -51,7 +57,7 @@ cmd_list() {
   [[ ${1:-} == --all ]] && show_all=1
   local ports tunnels icons
   ports=$(get_ports) || { echo "portal: could not read ports" >&2; exit 1; }
-  tunnels=$(get_tunnels)
+  tunnels=$(get_tunnels) || exit 1
   icons=$(icon_map)
 
   jq -r --argjson tunnels "$tunnels" --argjson all "$show_all" --argjson icons "$icons" '
@@ -69,24 +75,67 @@ cmd_list() {
         .label,
         (if (.name // "") == .label then "" else (.name // "") end),
         .scope,
-        (if $t then ($t.url + (if $t.reach == "public" then "  [PUBLIC]" else "  [local]" end))
+        (if $t then ($t.url + (if $t.reach == "public" then "  [PUBLIC]" elif $t.reach == "lan" then "  [LAN]" else "  [local]" end))
          else (.url // "") end)
       ] | @tsv
   ' <<<"$ports" | column -t -s$'\t'
 }
 
-cmd_providers() { "$HERE/tunnels.sh" providers | jq -r '.providers[] | [.label, .status, .reach, .detail] | @tsv' | column -t -s$'\t'; }
+cmd_providers() {
+  local out rc
+  out=$("$HERE/tunnels.sh" providers); rc=$?
+  if (( rc != 0 )) || ! jq -e '.ok == true and (.providers | type == "array")' <<<"$out" >/dev/null 2>&1; then
+    echo "portal: $(jq -r '.error // "could not read provider status"' <<<"$out" 2>/dev/null)" >&2
+    return 1
+  fi
+  jq -r '.providers[] | [.label, .status, .reach, .detail] | @tsv' <<<"$out" | column -t -s$'\t'
+}
 
 cmd_expose() {
-  local provider="${1:-}" port="${2:-}"
+  local provider="${1:-}" port="${2:-}" out rc
   [[ -n $provider && -n $port ]] || { echo "usage: portal expose <cloudflared|ngrok|portless> <port> [name]" >&2; exit 2; }
-  "$HERE/tunnels.sh" start "$provider" "$port" "${3:-}" | jq -r 'if .ok then (.url + (if .reach=="public" then "  [PUBLIC]" else "  [local]" end)) else ("error: " + .error) end'
+  out=$("$HERE/tunnels.sh" start "$provider" "$port" "${3:-}"); rc=$?
+  if (( rc != 0 )) || ! jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
+    echo "error: $(jq -r '.error // "share failed"' <<<"$out" 2>/dev/null)" >&2
+    return 1
+  fi
+  jq -r '.url + (if .reach=="public" then "  [PUBLIC]" else "  [local]" end)' <<<"$out"
 }
 
 cmd_stop() {
-  local provider="${1:-}" port="${2:-}"
+  local provider="${1:-}" port="${2:-}" out rc
   [[ -n $provider && -n $port ]] || { echo "usage: portal stop <provider> <port>" >&2; exit 2; }
-  "$HERE/tunnels.sh" stop "$provider" "$port" | jq -r --arg p "$provider" --arg n "$port" 'if .ok then "stopped \($p) on \($n)" else ("error: " + .error) end'
+  out=$("$HERE/tunnels.sh" stop "$provider" "$port"); rc=$?
+  if (( rc != 0 )) || ! jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
+    echo "error: $(jq -r '.error // "stop failed"' <<<"$out" 2>/dev/null)" >&2
+    return 1
+  fi
+  printf 'stopped %s on %s\n' "$provider" "$port"
+}
+
+cmd_stop_all() {
+  local out rc
+  out=$("$HERE/tunnels.sh" stop-all); rc=$?
+  if (( rc != 0 )) || ! jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
+    echo "error: $(jq -r '.error // "stop-all failed"' <<<"$out" 2>/dev/null)" >&2
+    return 1
+  fi
+  echo "stopped every share"
+}
+
+cmd_setup() {
+  local mode=run out rc
+  case "${1:-}" in
+    --status) mode=status ;;
+    "") ;;
+    *) echo "usage: portal setup [--status]" >&2; return 2 ;;
+  esac
+  out=$("$HERE/portless-setup.sh" "$mode"); rc=$?
+  if (( rc != 0 )) || ! jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
+    echo "error: $(jq -r '.error // "setup failed"' <<<"$out" 2>/dev/null)" >&2
+    return 1
+  fi
+  jq '.remaining |= map(gsub("\u001f"; ": "))' <<<"$out"
 }
 
 cmd_shared() { get_tunnels | jq -r '.[] | [.provider, (.port|tostring), .reach, .url] | @tsv' | column -t -s$'\t'; }
@@ -97,6 +146,9 @@ cmd_doctor() {
   printf 'shell          %s\n' "$(shell_up && echo running || echo 'not running (offline mode)')"
   printf 'ss             %s\n' "$(have ss && echo ok || echo MISSING)"
   printf 'jq             %s\n' "$(have jq && echo ok || echo MISSING)"
+  printf 'python3        %s\n' "$(have python3 && echo ok || echo 'MISSING (helpers need it)')"
+  printf 'flock          %s\n' "$(have flock && echo ok || echo 'MISSING (state changes need it)')"
+  printf 'sqlite3        %s\n' "$(have sqlite3 && echo ok || echo 'MISSING (history needs it)')"
   printf 'curl           %s\n' "$(have curl && echo ok || echo 'MISSING (probes and tunnels need it)')"
   printf 'node           %s\n' "$(have node && node --version || echo 'MISSING (offline list needs it)')"
   printf 'wl-copy        %s\n' "$(have wl-copy && echo ok || echo 'MISSING (copy button will not work)')"
@@ -115,10 +167,11 @@ case "${1:-list}" in
   providers) cmd_providers ;;
   expose)    shift; cmd_expose "$@" ;;
   stop)      shift; cmd_stop "$@" ;;
-  stop-all)  "$HERE/tunnels.sh" stop-all | jq -r 'if .ok then "stopped every share" else ("error: " + .error) end' ;;
+  stop-all)  cmd_stop_all ;;
+  uninstall) shift; "$HERE/uninstall.sh" "$@" ;;
   doctor)    cmd_doctor ;;
   refresh)   omarchy-shell "$PLUGIN_ID" refresh ;;
-  setup)     "$HERE/portless-setup.sh" run | jq . ;;
+  setup)     shift; cmd_setup "$@" ;;
   test)      "$HERE/../test/test.sh" ;;
   -h|--help|help)
     cat <<USAGE
@@ -133,8 +186,9 @@ case "${1:-list}" in
   portal expose <provider> <port> [name]
   portal stop <provider> <port>
   portal stop-all                    stop every share and name
+  portal uninstall [--dry]           reverse what Portal put on the machine
   portal refresh                     ask the running shell to rescan
-  portal setup                       full portless setup (installs, trusts browsers)
+  portal setup [--status]            set up local names, or inspect without changes
   portal doctor                      check the plugin's dependencies
   portal test                        run the unit tests
 
