@@ -547,13 +547,13 @@ rollback_portless() {  # <port> <new name> <old name> <old marker: 0|1> <bin>
   if [[ $new != "$old" ]]; then
     portless_alias_safe "$new" "$port" || return 1
     if portless_alias_present "$new" "$port"; then
-      "$bin" alias --remove "$new" >/dev/null 2>&1 || return 1
+      proc run 4096 2 -- "$bin" alias --remove "$new" >/dev/null 2>&1 || return 1
     fi
   fi
   if [[ -n $old ]]; then
     portless_alias_safe "$old" "$port" || return 1
     if ! portless_alias_present "$old" "$port"; then
-      "$bin" alias "$old" "$port" >/dev/null 2>&1 || return 1
+      proc run 4096 2 -- "$bin" alias "$old" "$port" >/dev/null 2>&1 || return 1
     fi
   fi
   portless_state_load || return 1

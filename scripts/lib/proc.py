@@ -100,36 +100,56 @@ def cmd_end(a):
     return 1
 
 
+def group_alive(pid, ignore_zombies=False):
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    if not ignore_zombies:
+        return True
+    # Keeping the zombie leader reserves the group ID through the last
+    # signal. Ignore zombies when checking whether its descendants remain.
+    group = str(pid).encode()
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    with open(f"{entry.path}/stat", "rb") as stat:
+                        fields = stat.read(4096).rsplit(b")", 1)[1].split()
+                except FileNotFoundError:
+                    continue
+                if fields[2] == group and fields[0] not in (b"Z", b"X"):
+                    return True
+    except (OSError, IndexError):
+        return True
+    return False
+
+
 def end_group(pid, grace=GRACE):
     """TERM the whole group, and if anything is still in it after the grace
     period, KILL the group. The leader exiting does not end this: a descendant
     that inherited the pipes and ignores TERM is still a group member."""
-    reaped = False
+    owned_child = True
 
-    def reap():
-        nonlocal reaped
-        if reaped:
-            return
+    def child_exited():
+        nonlocal owned_child
         try:
-            if os.waitpid(pid, os.WNOHANG)[0]:
-                reaped = True
+            return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
         except ChildProcessError:
-            reaped = True
-
-    def group_gone():
-        try:
-            os.killpg(pid, 0)   # signal 0 sends nothing; it asks whether the group still has members
-            return False
-        except OSError:
+            owned_child = False
             return True
 
-    reap()
+    exited = child_exited()
     try:
         os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
         # A just-forked child may not have reached setsid yet. An unreaped
         # direct child still owns its PID, so this cannot hit a successor.
-        if not reaped:
+        if owned_child and not exited:
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -138,8 +158,9 @@ def end_group(pid, grace=GRACE):
         pass
     limit = time.monotonic() + grace
     while time.monotonic() < limit:
-        reap()
-        if group_gone() and reaped:
+        if not exited:
+            exited = child_exited()
+        if not group_alive(pid, owned_child and exited) and exited:
             break
         time.sleep(0.05)
     else:
@@ -147,12 +168,12 @@ def end_group(pid, grace=GRACE):
             os.killpg(pid, signal.SIGKILL)
         except OSError:
             pass
-        if not reaped:
+        if owned_child and not exited:
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-    if not reaped:
+    if owned_child:
         try:
             os.waitpid(pid, 0)
         except ChildProcessError:

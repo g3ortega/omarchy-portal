@@ -48,7 +48,10 @@ portless_listener_scope() { echo local; }
 portless_serving_routes() { return 0; }
 getent() { return 0; }
 kill() { echo kill >> "$FIXTURE/signals"; return 99; }
-proc() { echo proc >> "$FIXTURE/signals"; return 99; }
+proc() {
+  if [[ $1 == run ]]; then /usr/bin/python3 -I -S "$PROC_PY" "$@"; return; fi
+  echo proc >> "$FIXTURE/signals"; return 99
+}
 
 reset_routes() {
   rm -f -- "$STATE_DIR"/portless-*
