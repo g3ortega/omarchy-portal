@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/g3ortega/omarchy-portal/actions/workflows/ci.yml/badge.svg)](https://github.com/g3ortega/omarchy-portal/actions/workflows/ci.yml)
 
-Every listening port on your machine, what's running on it, and one key to
-open, name, share, pause, restart or stop it. An [Omarchy](https://omarchy.org)
-bar plugin.
+An [Omarchy](https://omarchy.org) bar plugin for listening TCP ports.
+See what runs on each port, then open, name, share, or manage its process.
+Setup and preferences live in Settings so the homepage stays focused on your services.
 
 <p align="center">
   <img src="preview.png" width="800" alt="Portal's port list and charts page">
@@ -35,16 +35,17 @@ release from GitHub. Cloudflared and ngrok connect to their own services.
 ## What it does
 
 - Finds every listening TCP port with a couple of `ss` calls and names the
-  stack behind it (over 80: Next, Vite, Rails, Django, Phoenix, Go,
-  Postgres, Redis, ...).
+  stack behind it, with over 80 detection rules for frameworks, runtimes,
+  and services such as Next.js, Vite, Rails, Django, Phoenix, Go, Postgres, and Redis.
 - Gives a port a local name like `https://acme-web.localhost:1355` through
   [Portless](https://github.com/vercel-labs/portless). New proxies serve this machine
   only. Existing LAN routes are labeled "LAN name".
 - Shares a port publicly through Cloudflare or ngrok, and paints anything
   public in your theme's urgent color so you can't forget it's open.
 - Charts HTTP latency or TCP RTT, connections, CPU and memory per port. Open the last
-  hour, switch to 30 minutes, or inspect up to 48 hours of watched history.
-- Pauses, resumes, restarts and stops a dev server. The loud ones ask first.
+  hour or select 30m, 1h, 3h, 6h, 1d, or 2d.
+- Pauses, resumes, restarts, and stops a process you own. Pause, restart, and
+  stop ask for confirmation. Stop allows a short grace period for shutdown.
 - Works entirely from the keyboard. Press `?` in the panel.
 
 The bar counts public shares when any are open, otherwise named routes, otherwise
@@ -54,10 +55,19 @@ indicates exposure. The tooltip lists all active categories.
 Portless, Cloudflared, and ngrok are optional. Listing, process actions, and
 charts work without them. Naming and sharing actions appear when their tools
 are available. Install and configure providers in Settings (`,`), alongside
-browser trust and preferences.
+browser trust and preferences. Owned names remain removable when Portless is
+installed but needs setup. Active public shares remain stoppable if their
+provider binary disappears.
+
 Local names use an unprivileged proxy on port 1355 by default. Existing proxies
 on port 443 keep their URLs without a port number. Cloudflare sharing does not
 flush system DNS caches or request administrator authentication.
+
+Enable **Watch** to save samples in local SQLite history with a 48-hour recording
+window. Stopping Watch pauses recording and preserves saved history. Changing
+the chart range never deletes samples. Plots retain minimum and maximum values
+to keep short CPU spikes visible. The footer reports available coverage and storage errors.
+See [chart behavior and controls](docs/guide.md#charts).
 
 Charts default to HTTP latency for recognized web services and TCP RTT for other
 listeners. On HTTP services, select **TCP** or press `t` to inspect transport

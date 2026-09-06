@@ -9,7 +9,6 @@ import "lib/Colors.js" as Colors
 import "lib/Format.js" as Format
 import "lib/History.js" as History
 
-// Live vitals and one shared time window for all four metrics.
 Item {
   id: detail
 

@@ -5,7 +5,6 @@ import qs.Ui
 import qs.Commons
 import "lib/History.js" as History
 
-// Buckets preserve extrema; hover reads the same time interval in every card.
 Item {
   id: card
 
