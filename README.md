@@ -48,6 +48,7 @@ release from GitHub. Cloudflared and ngrok connect to their own services.
   hour or select 30m, 1h, 3h, 6h, 1d, or 2d.
 - Pauses, resumes, restarts, and stops a process you own. Pause, restart, and
   stop ask for confirmation. Stop allows a short grace period for shutdown.
+- Keeps confirmations over the current page and errors below the header.
 - Works entirely from the keyboard. Press `?` in the panel.
 
 The bar counts public shares when any are open, otherwise named routes, otherwise

@@ -352,7 +352,7 @@ check("a wildcard bind still opens localhost", e({
   const eq = (name, got, want) => { const g = JSON.stringify(got), w = JSON.stringify(want); if (g !== w) bad.push(`${name}: expected ${w}, got ${g}`) }
 
   eq("help outranks everything", mode(true, {}, true, {}, "naming"), "help")
-  eq("a pending confirmation outranks settings", mode(false, {}, true, {}, "naming"), "confirm")
+  eq("a pending confirmation preserves its Settings backdrop", mode(false, {}, true, {}, "naming"), "settings")
   eq("settings outrank the charts", mode(false, null, true, {}, "sharing"), "settings")
   eq("the charts outrank an expansion", mode(false, null, false, {}, "sharing"), "detail")
   eq("an expansion names its kind", mode(false, null, false, null, "actions"), "actions")
@@ -479,7 +479,7 @@ check("a wildcard bind still opens localhost", e({
   showMoment(state, timer, "copied", false)
   eq("a moment replaces copy guidance", state.feedback, { kind: "moment", text: "copied", error: false })
   showMoment(state, timer, "failed", true)
-  eq("an action failure stays urgent", state.feedback, { kind: "moment", text: "failed", error: true })
+  eq("an action failure stays urgent until dismissed", state.feedback, { kind: "error", text: "failed", error: true })
 
   const extract = (src, re) => src.match(re)?.[0] ?? ""
   if (panelSrc.includes("Text.RichText")) bad.push("PortalPanel.qml still renders rich text")
@@ -527,11 +527,11 @@ check("a wildcard bind still opens localhost", e({
   }
   const closeHandlerSrc = extract(panelSrc,
     /^      onCloseRequested: \{\n[\s\S]*?^      \}$/m)
-  if (!/^        if \(root\.feedback !== null && root\.feedback\.kind !== "moment"\) \{\n          root\.feedback = null\n          return\n        \}$/m.test(closeHandlerSrc))
+  if (!closeHandlerSrc.includes('root.feedback.kind !== "moment"') || !closeHandlerSrc.includes('root.dismissNotice()'))
     bad.push("Escape no longer clears persistent guidance first")
   const openedHandlerSrc = extract(panelSrc,
     /^  onOpenedChanged: \{\n[\s\S]*?^  \}$/m)
-  if (!/^    if \(!opened\) return\n[\s\S]*?^    feedback = null$/m.test(openedHandlerSrc))
+  if (!openedHandlerSrc.includes('if (!opened) { cancelConfirmation(); return }') || !/^    feedback = null$/m.test(openedHandlerSrc))
     bad.push("panel reopen no longer clears feedback")
 
   const probeList = fn(serviceSrc, "probeList", ["ports", "watchedPorts", "focusPort"])

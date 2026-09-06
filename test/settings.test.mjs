@@ -16,6 +16,7 @@ function session(provider = { id: "portless", status: "setup", fix: "", setupCla
     ngrok: {id:"ngrok",available:true,reach:"public",status:"setup"}, [provider.id]: provider }
   const calls = []
   const ctx = vm.createContext({
+    confirmationDialog: { rememberFocus() {} },
     pendingSetup: null, setupProviders: [provider], settingsIndex: 0, settingDefs: [],
     helpOpen: false, pendingAction: null, detailEntry: null, settingsOpen: false,
     portlessReady: false, publicProviders: [actionProviders.cloudflared], selectedPort: -1, expandedKind: "",

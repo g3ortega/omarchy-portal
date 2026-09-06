@@ -25,7 +25,7 @@ group.
 ## Actions
 
 <img src="images/actions.png" width="480" alt="A row unfolded into its verbs">
-<img src="images/confirm.png" width="480" alt="Inline confirmation">
+<img src="images/confirm.png" width="480" alt="Confirmation dialog with the selected service and consequence">
 
 A row shows open, copy and charts on hover. Click it (or press Enter) and it
 unfolds a line of verbs: name, share, pause, restart, stop. Pause is SIGSTOP.
@@ -42,7 +42,19 @@ when their provider tools are available. Keyboard shortcuts follow the same
 rule. Settings always lists supported providers and their setup instructions.
 
 Press `s` to share the selected port or stop its existing public share.
-Stopping a share still works when its server is no longer listening.
+Choose Cloudflare or ngrok, then confirm the provider and port in the dialog.
+Cancel returns to the same picker. After sharing starts, the row keeps the
+public URL and its Open, Copy, and Stop sharing controls together, aligned
+with the port number. Stopping a share still works when its server is no longer listening.
+
+Pause, restart, stop, public sharing, and provider setup use an in-panel
+confirmation dialog. The current page stays behind it. Cancel has focus first;
+Tab chooses a button, Enter activates it, and `y` confirms. Escape or `n`
+cancels. A refused or busy action keeps the dialog open.
+
+Errors appear below the header and remain until dismissed or replaced.
+Copy details preserves the full message when it is too long to display.
+Short success messages disappear after five seconds.
 
 When `ss` attributes a prefork listener to multiple PIDs, Portal still lists
 the port. It hides pause, restart, stop, and starting a new public share because
@@ -185,7 +197,7 @@ row's verbs and `h`/`l` walk them. Every verb has a direct key: `o` open,
 `x` stop. `l` opens the charts, `h` comes back, and `j`/`k` walk ports inside
 them. `,` opens settings, `R` rescans, `/` focuses the filter and typing
 anything else filters too. `y`/`n` answer a confirmation, Esc steps back one
-level, Tab moves to the next panel, `?` shows the cheatsheet.
+level, Tab moves to the next panel outside confirmation dialogs, and `?` shows the cheatsheet.
 
 Bind the panel to a key (Omarchy's Lua bindings; pick one that is free in
 `omarchy menu keybindings --print`):
@@ -320,8 +332,9 @@ it is `md-alpha_g_box`, not `md-broadcast`.
 manifest.json      service + bar widget, settings schema
 Service.qml        scanning, tunnel state, actions, IPC. One instance, not per monitor
 BarWidget.qml      bar entry; settings persistence
-PortalPanel.qml    the panel: filter, groups, keyboard, modes, footer
-PortRow.qml        one port: title, hover bar, verbs, confirmation, editors
+PortalPanel.qml    filter, groups, keyboard, modes, notices
+ConfirmationDialog.qml  shared confirmation overlay and keyboard focus
+PortRow.qml        one port: title, hover bar, verbs, editors
 PortDetail.qml     the charts page
 SparkCard.qml      one chart card and its axis rules
 LinkText.qml       the underlined verb

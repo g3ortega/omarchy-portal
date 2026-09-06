@@ -34,7 +34,7 @@ Panel {
   // Anything that disrupts a running process — stop, pause, restart — goes
   // through one confirmation. Resume does not: it is the recovery action, and
   // friction on the way back out is friction in the wrong place.
-  // { kind, entry, provider?, label?, clause? }. Accepting resolves the row
+  // { kind, entry, provider? }. Accepting resolves the row
   // again and dispatches from this data, so no callback retains a stale process.
   property var pendingAction: null
   property bool helpOpen: false
@@ -45,7 +45,7 @@ Panel {
   onSettingsOpenChanged: {
     if (settingsOpen) return
     pendingSetup = null
-    if (feedback && feedback.kind !== "moment") feedback = null
+    if (feedback && (feedback.kind === "guidance" || feedback.kind === "copy")) feedback = null
   }
   readonly property var setupProviders: service
     ? service.providers.filter(function (p) { return p.reach === "local" })
@@ -64,12 +64,54 @@ Panel {
   // the verbs while a row's actions are open.
   property int shareIndex: 0
   property int verbIndex: 0
-  // null | { kind: "moment" | "guidance" | "copy", text, error, command? }
+  // null | { kind: "moment" | "error" | "guidance" | "copy", text, error, command? }
   property var feedback: null
+  property string dismissedServiceError: ""
+  readonly property string noticeText: feedback && feedback.kind !== "copy" ? feedback.text
+    : !feedback && service && service.lastError !== dismissedServiceError ? service.lastError : ""
+  readonly property bool noticeError: feedback ? feedback.error === true : true
+
+  function dismissNotice() {
+    dismissedServiceError = service ? service.lastError : ""
+    feedback = null
+  }
+
+  readonly property var confirmation: {
+    if (pendingSetup) {
+      var provider = service ? service.providerFor(pendingSetup.id) : null
+      return { title: "Set up " + (provider ? provider.label : pendingSetup.id) + "?",
+               target: provider ? provider.label : pendingSetup.id, context: "Local setup", message: pendingSetup.setupClause, accept: "Set up", urgent: false }
+    }
+    if (!pendingAction) return null
+    var action = pendingAction
+    var descriptions = {
+      share: { title: "Share publicly?", message: "Anyone with the link can reach this service. Share only content you intend to make public.", accept: "Share" },
+      stop: { title: "Stop this process?", message: "Active connections will close. You can start the service again from its terminal.", accept: "Stop" },
+      restart: { title: "Restart this process?", message: "Stops the process and starts it again. Active connections may drop.", accept: "Restart" },
+      pause: { title: "Pause this process?", message: "Requests may wait or time out until you resume the process.", accept: "Pause" }
+    }
+    var description = descriptions[action.kind]
+    var context = ":" + action.entry.port
+    if (action.kind === "share") {
+      var publicProvider = service ? service.providerFor(action.provider) : null
+      context += " · via " + (publicProvider ? publicProvider.label : action.provider)
+    }
+    return { title: description.title, target: String(action.entry.name), context: context,
+             message: description.message, accept: description.accept, urgent: action.kind === "share" || action.kind === "stop" }
+  }
+
+  function cancelConfirmation() { pendingAction = null; pendingSetup = null }
+
+  function acceptConfirmation() {
+    if (!service || service.busyAction) return
+    if (pendingSetup) activateProviderSetup(pendingSetup)
+    else confirmAccept()
+  }
 
   function showMoment(message, error) {
-    feedback = { kind: "moment", text: String(message), error: error === true }
-    feedbackTimer.restart()
+    feedback = { kind: error === true ? "error" : "moment", text: String(message), error: error === true }
+    if (error === true) feedbackTimer.stop()
+    else feedbackTimer.restart()
   }
 
   function showGuidance(message, command) {
@@ -100,10 +142,8 @@ Panel {
 
   function collapse() { expandedKind = "" }
 
-  // Page precedence. Every handler and every `visible` reads mode, so a new
-  // page is one rung here and nowhere else.
+  // Confirmation overlays keep the current page and its keyboard context.
   readonly property string mode: helpOpen ? "help"
-    : pendingAction !== null ? "confirm"
     : settingsOpen ? "settings"
     : detailEntry !== null ? "detail"
     : expandedKind === "sharing" ? "share"
@@ -212,9 +252,8 @@ Panel {
     }
     if (pendingSetup && pendingSetup.id === provider.id) {
       var valid = setupStillValid(pendingSetup)
-      pendingSetup = null
-      if (!valid) { showMoment("Setup changed. Review the current instructions."); return }
-      service.setupProvider(provider.id)
+      if (!valid) { pendingSetup = null; showMoment("Setup changed. Review the current instructions.", true); return }
+      if (service.setupProvider(provider.id)) pendingSetup = null
       return
     }
     pendingSetup = null
@@ -225,6 +264,7 @@ Panel {
       showGuidance("Command copied. Run it in your terminal.")
     } else if (current.setupClause && (current.status === "setup"
                || (current.status === "ready" && current.reach === "local"))) {
+      confirmationDialog.rememberFocus()
       pendingSetup = { id: current.id, status: current.status, reach: current.reach,
                        fix: current.fix, setupClause: current.setupClause }
     }
@@ -243,24 +283,38 @@ Panel {
     // A closed panel must not keep four canvases repainting for nobody:
     // dropping the detail page unloads them until the next visit.
     detailEntry = null
-    if (!opened) return
+    if (!opened) { cancelConfirmation(); return }
     query = ""
     selectedPort = -1
     feedback = null
+    if (hostWidget && hostWidget.settingsSaveError) showMoment(hostWidget.settingsSaveError, true)
     pendingAction = null
     helpOpen = false
     settingsOpen = false
+    dismissedServiceError = ""
     if (service) service.refreshAll()
   }
 
   Connections {
+    target: root.hostWidget
+    function onSettingsSaveErrorChanged() {
+      if (root.hostWidget.settingsSaveError) root.showMoment(root.hostWidget.settingsSaveError, true)
+    }
+  }
+
+  Connections {
     target: root.service
-    function onProvidersChanged() { root.revalidateProviders() }
+    function onProvidersChanged() {
+      root.revalidateProviders()
+      if (root.pendingSetup && !root.setupStillValid(root.pendingSetup)) root.pendingSetup = null
+    }
+    function onLastErrorChanged() { root.dismissedServiceError = "" }
     function onActiveActionChanged() {
       if (root.pendingAction && !root.pendingStillValid(root.pendingAction)) root.pendingAction = null
     }
     function onTunnelsChanged() {
       if (root.pendingAction && !root.pendingStillValid(root.pendingAction)) root.pendingAction = null
+      if (root.expandedKind === "sharing" && root.service.publicTunnelFor(root.selectedPort)) root.expandedKind = "actions"
     }
     function onActionFailed(message) { root.showMoment(message, true) }
     function onActionMoment(message) { root.showMoment(message) }
@@ -386,13 +440,9 @@ Panel {
   function openDetail() { showDetail(selectedOrFirst()) }
 
   function requestAction(kind, entry, extra) {
-    pendingAction = Object.assign({ kind: kind, entry: entry }, extra || {})
-    // The question renders on the row itself, so the row must be on screen
-    // and current — even when the key was pressed from the charts page — and
-    // the keyboard must answer it even if a name editor had focus.
-    detailEntry = null
+    confirmationDialog.rememberFocus()
     selectedPort = entry.port
-    keyCatcher.forceActiveFocus()
+    pendingAction = Object.assign({ kind: kind, entry: entry }, extra || {})
   }
 
   // One verb list, built where every fact lives; the row only renders it.
@@ -495,13 +545,14 @@ Panel {
     var a = pendingAction
     if (!pendingStillValid(a)) { pendingAction = null; return }
     var entry = entryForPort(a.entry.port)
-    pendingAction = null
+    var accepted = false
     switch (a.kind) {
-    case "restart": service.restartProcess(entry); break
+    case "restart": accepted = service.restartProcess(entry); break
     case "pause":
-    case "stop": service.signalProcess(entry, a.kind); break
-    case "share": service.expose(entry.port, a.provider, "", entry.process); break
+    case "stop": accepted = service.signalProcess(entry, a.kind); break
+    case "share": accepted = service.expose(entry.port, a.provider, "", entry.process); break
     }
+    if (accepted) pendingAction = null
   }
 
   // j/k on the detail page walk sibling ports without leaving the charts.
@@ -520,8 +571,7 @@ Panel {
     if (!entry) return
     if (provider.status === "ready") {
       if (!service.validProcessIdentity(entry.process)) return
-      requestAction("share", entry, { provider: provider.id, label: entry.name,
-                                      clause: "publicly, via " + provider.label })
+      requestAction("share", entry, { provider: provider.id })
     } else {
       openSettings(provider.id)
     }
@@ -543,31 +593,27 @@ Panel {
     owner: root.hostWidget
     bar: root.bar
     open: root.opened
-    focusTarget: keyCatcher
+    focusTarget: root.confirmation ? confirmationDialog : keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight)
+    contentHeight: panel.fittedContentHeight(Math.max(content.implicitHeight,
+      root.confirmation ? confirmationDialog.minimumHeight : 0))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       // Editors own the keyboard while they exist: the filter field and the
       // inline name editor both need plain letters, including j/k/x/space.
-      // A confirmation is not blocked: y/n/enter are routed below.
-      blocked: search.activeFocus || root.mode === "naming"
+      blocked: root.confirmation !== null || search.activeFocus || root.mode === "naming"
       // Esc steps back one level, in mode precedence order. Persistent
       // guidance is the topmost level: it goes first, the rest is untouched.
       onCloseRequested: {
-        if (root.mode === "settings" && root.pendingSetup) {
-          root.pendingSetup = null
-          return
-        }
-        if (root.feedback !== null && root.feedback.kind !== "moment") {
-          root.feedback = null
+        if ((root.feedback !== null && root.feedback.kind !== "moment")
+            || (root.noticeError && root.noticeText.length > 0)) {
+          root.dismissNotice()
           return
         }
         switch (root.mode) {
         case "help":     root.helpOpen = false; return
-        case "confirm":  root.pendingAction = null; return
         case "settings": root.settingsOpen = false; return
         case "detail":   root.detailEntry = null; return
         case "share":    root.expand(root.selectedPort, "actions"); return
@@ -577,7 +623,7 @@ Panel {
         root.close()
       }
       onMoveRequested: function (dx, dy) {
-        if (root.mode === "help" || root.mode === "confirm") return
+        if (root.mode === "help") return
         if (root.mode === "settings") {
           if (dy !== 0) {
             root.settingsIndex = Util.clamp(root.settingsIndex + dy, 0, Math.max(0, root.settingsCount - 1))
@@ -612,7 +658,6 @@ Panel {
       onActivateRequested: {
         switch (root.mode) {
         case "help":     root.helpOpen = false; return
-        case "confirm":  root.confirmAccept(); return
         case "settings": root.activateSetting(); return
         case "share":    root.activateShareChip(); return
         case "actions":  root.activateVerbAtCursor(); return
@@ -631,11 +676,6 @@ Panel {
       onTextKey: function (t) {
         if (!root.service) return
         if (root.mode === "help") { root.helpOpen = false; return }
-        if (root.mode === "confirm") {
-          if (t === "y") root.confirmAccept()
-          else if (t === "n") root.pendingAction = null
-          return
-        }
         if (t === "?") { root.helpOpen = true; return }
         if (t === ",") { root.toggleSettings(); return }
         if (root.mode === "settings") return
@@ -686,6 +726,7 @@ Panel {
 
       Column {
         id: content
+        enabled: root.confirmation === null
         width: parent.width
         spacing: Style.spacing.md
 
@@ -800,6 +841,60 @@ Panel {
                 tooltipText: "Rescan now"
                 foreground: root.panelText
                 onClicked: if (root.service) root.service.refreshAll()
+              }
+            }
+          }
+        }
+
+        Rectangle {
+          width: parent.width
+          visible: root.noticeText.length > 0
+          implicitHeight: noticeBody.implicitHeight + Style.spacing.md * 2
+          color: Util.alpha(root.noticeError ? Color.urgent : Color.accent, 0.08)
+          border.width: 1
+          border.color: Util.alpha(root.noticeError ? Color.urgent : Color.accent, 0.45)
+
+          Column {
+            id: noticeBody
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.spacing.md
+            spacing: Style.spacing.xs
+
+            Flickable {
+              width: parent.width
+              height: Math.min(noticeLabel.implicitHeight, Style.space(84))
+              contentHeight: noticeLabel.implicitHeight
+              clip: true
+              interactive: contentHeight > height
+
+              Text {
+                id: noticeLabel
+                width: parent.width
+                textFormat: Text.PlainText
+                text: root.noticeText
+                color: root.noticeError ? Color.urgent : root.panelText
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+              }
+            }
+
+            Row {
+              anchors.right: parent.right
+              spacing: Style.spacing.md
+
+              LinkText {
+                visible: root.noticeError
+                text: "Copy details"
+                onClicked: if (root.service) root.service.copyText(root.noticeText, true)
+              }
+
+              LinkText {
+                text: "Dismiss"
+                color: root.noticeError ? Color.urgent : Color.accent
+                onClicked: root.dismissNotice()
               }
             }
           }
@@ -929,17 +1024,11 @@ Panel {
                       shareCursor: selected && root.expandedKind === "sharing" ? root.shareIndex : -1
                       verbs: selected ? root.verbsFor(entry) : []
                       verbCursor: selected && root.expandedKind === "actions" ? root.verbIndex : -1
-                      confirmKind: root.pendingAction && root.pendingAction.entry.port === entry.port
-                        ? root.pendingAction.kind : ""
-                      confirmLabel: root.pendingAction && root.pendingAction.label ? root.pendingAction.label : entry.name
-                      confirmClause: root.pendingAction && root.pendingAction.clause ? root.pendingAction.clause : ""
                       onDetailRequested: root.showDetail(entry)
                       onVerbClicked: function (verb) { root.activateVerb(entry, verb) }
                       onExpandRequested: function (kind) { root.expand(entry.port, kind) }
                       onEditorDone: { root.collapse(); keyCatcher.forceActiveFocus() }
                       onEditorCanceled: root.expand(entry.port, "actions")
-                      onConfirmAccepted: root.confirmAccept()
-                      onConfirmCanceled: root.pendingAction = null
                       onProviderChosen: function (provider) { root.chooseProvider(entry.port, provider) }
                     }
                   }
@@ -987,6 +1076,8 @@ Panel {
               text: {
                 var q = root.query.trim().toLowerCase()
                 if (q === "cake") return "the cake is a lie."
+                if (q === "companion" || q === "companion cube") return "Your companion cube has no open ports."
+                if (q === "glados") return "Unsupervised testing is still testing."
                 if (q.length > 0) return "nothing matches \"" + root.query + "\""
                 return root.showSystem ? "nothing is listening." : "nothing of yours is listening. system ports are hidden."
               }
@@ -1041,8 +1132,6 @@ Panel {
                   required property var modelData
                   required property int index
                   readonly property var help: root.providerHelp[modelData.id] || null
-                  readonly property bool armed: root.pendingSetup !== null
-                    && root.pendingSetup.id === modelData.id
                   readonly property bool busy: root.service
                     && root.service.busyAction === modelData.id + ":setup"
                   width: settingsContent.width
@@ -1077,7 +1166,7 @@ Panel {
                     Text {
                       width: parent.width
                       textFormat: Text.PlainText
-                      text: providerCard.armed ? root.pendingSetup.setupClause : providerCard.modelData.detail
+                      text: providerCard.modelData.detail
                       color: Util.alpha(root.panelText, 0.65)
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
@@ -1120,7 +1209,6 @@ Panel {
                           || (!!providerCard.modelData.setupClause && (providerCard.modelData.status === "setup"
                               || (providerCard.modelData.status === "ready" && providerCard.modelData.reach === "local")))
                         text: providerCard.busy ? "Setting up…"
-                          : providerCard.armed ? "Confirm setup"
                           : providerCard.modelData.fix ? "Copy command"
                           : providerCard.modelData.status === "ready" ? "Browser trust" : "Set up"
                         color: Color.accent
@@ -1129,12 +1217,6 @@ Panel {
                           root.activateProviderSetup(providerCard.modelData)
                           keyCatcher.forceActiveFocus()
                         }
-                      }
-
-                      LinkText {
-                        visible: providerCard.armed
-                        text: "Cancel"
-                        onClicked: root.pendingSetup = null
                       }
                     }
                   }
@@ -1306,17 +1388,6 @@ Panel {
           }
         }
 
-        Text {
-          width: parent.width
-          visible: root.mode === "settings" && text.length > 0
-          text: root.hostWidget ? root.hostWidget.settingsSaveError : ""
-          textFormat: Text.PlainText
-          color: Color.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-        }
-
         // Setup commands stay in Settings until dismissed or replaced.
         Column {
           id: stepBlock
@@ -1388,22 +1459,9 @@ Panel {
           }
         }
 
-        Text {
-          width: parent.width
-          visible: text.length > 0
-          textFormat: Text.PlainText
-          text: root.feedback !== null && root.feedback.kind !== "copy"
-            ? root.feedback.text : (root.feedback === null && root.service ? root.service.lastError : "")
-          color: root.feedback !== null && root.feedback.error !== true ? Color.accent : Color.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
-        }
-
         // One quiet line keeps the keys discoverable without a manual.
         Text {
           readonly property var hintByMode: ({
-            confirm:  "enter/y confirm · esc/n cancel",
             actions:  "h/l choose · enter act · esc close",
             share:    "h/l choose · enter expose · esc back",
             naming:   "enter save · esc back",
@@ -1420,6 +1478,24 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }
+      }
+
+      ConfirmationDialog {
+        id: confirmationDialog
+        anchors.fill: parent
+        visible: root.confirmation !== null
+        title: root.confirmation ? root.confirmation.title : ""
+        target: root.confirmation ? root.confirmation.target : ""
+        context: root.confirmation ? root.confirmation.context : ""
+        message: root.confirmation ? root.confirmation.message : ""
+        acceptText: root.confirmation ? root.confirmation.accept : "Confirm"
+        urgent: root.confirmation ? root.confirmation.urgent : false
+        busy: root.service ? root.service.busyAction !== "" : false
+        foreground: root.panelText
+        fontFamily: root.fontFamily
+        onAccepted: root.acceptConfirmation()
+        onCanceled: root.cancelConfirmation()
+        onFocusReleased: keyCatcher.forceActiveFocus()
       }
     }
   }
