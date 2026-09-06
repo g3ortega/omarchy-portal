@@ -1,5 +1,8 @@
 # Portal guide
 
+Screenshots show the installed plugin. Example names and public URLs replace
+local project details.
+
 ## The list
 
 <img src="images/list.png" width="480" alt="The port list">
@@ -35,7 +38,8 @@ without changing their bytes. It waits for the original process to exit before
 relaunching and verifies that every listener belongs to the replacement session.
 Startup uses the remaining restart deadline, with time reserved for cleanup if
 the replacement fails to listen.
-A server started through mise, nvm, or a shell hook uses the same launcher.
+Restart preserves the environment captured from the original process. It does
+not rerun shell startup files or version-manager hooks.
 Signals only go to processes you own. Stop, pause, and restart ask first and
 name the process. Resume never asks. Naming and sharing actions appear only
 when their provider tools are available. Keyboard shortcuts follow the same
@@ -105,8 +109,7 @@ and is unavailable without connections. It does not measure database queries or
 WebSocket message handling. HTTP and TCP history stay separate.
 
 History writes are checked and retried. Recording and read failures stay visible
-in the detail footer. History uses SQLite from the first sample. Selecting a
-shorter range never deletes samples.
+in the detail footer. Selecting a shorter range never deletes samples.
 
 ## Local names
 
@@ -257,8 +260,9 @@ repository signatures, install `cloudflared` with `sudo pacman -S cloudflared`.
 [Quickshell requires](https://archlinux.org/packages/extra/x86_64/quickshell/).
 The Arch SQLite package includes the CLI. Portal uses its no-follow open mode
 and does not need a database server or an additional privileged setup step. `node` is needed only for the tests and
-for `scripts/portal` while the shell is down. `portal setup` uses `npm`,
-`certutil` and `openssl` when present. Providers are optional.
+for `scripts/portal` while the shell is down. Browser trust setup uses
+`certutil` and `openssl`. If Portless is missing, setup displays an npm command
+for you to run. Portal never runs npm. Providers are optional.
 
 If `ss` cannot attribute a Node listener, Portal still lists the port. It hides
 process actions and public sharing because it cannot bind them to one process.
@@ -379,7 +383,7 @@ Portal runs unsandboxed inside `omarchy-shell`, like every Omarchy plugin.
   names, strips control characters, and stops root discovery at directories
   you don't own.
 - New metric and tunnel state uses 700/600 modes. Metrics hold only numbers
-  and timestamps and are deleted when a port is unwatched. Tunnel state uses
+  and timestamps. Unwatching pauses recording and preserves saved samples. Tunnel state uses
   `PORTAL_STATE_DIR`, then `$XDG_RUNTIME_DIR/portal`, then `$HOME/.cache/portal`.
   The fallback persists across logouts. Existing state may be readable by
   others, but must be owned by the user and not writable by others. Every
