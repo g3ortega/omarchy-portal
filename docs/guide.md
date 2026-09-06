@@ -53,7 +53,8 @@ Tab chooses a button, Enter activates it, and `y` confirms. Escape or `n`
 cancels. A refused or busy action keeps the dialog open.
 
 Errors appear below the header and remain until dismissed or replaced.
-Copy details preserves the full message when it is too long to display.
+Copy details or Ctrl+C copies the full error when it is too long to display.
+Ctrl+C keeps its normal meaning in text editors and stays inactive during confirmations.
 Short success messages disappear after five seconds.
 
 When `ss` attributes a prefork listener to multiple PIDs, Portal still lists

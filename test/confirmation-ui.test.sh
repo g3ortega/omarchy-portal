@@ -10,7 +10,27 @@ fi
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
 mkdir -p "$scratch/qs/Commons" "$scratch/qs/Ui"
-cp "$root/ConfirmationDialog.qml" "$root/test/qml/tst_confirmation.qml" "$scratch/"
+cp "$root/ConfirmationDialog.qml" "$root"/test/qml/tst_*.qml "$scratch/"
+/usr/bin/python3 - "$root" "$scratch" <<'PYTHON'
+from pathlib import Path
+import re, sys
+root, scratch = map(Path, sys.argv[1:])
+source = (root / 'PortalPanel.qml').read_text()
+shortcut = re.search(r'^      Shortcut \{\n        id: noticeCopyShortcut[\s\S]*?^      \}', source, re.M)
+(scratch / 'NoticeCopyHarness.qml').write_text("""import QtQuick
+Item {
+ id: root
+ property bool opened: true
+ property bool noticeError: true
+ property string noticeText: ""
+ property var confirmation: null
+ property string mode: "list"
+ property var service: null
+ function focusList() { keyCatcher.forceActiveFocus() }
+ Item { id: keyCatcher; property bool blocked: root.confirmation !== null || search.activeFocus || root.mode === "naming" }
+ TextInput { id: search; objectName: "noticeEditor" }
+""" + (shortcut[0] if shortcut else '') + '\n}')
+PYTHON
 cat > "$scratch/qs/Commons/qmldir" <<'QML'
 module qs.Commons
 singleton Style 1.0 Style.qml

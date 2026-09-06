@@ -339,6 +339,10 @@ Panel {
   onVisibleEntriesChanged: {
     if (expandedKind !== "" && indexOfPort(selectedPort) < 0) collapse()
     if (pendingAction !== null && !pendingStillValid(pendingAction)) pendingAction = null
+    if (detailEntry !== null) {
+      var current = entryForPort(detailEntry.port)
+      if (current) detailEntry = current
+    }
   }
 
   function stillListed(entry) {
@@ -552,7 +556,10 @@ Panel {
     case "stop": accepted = service.signalProcess(entry, a.kind); break
     case "share": accepted = service.expose(entry.port, a.provider, "", entry.process); break
     }
-    if (accepted) pendingAction = null
+    if (accepted) {
+      pendingAction = null
+      if (a.kind === "stop") detailEntry = null
+    }
   }
 
   // j/k on the detail page walk sibling ports without leaving the charts.
@@ -601,6 +608,14 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+
+      Shortcut {
+        id: noticeCopyShortcut
+        sequence: "Ctrl+C"
+        context: Qt.WindowShortcut
+        enabled: root.opened && root.noticeError && root.noticeText.length > 0 && !keyCatcher.blocked
+        onActivated: if (root.service) root.service.copyText(root.noticeText, true)
+      }
       // Editors own the keyboard while they exist: the filter field and the
       // inline name editor both need plain letters, including j/k/x/space.
       blocked: root.confirmation !== null || search.activeFocus || root.mode === "naming"
@@ -887,7 +902,7 @@ Panel {
 
               LinkText {
                 visible: root.noticeError
-                text: "Copy details"
+                text: "Copy details · Ctrl+C"
                 onClicked: if (root.service) root.service.copyText(root.noticeText, true)
               }
 

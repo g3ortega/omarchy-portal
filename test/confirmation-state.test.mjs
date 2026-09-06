@@ -47,6 +47,22 @@ context.service.expose = () => { calls.push('share'); return true }
 context.confirmAccept()
 assert.equal(context.pendingAction, null)
 
+for (const kind of ['stop', 'pause', 'restart']) {
+  for (const accepted of [false, true]) {
+    context.detailEntry = current
+    context.service.signalProcess = () => accepted
+    context.service.restartProcess = () => accepted
+    context.requestAction(kind, current)
+    context.confirmAccept()
+    assert.equal(context.detailEntry, kind === 'stop' && accepted ? null : current,
+      `${kind} only leaves charts when Stop is accepted`)
+  }
+}
+context.detailEntry = current
+context.requestAction('stop', current)
+context.cancelConfirmation()
+assert.equal(context.detailEntry, current, 'canceling Stop keeps the charts')
+
 for (const change of ['process', 'missing', 'provider', 'tunnel', 'start']) {
   current = { port: 3000, name: 'app', process: { pid: 999999, start: '1' } }
   context.service.actionProviderFor = () => ({ status: 'ready', reach: 'public' })
@@ -63,6 +79,26 @@ for (const change of ['process', 'missing', 'provider', 'tunnel', 'start']) {
   assert.equal(calls.length, before, `${change} invalidates consent without dispatch`)
   assert.equal(context.pendingAction, null)
 }
+
+const visibleEntriesChanged = source.match(/  onVisibleEntriesChanged: \{([\s\S]*?)\n  \}/)[1]
+context.expandedKind = ''
+context.indexOfPort = () => 0
+context.service.activeAction = null
+context.detailEntry = { port: 3000, name: 'original', process: { pid: 999998, start: '1' } }
+current = context.detailEntry
+context.requestAction('stop', context.detailEntry)
+assert.equal(context.pendingStillValid(context.pendingAction), true, 'original process consent begins valid')
+current = { port: 3000, name: 'replacement', process: { pid: 999999, start: '2' } }
+vm.runInContext('(function(){' + visibleEntriesChanged + '})()', context)
+assert.equal(context.pendingAction, null, 'replacement invalidates old consent before updating the displayed entry')
+assert.equal(context.detailEntry, current, 'charts follow the replacement listener identity')
+context.requestAction('stop', context.detailEntry)
+assert.equal(context.pendingStillValid(context.pendingAction), true, 'actions from refreshed charts target the current process')
+context.cancelConfirmation()
+const displayed = context.detailEntry
+current = null
+vm.runInContext('(function(){' + visibleEntriesChanged + '})()', context)
+assert.equal(context.detailEntry, displayed, 'a temporary restart gap preserves the charts')
 
 context.showMoment('action failed', true)
 assert.equal(context.feedback.kind, 'error')
