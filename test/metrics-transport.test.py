@@ -3,10 +3,12 @@ import collections
 import json
 import os
 from pathlib import Path
+import runpy
 import sqlite3
 import subprocess
 import tempfile
 import time
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = int(time.time())
@@ -144,3 +146,34 @@ with tempfile.TemporaryDirectory(prefix='portal-metrics-transport-') as temporar
         assert connection.execute('PRAGMA user_version').fetchone()[0] == 2
         assert {'tcpRttMs', 'tcpRttCount'} <= {row[1] for row in connection.execute('PRAGMA table_info(samples)')}
     print('ok fresh stores start at version 2')
+
+with tempfile.TemporaryDirectory(prefix='portal-metrics-output-') as temporary:
+    state = runpy.run_path(str(ROOT/'scripts/lib/statedir.py'))
+    metrics = runpy.run_path(str(ROOT/'scripts/lib/metrics.py'))
+    store = state['open_dir'](temporary)
+    executable = state['open_exe']('/usr/bin/sqlite3')
+    try:
+        size = 512 * 1024
+        keys = ['bin', 'count'] + [field + suffix for field in metrics['FIELDS'] for suffix in ('Lo', 'Hi', 'Avg', 'Count')]
+        number = '1.' + '2' * 33 + 'e+100'
+        assert len(number) == 40
+        row = '{' + ','.join(json.dumps(key) + ':' + number for key in keys) + '}'
+        projection = 'load_extension off\n[' + ',\n'.join([row] * 400) + ']\n'
+        assert 256 * 1024 < len(projection) < size
+        completed = subprocess.CompletedProcess([], 0, stdout=projection)
+        with patch.object(subprocess, 'run', return_value=completed):
+            result = metrics['sql'](store, executable, 'fixture projection')
+        assert len(result) == 400 and all(len(row) == 22 for row in result)
+        assert result[0]['tcpRttMsAvg'] == float(number)
+        result = metrics['sql'](store, executable, f"SELECT printf('%.*c',{size - 64},'x') AS payload;")
+        assert result == [{'payload': 'x' * (size - 64)}]
+        try:
+            metrics['sql'](store, executable, f"SELECT printf('%.*c',{size},'x') AS payload;")
+        except ValueError as error:
+            assert str(error) == 'metrics response exceeds limit'
+        else:
+            raise AssertionError('SQL output above 512 KiB must be refused')
+    finally:
+        os.close(executable)
+        os.close(store)
+    print('ok real SQLite output below 512 KiB is accepted and output above the cap is refused')

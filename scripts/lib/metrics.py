@@ -12,6 +12,7 @@ import time
 FIELDS = ('latMs', 'conns', 'cpuPct', 'rssKb', 'tcpRttMs')
 RETENTION = 172800
 APPLICATION_ID = 1347701809
+MAX_SQL_OUTPUT = 512 * 1024
 SCHEMA = '''CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY,port INTEGER NOT NULL,t INTEGER NOT NULL,latMs REAL,conns REAL,cpuPct REAL,rssKb REAL,httpCode REAL,tcpRttMs REAL,tcpRttCount REAL);
 CREATE INDEX IF NOT EXISTS samples_port_t ON samples(port,t);
 CREATE INDEX IF NOT EXISTS samples_t ON samples(t);
@@ -51,7 +52,7 @@ def sql(store, executable, statement, readonly=False):
                             env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent'})
     if result.returncode:
         raise ValueError('SQLite operation failed')
-    if len(result.stdout) > 262144:
+    if len(result.stdout) > MAX_SQL_OUTPUT:
         raise ValueError('metrics response exceeds limit')
     lines = result.stdout.splitlines()
     if not lines or lines.pop(0).strip() != 'load_extension off':

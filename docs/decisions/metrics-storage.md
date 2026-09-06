@@ -149,8 +149,13 @@ See the [ss manual](https://man7.org/linux/man-pages/man8/ss.8.html) and
 The installed version-1 migration was compared with a consistent database
 snapshot. All 91,938 prior rows retained their IDs and every previous value.
 Their new TCP fields were null. Existing import and retry records remained
-intact. A 400-bucket response with five metrics and long fractional values
-measured 233,366 bytes, within the unchanged 256 KiB SQL response limit.
+intact. A final 400-bucket response with five metrics and long fractional values
+measured 233,366 bytes locally. SQLite versions format the intermediate SQL
+JSON differently, and the Ubuntu CI version exceeded the original 256 KiB
+limit. The SQL response limit is now 512 KiB. The fixed projection has at most
+400 rows of 22 numeric members. Allowing 40 characters per number and the
+longest field name keeps that projection below 512 KiB without reducing
+precision. The 400-bucket limit and outer 4 MiB helper-output limit are unchanged.
 
 A 16,384-socket fixture near the 4 MiB snapshot limit exposed repeated string
 copies in the first parser. One streaming aggregation pass reduced that case
