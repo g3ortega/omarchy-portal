@@ -11,9 +11,7 @@ state() { /usr/bin/python3 -I -S "$STATEDIR_PY" "$@"; }   # -I: no env or cwd ca
 proc()  { /usr/bin/python3 -I -S "$PROC_PY" "$@"; }       # signal <pid> <start> <SIG> | check <pid> <start>
 own_dir()   { state ensure "$@" 2>/dev/null; }                   # create 0700 and verify
 cat_own()   { state read "$1" "${2:-1048576}" 2>/dev/null; }      # whole file, capped
-read_own()  { cat_own "$1" "${2:-4096}" | head -n 1; }           # first line
 write_own() { printf '%s' "$2" | state write "$1" 2>/dev/null; }  # atomic replace
-state_dump()     { state dump "$1" "${2:-65536}" 2>/dev/null || echo '{"files":{}}'; }
 state_remove()   { state remove "$@" 2>/dev/null; }              # <dir> <name>...
 state_truncate() { state truncate "$1" "$2" 2>/dev/null; }       # <path> <cap>
 

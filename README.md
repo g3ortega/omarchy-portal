@@ -7,7 +7,7 @@ See what runs on each port, then open, name, share, or manage its process.
 Setup and preferences live in Settings so the homepage stays focused on your services.
 
 <p align="center">
-  <img src="preview.png" width="800" alt="Portal's port list and charts page">
+  <img src="preview.png" width="480" alt="Portal's port list with local naming and public sharing actions">
 </p>
 
 ```sh
@@ -22,10 +22,16 @@ Bind it to a key (pick one that's free in `omarchy menu keybindings --print`):
 o.bind("SUPER + ALT + P", "Portal", "omarchy-shell g3ortega.portal toggle")
 ```
 
-Remove with `scripts/portal uninstall` first (it disables the plugin, stops
-every share and name Portal created, drops the Portless CA from the browser
-stores Portal added it to, deletes cloudflared if it is still Portal's copy,
-and removes Portal's state), then `omarchy plugin remove g3ortega.portal`.
+To remove Portal, run its cleanup command before removing the plugin:
+
+```sh
+~/.config/omarchy/plugins/g3ortega.portal/scripts/portal uninstall
+omarchy plugin remove g3ortega.portal
+```
+
+Cleanup disables the plugin, stops its shares, removes its local names and
+browser trust records, and deletes its state. It removes cloudflared only if
+the installed binary still matches Portal's recorded copy.
 
 Portal probes inferred HTTP services on `localhost` and calls the local Portless proxy
 and ngrok agent. It checks new tunnel hostnames through `1.1.1.1` or

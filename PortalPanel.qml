@@ -516,12 +516,7 @@ Panel {
   }
 
   function activateVerbById(entry, id) {
-    if (id === "share" && entry && service && service.publicTunnelFor(entry.port)) {
-      activateVerb(entry, { id: id })
-      return
-    }
-    var vs = verbsFor(entry)
-    for (var i = 0; i < vs.length; i++) if (vs[i].id === id) { activateVerb(entry, vs[i]); return }
+    activateVerb(entry, { id: id })
   }
 
   function activateVerbAtCursor() {
@@ -1342,7 +1337,7 @@ Panel {
                     { k: "l  ·  h / esc", d: "charts · back" },
                     { k: "type  or  /", d: "filter the list" },
                     { k: "o  ·  c", d: "open in browser · copy URL" },
-                    { k: "n  ·  s", d: "local name · share / stop sharing" },
+                    { k: "n  ·  s", d: "name · toggle sharing" },
                     { k: "w", d: "watch — persist metrics to disk" },
                     { k: "p  ·  r", d: "pause / resume · restart (dev)" },
                     { k: "x  ·  R", d: "stop process · rescan now" },
