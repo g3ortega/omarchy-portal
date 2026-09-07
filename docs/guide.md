@@ -161,10 +161,15 @@ When the approved process closes its port, the tunnel remains for ten minutes
 in case that same process reopens it. The row reads "shared while nothing
 listens" and offers only stop sharing. A different process binding the port
 stops the tunnel on the next poll instead of inheriting the public URL.
+Startup also rechecks the approved process while waiting for the URL and DNS,
+and refuses success if ownership changes. These checks bound detection time;
+they do not make TCP port ownership atomic.
 
 Portal also adopts what you already run: routes created with the `portless`
 CLI, cloudflared quick tunnels you started in a terminal, and tunnels on
-ngrok's local agent. The agent is expected on port 4040; set `NGROK_API_PORT`
+ngrok's local agent. Cloudflare adoption accepts only HTTP(S) targets on
+loopback addresses, so a remote service with the same port stays separate.
+The ngrok agent is expected on port 4040; set `NGROK_API_PORT`
 in the shell's environment if yours uses another `web_addr`.
 
 ## Settings
@@ -377,6 +382,8 @@ Portal runs unsandboxed inside `omarchy-shell`, like every Omarchy plugin.
   URLs must be a plain `http(s)://host[:port]/...`, TLDs must be DNS labels,
   and ngrok is adopted only from a socket the kernel attributes to your own
   `ngrok`.
+- Local HTTP probes and provider checks bypass proxy environment settings.
+  External downloads and DNS requests can still use configured proxies.
 - Latency probes hit only ports the service lists: the open charts page,
   watched ports, and detected dev servers, capped at eight per scan.
 - `scan-ports.sh` reads an allowlist of marker filenames and dependency

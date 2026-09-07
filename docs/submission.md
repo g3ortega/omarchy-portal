@@ -21,6 +21,20 @@ not a security certification. A fresh deep security scan was attempted during
 this preparation round but did not start because its worker required a managed
 filesystem permission profile. That review remains outstanding.
 
+## Follow-up source review
+
+Manual review of `2c44293` reproduced three additional issues. This change
+addresses them with focused regressions.
+
+| Finding | Correction | Repeatable check |
+|---|---|---|
+| Proxy environment variables could redirect local probes | Local HTTP requests explicitly bypass proxies. | `bash test/local-proxy.test.sh` |
+| Cloudflare adoption matched remote origins by port number | Parse NUL-separated argv and accept only unambiguous HTTP(S) loopback origins. | `bash test/cloudflared-targets.test.sh` |
+| Public startup could succeed after the approved listener changed | Refresh socket ownership throughout URL and DNS waits and before success. Stop the new tunnel on failed attribution. | `bash test/public-start-revalidation.test.sh` |
+
+Startup checks bound detection time. They cannot make ownership of a TCP port
+atomic with provider requests.
+
 ## Corrections to the original submission
 
 - Portal does not run npm or another package manager. Missing Portless setup
