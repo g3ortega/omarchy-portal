@@ -1,27 +1,13 @@
 #!/bin/bash
-# Full portless setup, owned by Portal: audit every rung of the ladder, do all
-# the unprivileged ones, and report exactly what (if anything) remains for a
-# terminal with sudo. Never elevates by itself.
+# Audit Portless and apply unprivileged setup. Remaining steps are reported
+# for the user to run. Browser trust is separate from system trust.
 #
 #   status  -> {"ok":true,"checks":{...},"remaining":[...]}
-#   run     -> performs unprivileged fixes, then prints the same report
-#   untrust -> removes the CA from the browser stores it was imported into
+#   run     -> applies fixes, then prints the same report
+#   untrust -> removes the CA from the browser stores recorded during import
 #
-# The rungs:
-#   installed      portless on PATH (the npm install is a copyable command;
-#                  the plugin never runs a package manager)
-#   ca             the user's own CA exists (minted by portless on first run)
-#   proxy          serving this user's routes on any port
-#   trust_system   CA in the system store (portless trusts it during the
-#                  elevated proxy start; reported, not forced)
-#   trust_nss      CA in ~/.pki/nssdb — Chrome/Chromium/Brave read this,
-#                  NOT the system store (fix: certutil import of the user's CA)
-#   trust_firefox  CA in each Firefox profile's cert9.db (fix: certutil)
-#
-# Security: the only certificate ever imported is ~/.portless/ca.pem — the CA
-# this user's own portless generated, read once through the state helper and
-# verified against the live proxy. Nothing is fetched, nothing is installed,
-# nothing elevates.
+# Import only the user's CA, read once through the state helper and verified
+# against the live proxy. This script does not install packages or elevate.
 set -o pipefail
 
 SETUP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

@@ -13,7 +13,7 @@ for mask in {0..7}; do
       cat > "$CASE/bin/$name" <<'BIN'
 #!/bin/bash
 printf '%s %s\n' "${0##*/}" "$*" >> "$CASE/calls"
-[[ ${0##*/} == ngrok && $* == 'config check' ]]
+[[ ${0##*/} == ngrok && $* == 'config check' ]] && exit "${CONFIG_RC:-0}"
 BIN
       chmod 700 "$CASE/bin/$name"
     fi
@@ -53,10 +53,23 @@ portless_state_load() { return 1; }
 cmd_providers | jq -e --argjson mask "$MASK" '
   .providers[] | select(.id == "portless") |
   .status == "unavailable" and .available == ($mask % 2 == 1)' >/dev/null
-if [[ -x $CASE/bin/portless ]]; then
-  chmod 777 "$CASE/bin/portless"
-  cmd_providers | jq -e '.providers[] | select(.id == "portless") | .available == false' >/dev/null
+if (( MASK == 7 )); then
+  CONFIG_RC=1 cmd_providers | jq -e '
+    .ok and all(.providers[]; .available) and
+    ([.providers[] | [.id, .status]] ==
+      [["cloudflared", "ready"], ["ngrok", "setup"], ["portless", "unavailable"]])' >/dev/null
+  echo 'PASS mixed configuration failures preserve independent Cloudflare readiness'
 fi
+for name in portless cloudflared ngrok; do
+  [[ -x $CASE/bin/$name ]] || continue
+  chmod 777 "$CASE/bin/$name"
+  cmd_providers | jq -e --arg name "$name" --argjson mask "$MASK" '
+    all(.providers[];
+      (if .id == "portless" then 1 elif .id == "cloudflared" then 2 else 4 end) as $bit |
+      .available == (.id != $name and (($mask / $bit | floor) % 2 == 1)))' >/dev/null
+  chmod 700 "$CASE/bin/$name"
+done
+
 CASE
   echo "PASS fresh provider availability combination $mask"
 done

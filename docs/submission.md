@@ -21,6 +21,20 @@ not a security certification. A fresh deep security scan was attempted during
 this preparation round but did not start because its worker required a managed
 filesystem permission profile. That review remains outstanding.
 
+## Follow-up source review
+
+Manual review of `2c44293` reproduced three additional issues. This change
+addresses them with focused regressions.
+
+| Finding | Correction | Repeatable check |
+|---|---|---|
+| Proxy environment variables could redirect local probes | Local HTTP requests explicitly bypass proxies. | `bash test/local-proxy.test.sh` |
+| Cloudflare adoption matched remote origins by port number | Parse NUL-separated argv and accept only unambiguous HTTP(S) loopback origins. | `bash test/cloudflared-targets.test.sh` |
+| Public startup could succeed after the approved listener changed | Refresh socket ownership throughout URL and DNS waits and before success. Stop the new tunnel on failed attribution. | `bash test/public-start-revalidation.test.sh` |
+
+Startup checks bound detection time. They cannot make ownership of a TCP port
+atomic with provider requests.
+
 ## Corrections to the original submission
 
 - Portal does not run npm or another package manager. Missing Portless setup
@@ -54,3 +68,34 @@ bash test/e2e-live.sh
 The live suite uses temporary listeners. It checks fixture identity before
 teardown. UI changes additionally require the installed proof described in
 [the contributor guide](../AGENTS.md#installed-plugin-proof).
+
+## Verification coverage
+
+`test/test.sh` runs the following controlled cases as well as the state,
+process, scanner, QML, and chart suites. Provider binaries and signals are
+stubbed where a case requires an invalid identity or intentional failure.
+These fixtures do not prove a provider account or external network is healthy.
+
+| Area | Cases |
+|---|---|
+| Optional tools | All eight installed/missing combinations; each present executable independently rejected when writable by others; mixed configuration failures leave healthy providers available |
+| Public startup | Both Cloudflare and ngrok; listener replacement, absent listener, socket query failure, DNS waits and resolution, final publication, failed cleanup, provider rejection, ready and pending DNS |
+| Local naming and trust | Proxy off, wrong port or TLD, foreign proxy, missing trust tools, private NSS import/removal, interrupted setup, rollback and protected routes |
+| UI actions | Missing tools hide actions; changed owners/providers invalidate confirmation; busy actions cannot submit twice; focus, Escape and backdrop cancellation |
+| Metrics | HTTP/TCP isolation, six ranges through 48 hours, missing samples, stale reads, retries, bounded queues and retention, shared storage and permissions |
+| Process controls | Identity checks before signals, invalid group targets, pause/resume, exact restart arguments and environment, timeouts and cancellation |
+
+`test/e2e-live.sh` adds real listeners and checks detection, probes, metrics,
+process controls, CLI and the installed plugin's IPC. The installed panel proof
+also exercises range and transport switching, confirmation, settings
+persistence, notices, and rendering in the actual host shell.
+
+This is a matrix of supported states and failure boundaries, not every possible
+combination of network, desktop, browser, and provider account state. External endpoint checks need a working network. ngrok also needs an account
+and authtoken.
+
+The follow-up local run passed real Cloudflare endpoint creation, retrieval of
+a fixed test response, and teardown. A temporary Portless name served the same
+response and was removed. ngrok was not installed on this machine, so its live
+account and network path was not tested. Its unavailable UI state, configuration
+failures, and startup paths were covered by controlled fixtures.

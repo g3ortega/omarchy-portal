@@ -40,7 +40,7 @@ if [[ ${1:-} == --probe ]]; then
     (( _probe_count >= MAX_PROBES )) && break
     _probe_seen+="$_pp "
     _probe_count=$((_probe_count + 1))
-    curl -q -so /dev/null -w '%{http_code} %{time_total}' --max-redirs 0 --max-filesize 65536 \
+    curl -q --noproxy '*' -so /dev/null -w '%{http_code} %{time_total}' --max-redirs 0 --max-filesize 65536 \
       --max-time 1 "http://localhost:$_pp/" > "$PROBE_DIR/$_pp" 2>/dev/null &
     _probes+=("$!")
   done

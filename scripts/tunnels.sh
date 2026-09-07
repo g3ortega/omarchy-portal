@@ -193,19 +193,42 @@ cloudflared_status() {
 }
 cloudflared_argv() { printf '%s\n' tunnel --config /dev/null --no-autoupdate --url "http://localhost:$1"; }
 cloudflared_setup_clause() { printf 'a checksum-pinned release, into ~/.local/bin'; }
-# pid<TAB>port for every cloudflared serving a local port, from its own argv.
+# pid<TAB>start<TAB>port for each Cloudflare loopback origin, from its argv.
 # Both the adopter and the stopper read this, so they cannot disagree about
 # what a command line means. Pids come from the caller when it already has a
 # socket dump to name them; only the one-shot stop path pays for a /proc walk.
 cloudflared_targets() {  # [pid...]
-  local pid start line target
+  local pid start target port arg i valid
+  local -a argv
   for pid in ${*:-$(pgrep -x cloudflared 2>/dev/null)}; do
-    line=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
-    [[ $line == *--url\ * ]] || continue
-    target=${line#*--url }; target=${target%% *}
     start=$(proc_start "$pid") || continue
-    valid_identity_line "$pid $start" && [[ ${target##*:} =~ ^[0-9]+$ ]] \
-      && printf '%s\t%s\t%s\n' "$pid" "$start" "${target##*:}"
+    valid_identity_line "$pid $start" || continue
+    mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || continue
+    target=""; valid=1
+    for ((i = 1; i < ${#argv[@]}; i++)); do
+      arg=${argv[i]}
+      case $arg in
+        --) break ;;
+        --url)
+          [[ -z $target && $((i + 1)) -lt ${#argv[@]} ]] || { valid=0; break; }
+          target=${argv[++i]}
+          [[ -n $target ]] || { valid=0; break; }
+          ;;
+        --url=*)
+          [[ -z $target && -n ${arg#--url=} ]] || { valid=0; break; }
+          target=${arg#--url=}
+          ;;
+      esac
+    done
+    (( valid )) || continue
+    [[ $target =~ ^https?://(localhost|127\.0\.0\.1|\[::1\])(:([0-9]+))?([/?][^[:space:][:cntrl:]]*)?$ ]] || continue
+    port=${BASH_REMATCH[3]}
+    if [[ -z $port ]]; then
+      if [[ $target == https://* ]]; then port=443; else port=80; fi
+    fi
+    port=$(canonical_port "$port") || continue
+    [[ $(proc_start "$pid") == "$start" ]] || continue
+    printf '%s\t%s\t%s\n' "$pid" "$start" "$port"
   done
 }
 
@@ -510,13 +533,24 @@ dns_published() {  # <host> [timeout]
 dns_resolves_here() { getent hosts "$1" >/dev/null 2>&1; }
 # 0 = resolves locally, 1 = not yet (unpublished, or an upstream negative
 # cache that clears with its TTL).
-dns_gate() {  # <host>
-  local host="$1" i
-  sleep 3   # the record never exists in the first seconds; asking then only poisons
+dns_gate() {  # <host> [provider port target pidline]
+  local host="$1" i; shift
+  (( $# == 0 )) || check_public_target "$@"
+  sleep 3   # early queries can cache NXDOMAIN before publication
   for ((i = 0; i < 12; i++)); do
-    dns_published "$host" && { dns_resolves_here "$host"; return; }
+    (( $# == 0 )) || check_public_target "$@"
+    local published=0
+    dns_published "$host" && published=1
+    (( $# == 0 )) || check_public_target "$@"
+    if (( published )); then
+      local resolved=1
+      dns_resolves_here "$host" && resolved=0
+      (( $# == 0 )) || check_public_target "$@"
+      return "$resolved"
+    fi
     sleep 2
   done
+  (( $# == 0 )) || check_public_target "$@"
   return 1
 }
 
@@ -579,6 +613,12 @@ public_start_failed() {  # <provider> <port> <pidline> <reason>
     die "$reason; the tracked pid record is malformed, so its records were kept"
   fi
   die "$reason; the tunnel did not stop, so its ownership records were kept"
+}
+
+check_public_target() {  # <provider> <port> <target> <pidline>
+  SOCKS_READY=0
+  target_owns_port "$3" "$2" && return 0
+  public_start_failed "$1" "$2" "$4" "port $2 is no longer safely attributed to the approved process"
 }
 
 cancel_public_start() {  # <provider> <port> <exit status>
@@ -765,8 +805,10 @@ cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
 
   # Poll the log for the public URL rather than blocking on the process.
   local url="" i
+  check_public_target "$provider" "$port" "$target" "$pidline"
   for ((i = 0; i < 60; i++)); do
     sleep 0.5
+    check_public_target "$provider" "$port" "$target" "$pidline"
     url=$("${provider}_url_from_log" "$lf")
     [[ -n $url ]] && break
     alive_line "$pidline" "$provider" || break
@@ -780,12 +822,13 @@ cmd_start() {  # <provider> <port> [name] [--target <pid> <start>]
 
   local host; host=$(url_host "$url")
   local hint=""
-  if ! dns_gate "$host"; then
+  if ! dns_gate "$host" "$provider" "$port" "$target" "$pidline"; then
     # The row shows the URL as pending until status sees it resolve.
     write_own "$(dnsfile "$provider" "$port")" pending \
       || public_start_failed "$provider" "$port" "$pidline" "could not record pending DNS state"
     hint="$host is not in DNS yet — the row lights up when it resolves"
   fi
+  check_public_target "$provider" "$port" "$target" "$pidline"
   finish_start "$provider" "$port" "$url" "$hint" \
     || public_start_failed "$provider" "$port" "$pidline" "could not record the active $provider share"
   trap - TERM INT HUP
@@ -902,7 +945,7 @@ cloudflared_adopt() {
   while IFS=$'\t' read -r cfpid cfstart tport; do
     mport=$(grep "pid=$cfpid," <<<"$SOCKS" | grep -oP '127\.0\.0\.1:\K[0-9]+' | head -1)
     [[ -n $mport ]] || continue
-    qhost=$(curl -q -s --max-time 0.4 --max-redirs 0 --max-filesize 16384 "http://127.0.0.1:$mport/quicktunnel" 2>/dev/null \
+    qhost=$(curl -q -s --noproxy '*' --max-time 0.4 --max-redirs 0 --max-filesize 16384 "http://127.0.0.1:$mport/quicktunnel" 2>/dev/null \
       | head -c 16384 | jq -r '.hostname // empty' 2>/dev/null)
     [[ $qhost =~ ^[a-z0-9-]+\.trycloudflare\.com$ ]] || continue
     printf '%s\thttps://%s\n' "$tport" "$qhost"

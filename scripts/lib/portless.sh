@@ -200,7 +200,7 @@ portless_probe() {
     seen+="$p "
     local scheme
     for scheme in https http; do
-      if curl -q -sk --max-time 0.4 --max-redirs 0 -o /dev/null -D - "$scheme://127.0.0.1:$p/" 2>/dev/null \
+      if curl -q --noproxy '*' -sk --max-time 0.4 --max-redirs 0 -o /dev/null -D - "$scheme://127.0.0.1:$p/" 2>/dev/null \
            | head -c 16384 | grep -qi '^x-portless:'; then
         PROBE_PORT="$p"; PROBE_SCHEME="$scheme"
         return 0
@@ -220,11 +220,11 @@ portless_serving_routes() {
   [[ -n $first ]] || return 0   # nothing registered: nothing to disprove
   valid_tld "$first" || return 0
   local code
-  code=$(curl -q -sk --max-time 0.6 --max-redirs 0 -o /dev/null -w '%{http_code}' \
+  code=$(curl -q --noproxy '*' -sk --max-time 0.6 --max-redirs 0 -o /dev/null -w '%{http_code}' \
     --resolve "$first:$PROBE_PORT:127.0.0.1" \
     "$PROBE_SCHEME://$first:$PROBE_PORT/" 2>/dev/null)
   [[ $code == 404 ]] || return 0
-  curl -q -sk --max-time 0.6 --max-redirs 0 --max-filesize 4096 \
+  curl -q --noproxy '*' -sk --max-time 0.6 --max-redirs 0 --max-filesize 4096 \
     --resolve "$first:$PROBE_PORT:127.0.0.1" \
     "$PROBE_SCHEME://$first:$PROBE_PORT/" 2>/dev/null | head -c 4096 \
     | grep -qi portless && return 1
