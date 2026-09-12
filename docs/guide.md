@@ -144,9 +144,11 @@ Portal leaves running proxies alone, including those owned by root.
 
 Settings lists every provider with its readiness and setup guidance. The share
 picker lists available tools. An installed tool that needs setup opens Settings.
-Sharing asks first, in place, naming the port and provider. A desktop notification
-confirms every new public URL, whether the panel or IPC asked for it. Installation
-and browser trust ask for confirmation in Settings. Anything reachable from
+The panel asks before sharing, naming the port and provider. CLI and IPC share
+commands are non-interactive and publish without a confirmation dialog.
+A desktop notification announces every new public URL started through the panel
+or IPC. Installation and browser trust ask for confirmation in Settings.
+Anything reachable from
 the internet is drawn in the theme's urgent color in the row, in the panel,
 and on the bar.
 
@@ -374,8 +376,12 @@ Portal runs unsandboxed inside `omarchy-shell`, like every Omarchy plugin.
   the Python helper or appear on its command line.
 - The kernel limits signals to processes you own. Lifecycle actions re-check
   both the PID and its kernel start time, then signal through a pidfd. Owned
-  tunnel stops use that check for the leader and separately guard process-group
-  signals with the recorded command, start time, and `pid > 1`. Adopted
+  tunnel stops and restart rollback bind one pidfd to the recorded session
+  leader before sending group signals. TERM, KILL, and completion probes use
+  that same handle, even if the leader exits during cleanup. This requires
+  Linux 6.9 or newer; unsupported group signaling fails without a numeric-PID
+  fallback. If the leader is already gone before binding and its group remains,
+  cleanup refuses to signal and keeps the ownership record. Adopted
   Cloudflared stops match its current command name and target argument. Adopted
   ngrok stops use the local agent API. Portal never runs sudo.
 - Provider output (tunnel logs, the ngrok API, routes files) is untrusted:
@@ -402,6 +408,9 @@ Portal runs unsandboxed inside `omarchy-shell`, like every Omarchy plugin.
   pidfd. The separate tunnel stop paths use the guards described above.
   Provider binaries run by absolute path after a regular-file, owner and
   mode check, never by a bare name through PATH.
+- System helpers such as `curl`, `sha256sum`, `openssl`, and `certutil` use
+  the inherited PATH. Its directories and tools must be trusted. Provider
+  executable checks do not secure a compromised helper search path.
 - Helpers dispatched by the QML service run under an output byte ceiling
   and a hard deadline (`scripts/lib/proc.py`, which ends the whole process group past either and
   passes nothing on); the scanner caps every field, its stderr, and the number
