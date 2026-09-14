@@ -248,8 +248,9 @@ omarchy-shell g3ortega.portal unexpose cloudflared 3000
 
 `portal setup` hands you the `npm install -g portless` command if Portless is
 missing (Portal never runs a package manager), imports your own
-Portless CA (`~/.portless/ca.pem`, checked to be Portless's self-signed root,
-nothing else) into Chrome, Chromium, Brave and every Firefox profile (needs
+Portless CA from `~/.portless/ca.pem` after checking its ownership, expected
+subject and issuer, and the live TLS certificate it verifies.
+It imports into Chrome, Chromium, Brave and every Firefox profile (needs
 `certutil`), and starts an unprivileged proxy on port 1355 if none is running.
 Use `portal setup --status` to inspect readiness without importing certificates
 or starting a proxy. Port 443 is optional.
@@ -414,13 +415,18 @@ Portal runs unsandboxed inside `omarchy-shell`, like every Omarchy plugin.
 - Helpers dispatched by the QML service run under an output byte ceiling
   and a hard deadline (`scripts/lib/proc.py`, which ends the whole process group past either and
   passes nothing on); the scanner caps every field, its stderr, and the number
-  of ports it will describe (past 512 it reports an error instead); provider
+  of ports it will describe (past 512 it reports an error instead). The listening
+  socket query has a 4 MiB producer-side byte cap and a five-second deadline.
+  The scanner rejects more than 16,384 listening rows, including duplicates; provider
   API bodies and the installer download are byte-capped; every `curl` starts
   with `-q` so a `~/.curlrc` cannot alter the request; a tunnel's log
   is truncated past 4 MiB. Direct CLI mutations rely on the helpers' own
   operation limits rather than the QML wrapper.
 - The Portless CA is imported only when it is a small plain file the user
   owns, is self-signed under Portless's own name, and verifies the
-  certificate the live proxy actually presents.
+  certificate the live proxy actually presents. The `x-portless` response header
+  is not process authentication. These checks do not protect against an
+  unrestricted process running as the same user that can replace both the CA
+  and the browser's own NSS database.
 - Portal never touches a provider credential. ngrok reads its own
   authtoken; Portal only reports whether one is configured.
