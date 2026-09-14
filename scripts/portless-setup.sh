@@ -24,11 +24,9 @@ case "${1:-status}" in
     ;;
 esac
 
-# The file at $CA is trusted browser-wide, so it must be what portless mints:
-# a self-signed root whose subject is its own nickname. Anything else in that
-# path (a swapped file, a different state dir) is not imported.
-# The CA bytes, read once through the state helper; reloaded after a proxy
-# start, which is what mints the file the first time.
+# Read owner-protected CA bytes once; reload after starting a proxy that may
+# mint them. The nickname and live TLS check below establish compatibility,
+# not provenance against a process that can replace this user's CA and NSS files.
 CA_PEM=""
 ca_load() { CA_PEM=$(cat_own "$CA" 16384); }
 ca_load

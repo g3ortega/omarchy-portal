@@ -13,62 +13,7 @@ bad() { fail=$((fail+1)); echo "  FAIL $1"; }
 is()  { if [[ $2 == "$3" ]]; then ok "$1"; else bad "$1: expected [$3], got [$2]"; fi; }
 
 if [[ -z ${PORTAL_TEST_ONLY:-} || ${PORTAL_TEST_ONLY:-} == proc-end ]]; then
-if /usr/bin/python3 -I -S - "$PR" <<'PY'
-import errno
-import importlib.util
-import sys
-import types
-
-pid = 424242
-start = "12345"
-spec = importlib.util.spec_from_file_location("portal_proc_end", sys.argv[1])
-proc = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(proc)
-
-
-def end_case(group):
-    state = [start]
-    probes = []
-
-    def killpg(value, sig):
-        probes.append((value, sig))
-        if group is not None:
-            raise group
-
-    proc.starttime = lambda value: state[0] if value == pid else None
-    proc.end_group = lambda value: state.__setitem__(0, None)
-    proc.os = types.SimpleNamespace(killpg=killpg)
-    return proc.cmd_end([str(pid), start]), state[0], probes
-
-
-groups = {
-    "present": None,
-    "absent": ProcessLookupError(),
-    "eperm": PermissionError(errno.EPERM, "operation not permitted"),
-}
-results = {name: end_case(error) for name, error in groups.items()}
-
-dangerous = (("1", "1"), ("0", "0"), ("-1", "1"), ("", ""),
-             ("999999999999999999999", "1"), (str(pid), "not-a-number"))
-dangerous_probes = []
-proc.starttime = lambda value: None
-proc.os = types.SimpleNamespace(killpg=lambda value, sig: dangerous_probes.append((value, sig)))
-dangerous_results = [proc.cmd_end(list(identity)) for identity in dangerous]
-
-expected = {
-    "present": (1, None, [(pid, 0)]),
-    "absent": (0, None, [(pid, 0)]),
-    "eperm": (1, None, [(pid, 0)]),
-}
-if (results != expected or dangerous_results != [1] * len(dangerous)
-        or dangerous_probes):
-    raise SystemExit(
-        f"expected {expected}, got {results}; "
-        f"dangerous returns {dangerous_results}, probes {dangerous_probes}"
-    )
-print("present=1 absent=0 eperm=1 dangerous-probes=0")
-PY
-then
+if /usr/bin/python3 -I -S "$HERE/proc-end.test.py"; then
   ok "proc end requires the exact leader and process group to be gone"
 else
   bad "proc end accepted a surviving or unprobeable process group"
@@ -1858,16 +1803,16 @@ ESCALATE_LOG="$GROUP_ONLY/escalate-signals" S="$S" bash -c '
   checks=0; group_dead=0
   alive_line() { checks=$((checks + 1)); (( checks == 1 )); }
   group_alive() { (( group_dead == 0 )); }
-  proc() { printf "proc %s\n" "$*" >> "$ESCALATE_LOG"; return 0; }
-  kill() {
-    printf "kill %s\n" "$*" >> "$ESCALATE_LOG"
-    [[ $1 == -KILL ]] && group_dead=1
-    return 0
+  proc() {
+    printf "proc %s\n" "$*" >> "$ESCALATE_LOG"
+    [[ $* == "end 999999 1" ]] || return 1
+    group_dead=1
   }
-  STOP_TERM_WAIT=0; STOP_KILL_WAIT=1
+  kill() { printf "unsafe numeric signal\n" >> "$ESCALATE_LOG"; return 1; }
   stop_line "999999 1" cloudflared
 ' >/dev/null 2>&1; rc=$?
-is "a verified stop still escalates after its leader exits" "$rc $(grep -c "kill -KILL -- -999999" "$GROUP_ONLY/escalate-signals")" "0 1"
+is "a verified stop delegates all signaling to one bound group operation" \
+  "$rc $(cat "$GROUP_ONLY/escalate-signals")" "0 proc end 999999 1"
 
 # cmd_stop must never signal a pid the pidfile names unless it is still the provider.
 mkdir -p "$STATE_DIR"

@@ -412,33 +412,18 @@ clear_portless_metadata() {
 }
 # Ending a tunnel means seeing it gone: TERM, a grace period, then KILL, and
 # failure if it is still there, so a record is never cleared over a process
-# that is still public. Both waits are in tenths of a second.
-STOP_TERM_WAIT=50
-STOP_KILL_WAIT=20
-stop_line() {   # <"pid start"> <comm>: end the whole session the launcher created, not just its leader
-  local pid start i sig; read -r pid start <<<"$1"
+# that is still public.
+stop_line() {   # <"pid start"> <comm>: end the launcher's process group
+  local pid start; read -r pid start <<<"$1"
   valid_identity_line "$1" || return 2
   if ! alive_line "$1" "$2"; then
     group_alive "$pid" && return 1
     return 0
   fi
-  # Gone only when both hold: the leader we launched is gone (by identity) and
-  # its process group holds no members. A descendant that inherited the session
-  # and ignores TERM keeps the group alive, so the leader's exit alone is not
-  # proof the tunnel stopped. Process group signalling requires pid > 1;
-  # pid 1 is init, and -1 signals all user processes.
-  for sig in TERM KILL; do
-    ! alive_line "$1" "$2" && ! group_alive "$pid" && return 0
-    # The leader through a pidfd bound to that very process, then the whole
-    # group by id (which also reaches descendants the leader left behind).
-    proc signal "$pid" "$start" "$sig" 2>/dev/null
-    if (( pid > 1 )); then
-      kill -"$sig" -- "-$pid" 2>/dev/null
-    fi
-    local wait; [[ $sig == TERM ]] && wait=$STOP_TERM_WAIT || wait=$STOP_KILL_WAIT
-    for ((i = 0; i < wait; i++)); do ! alive_line "$1" "$2" && ! group_alive "$pid" && return 0; sleep 0.1; done
-  done
-  return 1
+  # One pidfd binds both escalation and completion to the original group.
+  # Reopening by numeric ID after the leader exits can target a successor.
+  (( pid > 1 )) && proc end "$pid" "$start" 2>/dev/null || return 1
+  ! alive_line "$1" "$2" && ! group_alive "$pid"
 }
 # Whether the pidfile still says what a status snapshot said: a start since
 # the snapshot wrote a new one, and that one is not the snapshot's to act on.

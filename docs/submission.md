@@ -1,9 +1,10 @@
 # Directory review notes
 
 The original [Portal submission](https://github.com/omacom/omarchy-plugin-marketplace/issues/4308)
-is still open. Its last maintainer review evaluated `d15f73b`. The changes below
-are present in merged commit `ad9ac95`, with documentation and action-dispatch
-cleanup on top. Ask the directory to validate the final published commit.
+closed without approval on September 13, 2026. Its last maintainer review
+evaluated [d15f73b](https://github.com/g3ortega/omarchy-portal/commit/d15f73b7c14db44232ae1e93efd324453d04b048).
+The fixes below need a fresh submission and validation against the final
+published commit. Local checks are not marketplace approval.
 
 ## Previous review points
 
@@ -17,9 +18,45 @@ cleanup on top. Ask the directory to validate the final published commit.
 | Restart argument transport and mutable CI inputs | Restart uses JSON and NUL-separated arguments. CI pins checkout and the Omarchy revision and verifies the downloaded font archive's SHA-256. | `bash test/restart-effect.test.sh`, `bash test/restart-duplicate-env.test.sh`, `.github/workflows/ci.yml` |
 
 These references document how the earlier findings were addressed. They are
-not a security certification. A fresh deep security scan was attempted during
-this preparation round but did not start because its worker required a managed
-filesystem permission profile. That review remains outstanding.
+not a security certification.
+
+## September 14 security review
+
+The review used the pinned
+[WBSO guide](https://github.com/wbso-ai/omarchy-plugin-security-skill/tree/e8e590c460c31ccebbcc5e1ca123c5c568b26f46)
+and the marketplace's current policy. Independent reviews covered state and
+process handling, QML and scanning, and installation and network effects.
+
+- The listening `ss` snapshot previously accumulated before its port-count
+  limit. It now runs through the byte-capped supervisor and rejects excessive
+  rows, including duplicate ports. `test/scan-tcp.test.sh` checks both sides of
+  the 4 MiB and 16,384-row limits and real IPv4 and IPv6 sockets.
+- The proposed tooltip injection does not apply to the inspected Omarchy host.
+  `PanelActionButton` delegates to `PanelToolTip`, whose `Text` uses PlainText.
+- Portless's response header does not authenticate its executable. The CA
+  snapshot and import checks protect file integrity, not against an unrestricted
+  same-user process that can already change NSS trust directly. The guide and
+  source comments now state that limitation.
+- The historical guide flags mutating IPC and distributed `AGENTS.md` files.
+  The inspected marketplace policy does not impose blanket prohibitions on
+  either. They remain disclosed manual-review considerations, not reasons to
+  silently remove the documented CLI or contributor workflow.
+
+An offline baseline used marketplace
+[4a2bc86](https://github.com/omacom/omarchy-plugin-marketplace/commit/4a2bc86c61cd267366308db19fec5e83109b3d12).
+It reported `needs-fixes`, selective disposition `review-required`, and
+`blocksApproval: false`. Its `curl-pipe-shell` evidence points to
+`ngrok_api_request`, where curl output goes to `head -c`, and an unrelated
+local jq predicate in `stop_share`. Neither executes downloaded content.
+This is a false-positive assessment for a maintainer to verify, not a clean
+automated result. Installer, package-manager, service-management, and privilege
+capabilities still require manual review. Package and privileged commands are
+displayed for the user rather than silently executed.
+
+The baseline used tracked local files, not GitHub's exact-SHA resolver. Repeat
+official validation after publishing the final commit. Live public providers,
+account health, and changes to the user's browser trust were not exercised
+during this review.
 
 ## Follow-up source review
 

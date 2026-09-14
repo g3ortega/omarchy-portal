@@ -135,7 +135,7 @@ routes_json() { portless_file routes.json; }
 # Probe for a live proxy instead of trusting state files: pidfiles go stale,
 # kill -0 answers EPERM (not "running") for a root-owned proxy, and the
 # recorded port can belong to a previous run. portless stamps every response
-# with `x-portless: 1`, which makes the probe exact.
+# with `x-portless: 1`. This identifies a likely proxy, not its executable.
 PROBE_PORT=""
 PROBE_SCHEME=""
 portless_probe_reset() { PROBE_PORT=""; PROBE_SCHEME=""; }

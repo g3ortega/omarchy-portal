@@ -73,6 +73,28 @@ esac
     assert elapsed < 5, f'near-cap socket aggregation took {elapsed:.3f}s'
     print(f'ok 16,384 sockets / {fixture.stat().st_size} bytes aggregate in {elapsed:.3f}s')
 
+    stub.write_text('''#!/bin/bash
+case "$*" in
+  '-tlnpH') /usr/bin/cat "$SOCKET_FIXTURE" ;;
+  '-tniHO state established') exit 0 ;;
+  *) exit 1 ;;
+esac
+''')
+    listener = 'LISTEN 0 10 127.0.0.1:35001 0.0.0.0:*\n'
+    fixture.write_text(listener * 16385)
+    assert 'error' in scan(env), 'duplicate listening rows bypassed the row limit'
+    fixture.write_text(listener * 16384)
+    result = scan(env)
+    assert 'error' not in result and len(result['ports']) == 1, result
+    assert result['ports'][0]['port'] == 35001
+    for size in (4194304, 4194305):
+        fixture.write_bytes(b'x' * size)
+        result = scan(env)
+        assert ('error' in result) == (size > 4194304), (size, result)
+    fixture.write_text('é' * 2097153)
+    assert 'error' in scan({**env, 'LC_ALL': 'C.UTF-8'}), 'byte cap counted characters'
+    print('ok listening snapshot byte and duplicate-row limits, including exact boundaries')
+
 for family, host in [(socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1')]:
     with socket.socket(family) as listener:
         listener.bind((host, 0))

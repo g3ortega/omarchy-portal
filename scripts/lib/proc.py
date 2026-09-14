@@ -20,7 +20,8 @@
   check <pid> <starttime>
       Exit 0 while that process exists, 1 otherwise.
   end <pid> <starttime>
-      End and reap the process's session after validating its identity.
+      End a recorded session leader's process group through one pidfd.
+      Requires Linux 6.9 group signaling; refuses unsafe fallback.
 
 Runs as python3 -I -S: no environment or working directory redirects it.
 """
@@ -33,6 +34,7 @@ import time
 
 STDERR_CAP = 4096
 GRACE = 5.0
+PIDFD_SIGNAL_PROCESS_GROUP = 1 << 2  # Linux UAPI, since 6.9.
 # Nested tunnel rollback needs five seconds for TERM and two for KILL,
 # plus helper and state cleanup time before its action shell can exit.
 RUN_GRACE = 10.0
@@ -49,10 +51,10 @@ def starttime(pid):
 
 
 def parse_pid(a, b):
-    if not re.fullmatch(r"[1-9][0-9]*", a) or not re.fullmatch(r"[0-9]+", b):
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", a) or not re.fullmatch(r"[0-9]+", b):
         return None, None
     pid = int(a)
-    return (pid, b) if pid > 1 else (None, None)
+    return (pid, b) if 1 < pid <= 2147483647 else (None, None)
 
 
 def cmd_check(a):
@@ -91,16 +93,37 @@ def cmd_signal(a):
 
 def cmd_end(a):
     pid, start = parse_pid(a[0], a[1])
-    if not pid or starttime(pid) != start:
+    if not pid:
         return 1
-    end_group(pid)
     try:
-        os.killpg(pid, 0)
-    except ProcessLookupError:
-        return 0 if starttime(pid) != start else 1
+        pidfd = os.pidfd_open(pid)
     except OSError:
         return 1
-    return 1
+    try:
+        if starttime(pid) != start or os.getpgid(pid) != pid or os.getsid(pid) != pid:
+            return 1
+        # The leader may be reaped during TERM's grace. The fd still names
+        # the original group, even after its numeric ID becomes reusable.
+        for sig, grace in ((signal.SIGTERM, GRACE), (signal.SIGKILL, 0.5)):
+            try:
+                signal.pidfd_send_signal(pidfd, sig, None, PIDFD_SIGNAL_PROCESS_GROUP)
+            except ProcessLookupError:
+                return 0
+            limit = time.monotonic() + grace
+            while True:
+                try:
+                    signal.pidfd_send_signal(pidfd, 0, None, PIDFD_SIGNAL_PROCESS_GROUP)
+                except ProcessLookupError:
+                    return 0
+                left = limit - time.monotonic()
+                if left <= 0:
+                    break
+                time.sleep(min(0.05, left))
+        return 1
+    except OSError:
+        return 1
+    finally:
+        os.close(pidfd)
 
 
 def group_alive(pid, ignore_zombies=False):
@@ -140,7 +163,7 @@ def group_alive(pid, ignore_zombies=False):
 
 
 def end_group(pid, grace=GRACE):
-    """TERM the whole group, and if anything is still in it after the grace
+    """For an unreaped direct child only: TERM the group, then after the grace
     period, KILL the group. The leader exiting does not end this: a descendant
     that inherited the pipes and ignores TERM is still a group member."""
     owned_child = True

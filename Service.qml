@@ -12,14 +12,10 @@ import "lib/Detect.js" as Detect
 Item {
   id: root
 
-  // Injected by the shell host when the service is mounted.
-  property var manifest: null
-
-  // __sourceDir is stamped onto the manifest by PluginRegistry. Normalise it:
-  // depending on how the plugin was discovered it can arrive as a plain path
-  // or a file:// URL.
+  // Third-party manifests omit the host's private __sourceDir field.
+  // Resolve beside this component, including escaped characters in its path.
   readonly property string pluginDir: {
-    var dir = manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
+    var dir = decodeURIComponent(Qt.resolvedUrl(".").toString())
     if (dir.indexOf("file://") === 0) dir = dir.substring(7)
     return dir.replace(/\/$/, "")
   }
@@ -150,7 +146,6 @@ Item {
     try { return JSON.parse(text) } catch (e) { return null }
   }
 
-  // Assign commands after the host injects pluginDir, or they resolve under /scripts.
   // proc.py ends the whole group at either limit and discards truncated output.
   readonly property var deadlines: ({ scan: 20, poll: 20, action: 330, lifecycle: 20, quick: 15 })
   readonly property var outputCaps: ({ scan: 67108864, poll: 16777216, action: 1048576, lifecycle: 1048576, quick: 4194304 })
@@ -793,11 +788,8 @@ Item {
     onTriggered: if (root.alive) root.refresh()
   }
 
-  // The watched set survives shell restarts; load it as soon as the host has
-  // injected the manifest. Component.onCompleted alone is too early — the
-  // same injection ordering that forces call-time Process commands.
+  // The watched set survives shell restarts; load it once Processes exist.
   function _loadWatched() { runScript(watchProcess, "metrics.sh", ["watched"]) }
-  onPluginDirChanged: _loadWatched()
   Component.onCompleted: _loadWatched()
 
   Component.onDestruction: {

@@ -11,6 +11,8 @@
 set -o pipefail
 set -f          # addresses contain '*'; never let the shell glob them
 MAX_PORTS=512   # past this the scan reports an error, not a growing document
+MAX_LISTENING=16384
+MAX_LISTENING_BYTES=4194304
 MAX_ESTABLISHED=16384
 MAX_ESTABLISHED_BYTES=4194304
 MAX_PROBES=64   # direct callers stay bounded; Service normally requests eight
@@ -150,7 +152,8 @@ argv_info() {
 }
 
 # ---- gather listening sockets -------------------------------------------------
-raw=$(ss -tlnpH 2>/dev/null) \
+raw=$(/usr/bin/python3 -I -S "$(dirname -- "${BASH_SOURCE[0]}")/lib/proc.py" \
+  run "$MAX_LISTENING_BYTES" 5 -- ss -tlnpH 2>/dev/null) \
   || { echo '{"version":1,"error":"could not query listening sockets","ports":[]}'; exit 0; }
 
 # Established peers per local port: one ss call covers every row. Unprivileged.
@@ -198,7 +201,11 @@ PAGE_KB=$(( $(getconf PAGESIZE 2>/dev/null || echo 4096) / 1024 ))
 read -r UPTIME_NOW _ < /proc/uptime
 
 declare -A PORT_ADDRS PORT_PID PORT_AMBIGUOUS
+listening_rows=0
 while read -r _state _rq _sq local_addr _peer procinfo; do
+  if (( ++listening_rows > MAX_LISTENING )); then
+    echo '{"version":1,"error":"listening socket snapshot exceeds row limit","ports":[]}'; exit 0
+  fi
   [[ -n $local_addr ]] || continue
   port="${local_addr##*:}"
   addr="${local_addr%:*}"
@@ -210,7 +217,9 @@ while read -r _state _rq _sq local_addr _peer procinfo; do
   addr="${addr#[}"; addr="${addr%]}"
   addr="${addr#::ffff:}"      # v4-mapped
 
-  PORT_ADDRS[$port]="${PORT_ADDRS[$port]}${PORT_ADDRS[$port]:+ }$addr"
+  if [[ " ${PORT_ADDRS[$port]} " != *" $addr "* ]]; then
+    PORT_ADDRS[$port]="${PORT_ADDRS[$port]}${PORT_ADDRS[$port]:+ }$addr"
+  fi
   row_attributed=0
   proc_rest="$procinfo"
   while [[ $proc_rest =~ pid=([0-9]+) ]]; do
