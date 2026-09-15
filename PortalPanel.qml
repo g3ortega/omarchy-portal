@@ -334,6 +334,36 @@ Panel {
   readonly property var viewData: buildViewData()
   readonly property var rows: viewData.rows
   readonly property var visibleEntries: viewData.entries
+  readonly property var emptyView: emptyPresentation()
+
+  function emptyPresentation() {
+    if (service && service.scanError) return { title: "Could not scan ports", body: "Refresh to try scanning again.", action: "Refresh" }
+    if (!service || !service.everScanned) {
+      return { title: "Looking for listening ports", body: "Your apps and services will appear here.", action: "" }
+    }
+    var q = query.trim().toLowerCase()
+    if (q) {
+      var message = "Try a port number, project, or framework."
+      if (q === "cake") message = "The cake is a lie."
+      if (q === "companion" || q === "companion cube") message = "Your companion cube has no open ports."
+      if (q === "glados") message = "Unsupervised testing is still testing."
+      return { title: "No matching ports", body: message, action: "Clear filter" }
+    }
+    var hidden = !showSystem && service.ports.some(function (entry) { return entry.category === "system" })
+    return {
+      title: hidden ? "No apps listening" : "No ports listening",
+      body: "Start a server in your terminal. Portal will find it automatically."
+        + (hidden ? "\nSystem ports are hidden. You can show them in Settings." : ""),
+      action: hidden ? "Settings" : ""
+    }
+  }
+
+  function activateEmptyAction() {
+    if (emptyView.action === "Clear filter") { query = ""; search.forceActiveFocus() }
+    else if (emptyView.action === "Settings") openSettings("")
+    else if (emptyView.action === "Refresh" && service) service.refresh()
+  }
+
   // A row that vanishes takes its expansion and any unanswered question with
   // it: an answer must never land on a port that stopped listening.
   onVisibleEntriesChanged: {
@@ -672,7 +702,9 @@ Panel {
         case "share":    root.activateShareChip(); return
         case "actions":  root.activateVerbAtCursor(); return
         case "detail":   return
-        default:         root.activateSelected()
+        default:
+          if (root.visibleEntries.length === 0) root.activateEmptyAction()
+          else root.activateSelected()
         }
       }
       onTabRequested: function (direction) { if (root.bar) root.bar.switchPanelFrom(root.hostWidget, direction) }
@@ -948,7 +980,10 @@ Panel {
             // blocked while this field has focus, so all of these are ours.
             Keys.onDownPressed: { keyCatcher.forceActiveFocus(); root.moveSelection(1) }
             Keys.onUpPressed: { keyCatcher.forceActiveFocus(); root.moveSelection(-1) }
-            Keys.onTabPressed: keyCatcher.forceActiveFocus()
+            Keys.onTabPressed: {
+              if (root.visibleEntries.length === 0 && emptyAction.visible) emptyAction.forceActiveFocus()
+              else keyCatcher.forceActiveFocus()
+            }
             Keys.onEscapePressed: {
               if (text.length > 0) text = ""
               else keyCatcher.forceActiveFocus()
@@ -1048,11 +1083,11 @@ Panel {
           }
 
           // ---- empty state ----------------------------------------------------
-          // Two rings, one in each of the panel's colors.
+          // Empty is a normal resting state, not an exposure warning.
           Column {
             id: emptyState
             width: parent.width
-            visible: root.service && root.service.everScanned && root.visibleEntries.length === 0
+            visible: root.visibleEntries.length === 0
             spacing: Style.spacing.md
             topPadding: Style.spacing.lg
             bottomPadding: Style.spacing.md
@@ -1064,7 +1099,7 @@ Panel {
               spacing: Style.spacing.xl
 
               Repeater {
-                model: [Color.accent, Color.urgent]
+                model: [Color.accent, Util.alpha(root.panelText, 0.45)]
 
                 delegate: Text {
                   required property color modelData
@@ -1083,18 +1118,35 @@ Panel {
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               textFormat: Text.PlainText
-              text: {
-                var q = root.query.trim().toLowerCase()
-                if (q === "cake") return "the cake is a lie."
-                if (q === "companion" || q === "companion cube") return "Your companion cube has no open ports."
-                if (q === "glados") return "Unsupervised testing is still testing."
-                if (q.length > 0) return "nothing matches \"" + root.query + "\""
-                return root.showSystem ? "nothing is listening." : "nothing of yours is listening. system ports are hidden."
-              }
-              color: Util.alpha(root.panelText, 0.5)
+              text: root.emptyView.title
+              color: root.panelText
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              textFormat: Text.PlainText
+              text: root.emptyView.body
+              color: Util.alpha(root.panelText, 0.65)
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
+            }
+
+            Button {
+              id: emptyAction
+              anchors.horizontalCenter: parent.horizontalCenter
+              visible: root.emptyView.action !== ""
+              text: root.emptyView.action
+              foreground: root.panelText
+              fontFamily: root.fontFamily
+              focusable: visible
+              bordered: true
+              onClicked: root.activateEmptyAction()
             }
           }
 
@@ -1478,7 +1530,9 @@ Panel {
             settings: "j/k move · h/l change · enter setup · esc back",
             detail:   "[ / ] range · " + (root.detailEntry && root.detailEntry.httpProbe ? "t HTTP/TCP · " : "")
               + "j/k port · w watch · esc back",
-            list:     "j/k move · enter actions · l charts · ? shortcuts"
+            list:     root.visibleEntries.length === 0
+              ? ", settings · R refresh · ? shortcuts"
+              : "j/k move · enter actions · l charts · ? shortcuts"
           })
           width: parent.width
           visible: root.mode !== "help"
