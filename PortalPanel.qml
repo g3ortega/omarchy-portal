@@ -981,7 +981,7 @@ Panel {
             Keys.onDownPressed: { keyCatcher.forceActiveFocus(); root.moveSelection(1) }
             Keys.onUpPressed: { keyCatcher.forceActiveFocus(); root.moveSelection(-1) }
             Keys.onTabPressed: {
-              if (emptyAction.visible) emptyAction.forceActiveFocus()
+              if (root.visibleEntries.length === 0 && emptyAction.visible) emptyAction.forceActiveFocus()
               else keyCatcher.forceActiveFocus()
             }
             Keys.onEscapePressed: {

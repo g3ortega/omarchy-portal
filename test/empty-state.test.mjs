@@ -46,4 +46,6 @@ context.query = "   "
 assert.equal(state().title, "No ports listening")
 context.query = " CAKE "
 assert.equal(state().body, "The cake is a lie.")
+assert.match(source, /root\.visibleEntries\.length === 0 && emptyAction\.visible/,
+  "search Tab gates empty-action focus on the rendered empty state")
 console.log("Empty-state loading, failure, filtering, hidden ports, and actions passed")
