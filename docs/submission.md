@@ -37,10 +37,12 @@ process handling, QML and scanning, and installation and network effects.
   snapshot and import checks protect file integrity, not against an unrestricted
   same-user process that can already change NSS trust directly. The guide and
   source comments now state that limitation.
-- The historical guide flags mutating IPC and distributed `AGENTS.md` files.
-  The inspected marketplace policy does not impose blanket prohibitions on
-  either. They remain disclosed manual-review considerations, not reasons to
-  silently remove the documented CLI or contributor workflow.
+- The September 14 review left mutating IPC and distributed `AGENTS.md` for
+  maintainer assessment. The [September 17 maintainer review](https://github.com/omacom/omarchy-plugin-marketplace/issues/6982#issuecomment-5716509340)
+  subsequently required removing automatically discovered agent-control files
+  from the distributed tree. Contributor documentation now lives in
+  `CONTRIBUTING.md`; the root `AGENTS.md` has been removed. This local correction
+  still requires publication and fresh exact-commit marketplace validation.
 
 An offline baseline used marketplace
 [4a2bc86](https://github.com/omacom/omarchy-plugin-marketplace/commit/4a2bc86c61cd267366308db19fec5e83109b3d12).
@@ -104,7 +106,7 @@ bash test/e2e-live.sh
 
 The live suite uses temporary listeners. It checks fixture identity before
 teardown. UI changes additionally require the installed proof described in
-[the contributor guide](../AGENTS.md#installed-plugin-proof).
+[the contributor guide](../CONTRIBUTING.md#installed-plugin-proof).
 
 ## Verification coverage
 
