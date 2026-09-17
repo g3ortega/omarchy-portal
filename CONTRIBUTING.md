@@ -1,4 +1,4 @@
-# omarchy-portal contributor rules
+# omarchy-portal contributor guide
 
 Portal is an Omarchy bar plugin for listening TCP ports. It provides Portless
 names, Cloudflared and ngrok sharing, charts, and process lifecycle actions.
@@ -24,7 +24,7 @@ The UI is QML. Helpers are Bash and Python.
 bash test/test.sh          # syntax, manifest, Node and shell suites, JSON contracts, qmllint, glyphs
 bash test/scripts.test.sh  # shell suite
 bash test/e2e-live.sh      # 19 listeners, plus Ruby and Deno when available
-dev/portal.sh status|parity|stage|sync|reload [--hard]|restart-shell
+dev/portal.sh status|parity|stage|reload [--hard]|restart-shell
 ```
 
 The live farm copies Node to `tmp/bin`. The copy has no file capabilities that
@@ -53,29 +53,23 @@ process owned by the user and killed the desktop session.
   `flock -n -x` attempt. An inherited lock descriptor holds the lifecycle lock
   for the tunnel lifetime and can hang uninstall.
 
-## Installed plugin proof
+## Local plugin verification
 
 The shell loads `~/.config/omarchy/plugins/g3ortega.portal`, not this worktree.
-Use the staged index as the only source for the installed proof.
+Verify the installed copy when changing QML or other runtime behavior.
 
-1. Finish one change and run its focused checks.
-2. Run `git add -A`, `dev/portal.sh stage`, and `dev/portal.sh parity`.
-   `stage` copies the index without pushing and stages the installed clone.
+1. Run the focused checks for the change.
+2. Stage only the intended files, then run `dev/portal.sh stage` and
+   `dev/portal.sh parity`. `stage` copies the staged files to the installed
+   clone.
 3. Run `dev/portal.sh restart-shell`. A panel needs a fresh QML engine.
-4. Drive the real path through the installed plugin. Put temporary IPC verbs
-   only in the installed clone. Capture screenshots with `grim` and inspect the
-   pixels. Check journal entries written after the restart cursor.
-5. Revert every probe. Restore tracked probe edits from the installed index,
-   remove probe files, run `stage` again, and restart the shell.
-6. Run `parity`, the final smoke path, and `git status` in both checkouts.
-7. Commit only after the proof passes. Run `dev/portal.sh sync` to push, fetch,
-   merge with `--ff-only`, and prove parity again.
+4. Drive the real path through the installed plugin. Keep temporary probes in
+   the installed clone, capture screenshots with `grim`, inspect the pixels,
+   and check journal entries written after the restart cursor.
+5. Remove every probe, stage again, restart the shell, and run `parity` plus
+   the final smoke path. The installed clone must end clean.
 
-Do not push a UI or behavior change before this proof. The installed clone must
-end clean. It must contain no probe file.
-
-`parity` excludes `.git`, `dev`, `tmp`, and `__pycache__`. `sync` requires
-parity before push and after merge. It refuses installed-only unstaged files.
+`parity` excludes `.git`, `dev`, `tmp`, and `__pycache__`.
 
 ## QML iteration
 
