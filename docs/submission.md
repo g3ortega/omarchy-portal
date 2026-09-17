@@ -106,7 +106,7 @@ bash test/e2e-live.sh
 
 The live suite uses temporary listeners. It checks fixture identity before
 teardown. UI changes additionally require the installed proof described in
-[the contributor guide](../CONTRIBUTING.md#installed-plugin-proof).
+[the contributor guide](../CONTRIBUTING.md#local-plugin-verification).
 
 ## Verification coverage
 
